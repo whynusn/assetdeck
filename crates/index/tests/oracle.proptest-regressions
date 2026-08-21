@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 19244e93bea9c1a69b70fc8f510b28785c8a76a477b7a6504e56d4beeb1d77e8 # shrinks to assets = [Asset { id: AssetId(0), name: "a", category: None, tags: [TagId(3), TagId(3)], created_at: 0 }]

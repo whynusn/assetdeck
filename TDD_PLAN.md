@@ -62,17 +62,19 @@ tools/
 - [x] `deny_check_bans_vector_and_ui_media_deps` —— 守卫测试通过（`deny_toml_bans_required_vector_entries` + `ui_cargo_toml_has_no_decode_layer_deps`）
 - [x] 附加消险：Slint 1.17 在 windows-gnu 编译链接通过；窗口运行时渲染验证（空闲 WorkingSet 77.8MB < 100MB 预算）
 
-### M1 查询模型与分面索引（1.5 周）— 纯 TDD 主战场
+### M1 查询模型与分面索引（1.5 周）— 纯 TDD 主战场 🔄 进行中
 domain + index crate：
-- [ ] `filter_by_single_category_returns_matching_ids`
-- [ ] `intersect_two_facets_returns_conjunction`
-- [ ] `negated_filter_excludes_ids`
-- [ ] `facet_counts_match_bruteforce_oracle`（proptest 对拍：随机资产集 vs HashSet 暴力实现，100 组随机用例）
-- [ ] `facet_count_cache_invalidates_on_tag_mutation`
-- [ ] `sorter_recency_then_name_is_stable_multisort`
-- [ ] `sorter_decoupled_from_filter_pipeline_order`
+- [x] `filter_by_single_category_returns_matching_ids`
+- [x] `intersect_two_facets_returns_conjunction`
+- [x] `negated_filter_excludes_ids`
+- [x] `facet_counts_match_bruteforce_oracle`（proptest 对拍；已抓到「单资产重复标签」领域不变量违规并修复）
+- [x] `facet_count_cache_invalidates_on_tag_mutation`
+- [x] `sorter_recency_then_name_is_stable_multisort`
+- [x] `sorter_decoupled_from_filter_pipeline_order`
 - [ ] `empty_filter_returns_all_within_budget_1ms_at_1m`（criterion：100 万 ID 位图交集 <1ms，验收 D4）
-- [ ] `smart_folder_serde_roundtrip_preserves_filter_sorter`
+- [x] `smart_folder_serde_roundtrip_preserves_filter_sorter`
+
+> 实现备注：FacetIndex 含 assets HashMap + by_category/by_tag 位图 + 全集位图 + tag 计数缓存（变更即失效）；insert 为 upsert 语义。
 
 ### M2 存储层（1 周）
 store crate：
