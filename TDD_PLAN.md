@@ -71,7 +71,7 @@ domain + index crate：
 - [x] `facet_count_cache_invalidates_on_tag_mutation`
 - [x] `sorter_recency_then_name_is_stable_multisort`
 - [x] `sorter_decoupled_from_filter_pipeline_order`
-- [ ] `empty_filter_returns_all_within_budget_1ms_at_1m`（criterion：100 万 ID 位图交集 <1ms，验收 D4）
+- [x] `empty_filter_returns_all_within_budget_1ms_at_1m`（✅ criterion 基线 @1M：交集 126µs / 单面 3.2µs / 全集 11.8µs，debug+release 双档断言通过）
 - [x] `smart_folder_serde_roundtrip_preserves_filter_sorter`
 
 > 实现备注：FacetIndex 含 assets HashMap + by_category/by_tag 位图 + 全集位图 + tag 计数缓存（变更即失效）；insert 为 upsert 语义。
