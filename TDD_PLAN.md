@@ -117,15 +117,17 @@ ui-viewmodels + app-ui：
 
 > 实现备注：masonry 固定列数布局（最短列放置）；VM 全量预计算 Rect 表（O(1) 跳转，@1M≈32MB 待 M7 实测）；Slint 1.17 踩坑（MouseArea 移除/TouchArea double-clicked/name := 语法/property 可见性）已沉淀 app-ui spec。
 
-### M6 粘贴管线（1.5 周）
+### M6 粘贴管线（1.5 周）✅ 已完成 2026-08-22
 pipeline + platform crate：
-- [ ] `format_negotiation_table_image_video_text`（表驱动：资产类型×目标 profile→CF_HDROP/PNG/DIB/text）
-- [ ] `paste_writes_clipboard_before_focus_switch`
-- [ ] `focus_check_failure_degrades_to_copy_only`（mock WindowProvider 返回死窗口，红线 D8）
-- [ ] `auto_send_flag_defaults_off`（配置默认值快照测试，红线）
-- [ ] `auto_send_off_never_synththesizes_enter`（管线集成测：关开关时注入序列不含 VK_RETURN）
-- [ ] `previous_foreground_window_recorded_on_panel_invoke`
-- [ ] `real_sendinput_into_notepad`（`#[ignore]` 标注，本地手动跑；CI 不跑真实注入）
+- [x] `format_negotiation_table_image_video_text`（表驱动 match；新增 AssetKind::Other 使「未知组合→None」可测）
+- [x] `paste_writes_clipboard_before_focus_switch`（Op 日志下标精确断言）
+- [x] `focus_check_failure_degrades_to_copy_only`（mock 死窗口，红线 D8）
+- [x] `auto_send_flag_defaults_off`（快照全等 `{"auto_send":false}`，红线）
+- [x] `auto_send_off_never_synththesizes_enter`（off 组零 0x0D / on 对照组含，注入序列 [VK_CONTROL,'V','V|KEY_UP',VK_CONTROL|KEY_UP]）
+- [x] `previous_foreground_window_recorded_on_panel_invoke`
+- [x] `real_sendinput_into_notepad`（`#[ignore]` 就位，本地手动跑）
+
+> 实现备注：VK 相位协议 KEY_UP=0x8000 归 platform::lib 契约所有（低 15 位 VK 无碰撞）；win32 unsafe 审计无泄漏/double-free（Set 成功后所有权移交系统）；windows-sys 0.59 API 形态踩坑已沉淀 platform spec。
 
 ### M7 内存回归与闭环验收（1 周，行动项 A2/A3 收口）
 tools/bench-harness：

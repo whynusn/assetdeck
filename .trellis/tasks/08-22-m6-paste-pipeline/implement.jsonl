@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/pipeline/backend/index.md", "reason": "管线总纲与红线入口"}
+{"file": ".trellis/spec/pipeline/backend/quality-guidelines.md", "reason": "五条红线与守卫测试映射"}
+{"file": ".trellis/spec/pipeline/backend/error-handling.md", "reason": "降级优先于报错"}
+{"file": ".trellis/spec/platform/backend/directory-structure.md", "reason": "trait 与 win32 分模块"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "trait 零依赖红线/D12 平台事实"}

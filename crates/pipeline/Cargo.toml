@@ -5,3 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 架构边界方向（spec）：pipeline 依赖 domain + platform(trait)，不依赖 win32 实现。
+domain = { path = "../domain" }
+platform = { path = "../platform" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

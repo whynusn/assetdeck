@@ -3597,6 +3597,12 @@ checksum = "b330c9d1b92dfe68442ca20b009c717d5f0b1e3cf4965e62f704c3c6e95a1305"
 [[package]]
 name = "pipeline"
 version = "0.1.0"
+dependencies = [
+ "domain",
+ "platform",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "piper"
@@ -3624,6 +3630,9 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "platform"
 version = "0.1.0"
+dependencies = [
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "plotters"

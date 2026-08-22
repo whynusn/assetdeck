@@ -1,6 +1,6 @@
 # Backend Guidelines — platform
 
-> 平台抽象 trait + Win32 实现：剪贴板 / SendInput / 前台窗口。当前为占位，M6 实施。
+> 平台抽象 trait + Win32 实现：剪贴板 / SendInput / 前台窗口。M6 已完成(2026-08-22)。
 
 ---
 
