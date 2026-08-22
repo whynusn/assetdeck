@@ -76,13 +76,13 @@ domain + index crate：
 
 > 实现备注：FacetIndex 含 assets HashMap + by_category/by_tag 位图 + 全集位图 + tag 计数缓存（变更即失效）；insert 为 upsert 语义。
 
-### M2 存储层（1 周）
+### M2 存储层（1 周）✅ 已完成 2026-08-22
 store crate：
-- [ ] `migration_v1_creates_assets_fts_tags_tables`
-- [ ] `fts_search_chinese_filename_hits_trigram`（⚠️ 关键决策：FTS5 默认 unicode61 不切中文，**必须用 trigram tokenizer**——此测试先行锁定该决策）
-- [ ] `metadata_roundtrip_survives_reopen`
-- [ ] `schema_version_rejects_newer_db_file`
-- [ ] `thumbnail_cache_path_stable_per_asset_id`
+- [x] `migration_v1_creates_assets_fts_tags_tables`
+- [x] `fts_search_chinese_filename_hits_trigram`（⚠️ 关键决策已锁定：trigram tokenizer；**查询须为连续子串且 ≥3 字符**，2 字中文查询返回空；用户查询统一引号短语包裹——踩坑已沉淀至 `.trellis/spec/store/backend/database-guidelines.md`）
+- [x] `metadata_roundtrip_survives_reopen`
+- [x] `schema_version_rejects_newer_db_file`
+- [x] `thumbnail_cache_path_stable_per_asset_id`
 
 ### M3 库管理与导入管线（1.5 周）
 library + phash crate：
