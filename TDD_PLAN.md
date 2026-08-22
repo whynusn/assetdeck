@@ -62,7 +62,7 @@ tools/
 - [x] `deny_check_bans_vector_and_ui_media_deps` —— 守卫测试通过（`deny_toml_bans_required_vector_entries` + `ui_cargo_toml_has_no_decode_layer_deps`）
 - [x] 附加消险：Slint 1.17 在 windows-gnu 编译链接通过；窗口运行时渲染验证（空闲 WorkingSet 77.8MB < 100MB 预算）
 
-### M1 查询模型与分面索引（1.5 周）— 纯 TDD 主战场 🔄 进行中
+### M1 查询模型与分面索引（1.5 周）✅ 已完成 2026-08-22
 domain + index crate：
 - [x] `filter_by_single_category_returns_matching_ids`
 - [x] `intersect_two_facets_returns_conjunction`
@@ -94,13 +94,16 @@ library + phash crate：
 - [x] 手动分类 / 未分类→「待分类」收件箱（D5）
 - [x] 视频导入派发 media job（D6 前半）；时长/缩略图实装随 M4 worker（断言 UI 进程路径无解码调用）
 
-### M4 Worker 进程池（1 周）
+### M4 Worker 进程池（1 周）✅ 已完成 2026-08-22
 worker crate：
-- [ ] `job_result_roundtrips_over_ipc_protocol`
-- [ ] `worker_crash_supervisor_respawns_within_budget`
-- [ ] `pool_size_capped_at_cpu_count`
-- [ ] `idle_priority_set_on_worker_process`（Windows: PROCESS_MODE_BACKGROUND_BEGIN 断言）
-- [ ] `poison_asset_fails_job_not_pool`（坏文件隔离）
+- [x] `job_result_roundtrips_over_ipc_protocol`
+- [x] `worker_crash_supervisor_respawns_within_budget`
+- [x] `pool_size_capped_at_cpu_count`
+- [x] `idle_priority_set_on_worker_process`（⚠️ M4 裁决：BACKGROUND_BEGIN 仅限当前进程自设且有 32MiB 工作集封顶副作用 → 宿主设 IDLE_PRIORITY_CLASS + worker 入口自设 THREAD_MODE_BACKGROUND_BEGIN；GetPriorityClass 实测断言。已沉淀 worker spec）
+- [x] `poison_asset_fails_job_not_pool`（坏文件隔离）
+- [x] 附加：`restart_budget_exhaustion_degrades_pool`（重启超限 → degraded，submit 直接 Failed）
+
+> 实现备注：stdio + NDJSON 协议（信封 `{"v":1,"req"/"res":…}`）；任务 Echo/ThumbnailPng；替补上限 3 次/池；视频抽帧实装因解码栈选型未决（ffmpeg sidecar vs 纯 Rust）另立任务，见任务 prd 范围外。
 
 ### M5 UI 壳与虚拟化网格（2–3 周，最大风险项）
 ui-viewmodels + app-ui：

@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/worker/backend/index.md", "reason": "worker 包总纲与红线入口"}
+{"file": ".trellis/spec/worker/backend/directory-structure.md", "reason": "进程模型/IPC 协议/M4 测试清单"}
+{"file": ".trellis/spec/worker/backend/quality-guidelines.md", "reason": "解码依赖只进本 crate 等红线"}
+{"file": ".trellis/spec/worker/backend/error-handling.md", "reason": "单 job 隔离/重启上限/degraded"}
+{"file": ".trellis/spec/media/backend/directory-structure.md", "reason": "MediaJob 迁移到 media crate 的计划"}

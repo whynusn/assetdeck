@@ -4,4 +4,16 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# D11 红线：解码实现依赖（image 等）只允许出现在本 crate。
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "decode-worker"
+path = "src/bin/decode-worker.rs"
