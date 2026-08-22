@@ -1,8 +1,10 @@
 //! ViewModel 层：桥接 UI 与核心 crates，纯 Rust 可全量单测（禁 slint 依赖，TDD 第一原则落点）。
 
+pub mod catalog_loader;
 pub mod grid_vm;
 pub mod layout;
 
+pub use catalog_loader::{load_library_catalog, CatalogError};
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent};
 pub use layout::{masonry_layout, Rect};
 

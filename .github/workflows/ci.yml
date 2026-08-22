@@ -3,9 +3,13 @@ name: ci
 on:
   push:
   pull_request:
+  # 每日定时跑 mem-regression（spec directory-structure：每日 + PR 触发）
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   lint-and-test:
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     # 本地开发用 windows-gnu 工具链，CI 用 runner 自带 MSVC——源码级兼容，产物不交叉使用
     steps:
@@ -19,14 +23,36 @@ jobs:
       - run: cargo test --workspace
 
   deny:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check bans licenses
 
+  # M7 内存回归（DECISIONS.md 行动项 A3）：预算超标即红，趋势产物存 artifact。
+  # release 档出正式数字（D10 合同以发布形态为准）。
   mem-regression:
-    if: false
     runs-on: windows-latest
     steps:
-      - run: echo "M7 接入 bench-harness 后启用（DECISIONS.md 行动项 A3）"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build (release)
+        run: cargo build --workspace --release
+      # harness 自身红灯测试（生成器行数/闭环计时）；ignored 的 RSS 断言与下方 CLI 双保险
+      - name: bench-harness ignored specs
+        run: cargo test -p bench-harness --release -- --ignored --nocapture
+      - name: generate synthetic library
+        run: cargo run -p bench-harness --release -- generate --rows 100000 --out ${{ runner.temp }}/synth-lib
+      - name: idle RSS <= 100MB (D10)
+        run: cargo run -p bench-harness --release -- measure-rss --exe target/release/asset-manager.exe --library ${{ runner.temp }}/synth-lib --mode idle --budget-mb 100 --json-out ${{ runner.temp }}/trend-idle.json
+      - name: browse 100k RSS <= 250MB (D10)
+        run: cargo run -p bench-harness --release -- measure-rss --exe target/release/asset-manager.exe --library ${{ runner.temp }}/synth-lib --mode browse --budget-mb 250 --json-out ${{ runner.temp }}/trend-browse.json
+      - name: upload trend artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mem-regression-trend
+          path: ${{ runner.temp }}/trend-*.json
+          if-no-files-found: ignore

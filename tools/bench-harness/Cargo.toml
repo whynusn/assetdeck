@@ -4,8 +4,39 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# lib+bin 拆分：集成测试须 import 生成器/采样器/闭环探针（bin-only crate 无法被 tests 引用）。
+# design.md 只画了 main.rs——此处为可测试性补 lib 目标，偏离已记录。
+[lib]
+name = "bench_harness"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bench-harness"
 path = "src/main.rs"
 
 [dependencies]
+store = { path = "../../crates/store" }
+domain = { path = "../../crates/domain" }
+ui-viewmodels = { path = "../../crates/ui-viewmodels" }
+pipeline = { path = "../../crates/pipeline" }
+platform = { path = "../../crates/platform" }
+# 仅 PNG 编码（生成占位缩略图）；不解码用户资产——UI 不解码红线指 UI 进程路径，
+# 工具 crate 豁免但仅限编码方向（PRD 约束）。
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    # 采样器：OpenProcess(Threading) + GetProcessMemoryInfo(ProcessStatus)
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    # 闭环探针读回校验：OpenClipboard/GetClipboardData(DataExchange)、GlobalLock(Memory)、
+    # CF_UNICODETEXT(Ole)——platform crate 未暴露剪贴板读 API（design 允许测试内直调）
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+] }
+
+[dev-dependencies]
+tempfile = "3"

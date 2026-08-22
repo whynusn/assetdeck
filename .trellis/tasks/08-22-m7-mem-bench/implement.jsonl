@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/bench-harness/backend/index.md", "reason": "harness 总纲(A2/A3 收口)"}
+{"file": ".trellis/spec/bench-harness/backend/directory-structure.md", "reason": "生成器/RSS 采样器/CI 接入规划"}
+{"file": ".trellis/spec/bench-harness/backend/quality-guidelines.md", "reason": "确定性/诚实测量/预算即验收线"}
+{"file": ".trellis/spec/bench-harness/backend/error-handling.md", "reason": "测量失败=红"}
+{"file": ".trellis/spec/app-ui/backend/directory-structure.md", "reason": "main.rs 薄壳约束与工具链"}

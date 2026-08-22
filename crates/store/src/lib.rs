@@ -151,8 +151,36 @@ impl Store {
         }
     }
 
+    /// 批量 upsert：N 行共享一次事务提交。
+    ///
+    /// 行级语义与 [`Store::upsert_asset`] 完全一致（upsert + tags 全量重写，
+    /// FTS 触发器照常生效）；唯一差异是事务边界——逐行调用在 Windows 上
+    /// 每行付出一次 fsync（实测 ~4ms/行），10 万行合成库生成因此从分钟级
+    /// 回到秒级。首个消费方：bench-harness 合成生成器（M7，行动项 A2/A3）；
+    /// 未来批量导入路径可复用。空切片为合法 no-op。
+    pub fn upsert_assets(&self, metas: &[AssetMeta]) -> Result<()> {
+        if metas.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = metas
+            .iter()
+            .try_for_each(|meta| self.write_asset(meta))
+            .and_then(|_| self.conn.execute_batch("COMMIT").map_err(StoreError::from));
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     fn write_asset(&self, meta: &AssetMeta) -> Result<()> {
-        self.conn.execute(
+        // prepare_cached：批量路径（upsert_assets）逐行调用本方法，
+        // 每行重新 parse SQL 占总耗时大头（实测 100k 行 ~11s → 见 bench-harness 探针）。
+        // 语句缓存按 SQL 文本键控，语义不变。
+        let n = self.conn.prepare_cached(
             "INSERT INTO assets (uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(uuid) DO UPDATE SET
@@ -163,24 +191,25 @@ impl Store {
                created_at = excluded.created_at,
                imported_at = excluded.imported_at,
                phash = excluded.phash",
-            params![
-                meta.uuid,
-                meta.file_name,
-                meta.rel_path,
-                meta.category,
-                meta.size_bytes,
-                meta.created_at,
-                meta.imported_at,
-                meta.phash
-            ],
-        )?;
+        )?
+        .execute(params![
+            meta.uuid,
+            meta.file_name,
+            meta.rel_path,
+            meta.category,
+            meta.size_bytes,
+            meta.created_at,
+            meta.imported_at,
+            meta.phash
+        ])?;
+        debug_assert_eq!(n, 1);
         self.conn
-            .execute("DELETE FROM tags WHERE asset_uuid = ?1", params![meta.uuid])?;
+            .prepare_cached("DELETE FROM tags WHERE asset_uuid = ?1")?
+            .execute(params![meta.uuid])?;
         for tag in &meta.tags {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO tags (asset_uuid, tag) VALUES (?1, ?2)",
-                params![meta.uuid, tag],
-            )?;
+            self.conn
+                .prepare_cached("INSERT OR IGNORE INTO tags (asset_uuid, tag) VALUES (?1, ?2)")?
+                .execute(params![meta.uuid, tag])?;
         }
         Ok(())
     }
@@ -268,6 +297,45 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// 按 uuid 升序遍历全库资产元数据，逐行回调（含 tags）。
+    ///
+    /// 不物化全量 Vector——调用方边遍历边装配下游结构，峰值驻留只多一行，
+    /// 契合 D3/D4「禁止全量载入内存」红线。行序 = uuid 字典序（索引扫描，
+    /// 确定性）；tags 排序语义与 [`Store::get_asset`] 一致。
+    /// 首个消费方：ui-viewmodels 库目录装载（M7 --bench 内存守卫路径）。
+    pub fn for_each_asset<F>(&self, mut visit: F) -> Result<()>
+    where
+        F: FnMut(AssetMeta),
+    {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash
+             FROM assets ORDER BY uuid",
+        )?;
+        let mut tag_stmt = self
+            .conn
+            .prepare_cached("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let mut meta = AssetMeta {
+                uuid: row.get(0)?,
+                file_name: row.get(1)?,
+                rel_path: row.get(2)?,
+                category: row.get(3)?,
+                tags: vec![],
+                size_bytes: row.get(4)?,
+                created_at: row.get(5)?,
+                imported_at: row.get(6)?,
+                phash: row.get(7)?,
+            };
+            let tag_rows = tag_stmt.query_map(params![meta.uuid], |row| row.get::<_, String>(0))?;
+            for tag in tag_rows {
+                meta.tags.push(tag?);
+            }
+            visit(meta);
+        }
+        Ok(())
     }
 
     /// 缩略图缓存路径：两级分片，纯函数确定性生成。

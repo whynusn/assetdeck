@@ -393,6 +393,17 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "bench-harness"
 version = "0.1.0"
+dependencies = [
+ "domain",
+ "image",
+ "pipeline",
+ "platform",
+ "serde_json",
+ "store",
+ "tempfile",
+ "ui-viewmodels",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "bincode"
@@ -5153,6 +5164,7 @@ dependencies = [
  "domain",
  "index",
  "lru",
+ "store",
 ]
 
 [[package]]

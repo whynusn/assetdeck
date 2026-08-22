@@ -7,6 +7,9 @@ publish.workspace = true
 [dependencies]
 domain = { path = "../domain" }
 index = { path = "../index" }
+# 库目录装载（catalog_loader）：spec 规划依赖之一（directory-structure.md）；
+# app-ui 白名单只有本 crate + slint，Store 门面访问收拢在此层。
+store = { path = "../store" }
 lru = "0.12"
 
 [dev-dependencies]

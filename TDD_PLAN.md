@@ -129,13 +129,15 @@ pipeline + platform crate：
 
 > 实现备注：VK 相位协议 KEY_UP=0x8000 归 platform::lib 契约所有（低 15 位 VK 无碰撞）；win32 unsafe 审计无泄漏/double-free（Set 成功后所有权移交系统）；windows-sys 0.59 API 形态踩坑已沉淀 platform spec。
 
-### M7 内存回归与闭环验收（1 周，行动项 A2/A3 收口）
+### M7 内存回归与闭环验收（1 周，行动项 A2/A3 收口）✅ 已完成 2026-08-22
 tools/bench-harness：
-- [ ] `synthetic_library_generator_produces_100k_metadata_rows`
-- [ ] `idle_rss_under_100mb`（子进程启动 app，静置采样 WorkingSet，红线 D10）
-- [ ] `browse_100k_rss_under_250mb`（驱动浏览路径后采样）
-- [ ] `closed_loop_doubleclick_to_input_box_under_500ms`（端到端计时，行动项 A2 的自动化部分）
-- [ ] CI 新增 `mem-regression` job，预算超标即红；趋势产物存 artifact
+- [x] `synthetic_library_generator_produces_100k_metadata_rows`（确定性：uuid 字符串方案/固定 created_at；批量事务秒级）
+- [x] `idle_rss_under_100mb`（release 实测中位 62.8MB，余量 40%；debug 档硬断言同样通过）
+- [x] `browse_100k_rss_under_250mb`（release 实测中位 29.9MB，余量 89%；debug 档仅打印不断言——分配行为失真）
+- [x] `closed_loop_doubleclick_to_input_box_under_500ms`（自动化部分：VM.double_click→negotiate→真实 Win32 剪贴板写+CF_UNICODETEXT 读回逐字比对→焦点死降级 CopiedOnly；真实注入由 real_sendinput_into_notepad 人工补全）
+- [x] CI 新增 `mem-regression` job，预算超标即红；趋势产物存 artifact（含每日 cron）
+
+> 实现备注：采样器防御了 GetProcessMemoryInfo 对已退出进程返回恒定残留值(32KB)的陷阱（叠加 GetExitCodeProcess 判活）；idle 提前退出=测量失败=红；store 新增 upsert_assets 批量与 for_each_asset 流式枚举（uuid 升序，禁全量物化）；ui-viewmodels 新增 catalog_loader(uuid→顺序 AssetId 装配)。踩坑已沉淀 bench-harness spec。
 
 ## 五、性能与内存回归方案（D10 落地）
 

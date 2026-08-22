@@ -98,6 +98,11 @@ fn sync_window(ui: &AppWindow, tiles_model: &VecModel<TileData>, vm: &mut Librar
 }
 
 fn main() {
+    // --bench 内存守卫模式：不开窗、不进 Slint 事件循环（design 契约）。
+    if let Some(bench) = parse_bench_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(run_bench(&bench));
+    }
+
     let app = AppWindow::new().expect("AppWindow 创建失败");
 
     // VM 装配：合成演示数据；缩略图 provider 待 M7 接 worker 池（现为色块占位）。
@@ -163,4 +168,91 @@ fn main() {
 
     sync_window(&app, &tiles_model, &mut vm.borrow_mut());
     app.run().expect("Slint 事件循环异常退出");
+}
+
+// ---------------------------------------------------------------------------
+// --bench 内存守卫模式（M7，design.md 契约）
+// ---------------------------------------------------------------------------
+
+/// --bench 默认静置时长（供父进程采样）。
+const BENCH_DEFAULT_HOLD_MS: u64 = 8_000;
+/// 脚本化浏览步距与窗口条数（dispatch 契约：每 5000 项跳一窗 ensure_window(first,40)）。
+const BENCH_BROWSE_STEP: usize = 5_000;
+const BENCH_WINDOW_COUNT: usize = 40;
+
+struct BenchArgs {
+    root: String,
+    hold_ms: u64,
+}
+
+fn parse_bench_args(args: &[String]) -> Option<BenchArgs> {
+    let pos = args.iter().position(|a| a == "--bench")?;
+    // 缺值不得静默回落 GUI（跨层守则：错误绝不静默切换模式）
+    let root = match args.get(pos + 1) {
+        Some(v) if !v.is_empty() && !v.starts_with("--") => v.clone(),
+        _ => {
+            eprintln!("--bench 需要 <library-root> 参数");
+            std::process::exit(64);
+        }
+    };
+    let hold_ms = args
+        .iter()
+        .position(|a| a == "--bench-hold-ms")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(BENCH_DEFAULT_HOLD_MS);
+    Some(BenchArgs { root, hold_ms })
+}
+
+/// 浏览脚本 + 静置采样窗口。返回进程退出码。
+///
+/// 数据来源（design.md 契约）：`Store::open(root/meta.db) → 读全量 AssetMeta →
+/// 建 FacetIndex(uuid→顺序 AssetId 映射)`。app-ui 白名单只有 ui-viewmodels +
+/// slint，故 Store 门面访问收拢在 [`ui_viewmodels::load_library_catalog`]。
+/// 不创建窗口——内存守卫测的是 VM 数字层（位图 + 全量 Rect 表），诚实标注
+/// 「不含真实渲染器驻留」；真实 GUI 空闲由 harness idle 模式覆盖。
+fn run_bench(args: &BenchArgs) -> i32 {
+    use std::io::Write;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    let root = Path::new(&args.root);
+    let index = match ui_viewmodels::load_library_catalog(root) {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("--bench: 库目录装载失败: {e}");
+            return 3;
+        }
+    };
+
+    let mut vm = LibraryGridVm::new(index, Sorter::default(), 256);
+    vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
+
+    // 脚本化浏览：first 从 0 步进 BENCH_BROWSE_STEP 跳一窗，至尾再回首
+    let total = vm.total();
+    let started = Instant::now();
+    if total > 0 {
+        let mut first = 0usize;
+        while first < total {
+            vm.ensure_window(first, BENCH_WINDOW_COUNT);
+            first += BENCH_BROWSE_STEP;
+        }
+        vm.ensure_window(total.saturating_sub(BENCH_WINDOW_COUNT), BENCH_WINDOW_COUNT); // 至尾
+        vm.ensure_window(0, BENCH_WINDOW_COUNT); // 回首
+    }
+    let browse_ms = started.elapsed().as_millis();
+
+    // hold 静置：父进程在此窗口内采 WorkingSet
+    std::thread::sleep(Duration::from_millis(args.hold_ms));
+
+    // 单行 JSON 结果（harness 只看退出码，不解析内部状态——error-handling spec）
+    let line = format!(
+        "{{\"browse_done\":true,\"total\":{total},\"browse_ms\":{browse_ms},\
+         \"hold_ms\":{},\"resident_thumbs\":{}}}",
+        args.hold_ms,
+        vm.visible_cache_ids().len()
+    );
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+    0
 }
