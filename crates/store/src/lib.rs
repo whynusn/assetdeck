@@ -248,6 +248,28 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// 全库资产计数（去重判定与测试用）。
+    pub fn all_assets_count(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .map_err(StoreError::from)
+    }
+
+    /// 全库 pHash 清单（uuid, hash 大端字节）。导入去重在 library 层比对。
+    pub fn all_phashes(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT uuid, phash FROM assets WHERE phash IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 缩略图缓存路径：两级分片，纯函数确定性生成。
     pub fn thumbnail_cache_path(uuid: &str, ext: &str) -> PathBuf {
         let lower = uuid.to_lowercase();

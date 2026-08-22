@@ -2644,6 +2644,13 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "library"
 version = "0.1.0"
+dependencies = [
+ "image",
+ "phash",
+ "store",
+ "tempfile",
+ "uuid",
+]
 
 [[package]]
 name = "libredox"
@@ -3513,6 +3520,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "phash"
 version = "0.1.0"
+dependencies = [
+ "image",
+]
 
 [[package]]
 name = "pico-args"
