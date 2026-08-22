@@ -1,51 +1,29 @@
-# Quality Guidelines
+# Quality Guidelines — phash
 
-> Code quality standards for backend development.
-
----
-
-## Overview
-
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
+> pHash crate 的质量红线与踩坑记录。
 
 ---
 
-## Forbidden Patterns
+## 测试图像选择（关键教训）
 
-<!-- Patterns that should never be used and why -->
+- **禁止用退化合成图测 pHash**（纯色、单频棋盘、纯线性渐变）：
+  - 纯色图：AC 系数全为 ±1e-13 浮点噪声，中位数阈值比较变成抛硬币；
+  - 高频棋盘：基频落在截取的 8×8 网格之外，低频区同样是噪声；
+  - 纯渐变：高阶系数趋零 + 端点 clamp 会引入非线性失真。
+- **必须用结构化图案**：多频叠加正弦（幅值分离）、横/竖条纹（能量分别落 v/u 轴）。判定标准：`c00 == pxsum`（直流守恒）是 DCT 正确性的快速探针。
+- 曾出现「任意输入 → 同一哈希」的回归，根因是重构提取辅助函数时**丢失 `.cos()`**——被 `unrelated_patterns_exceed_threshold` 测试当场网住。教训：数学重构必须保留可观测不变量测试（如 c00==pxsum 可做成断言）。
 
-(To be filled by the team)
+## 阈值联动关系（勿单独改动）
 
----
+| 常量 | 值 | 联动 |
+|---|---|---|
+| `library::DEDUP_THRESHOLD` | 汉明 ≤8 判重 | 上游 |
+| phash 无关图案测试下界 | ≥16 | = 去重阈值的 2× 安全边际 |
+| 微扰测试上界 | ≤10 | 结构化图案实测为 0（严格平移不变） |
 
-## Required Patterns
+调整任一值前先跑全量 phash+library 测试。
 
-<!-- Patterns that must always be used -->
+## 实现约定
 
-(To be filled by the team)
-
----
-
-## Testing Requirements
-
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
-
----
-
-## Code Review Checklist
-
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+- DCT-II 直接实现（naive O(N³)，N=32 足够快），不引第三方哈希库。
+- 输出 u64 大端字节存 store 的 `phash BLOB` 列；比较时 `u64::from_be_bytes` 还原。

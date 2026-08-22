@@ -84,15 +84,15 @@ store crate：
 - [x] `schema_version_rejects_newer_db_file`
 - [x] `thumbnail_cache_path_stable_per_asset_id`
 
-### M3 库管理与导入管线（1.5 周）
+### M3 库管理与导入管线（1.5 周）✅ 已完成 2026-08-22
 library + phash crate：
-- [ ] `import_copies_file_into_library_layout`
-- [ ] `duplicate_phash_rejected_no_second_copy`（红线：去重必做）
-- [ ] `phash_hamming_distance_under_threshold_matches_golden`（确定性渐变图 golden 夹具）
-- [ ] `async_copy_state_machine_preview_available_before_copy_done`（D7 连带义务）
-- [ ] `copy_queue_respects_backpressure_cap`
-- [ ] `manual_category_assigned_on_import` / `uncategorized_goes_to_inbox`（D5）
-- [ ] `video_import_extracts_duration_and_thumbnail_job_dispatched_to_worker_only`（断言 UI 进程路径无解码调用）
+- [x] `import_copies_file_into_library_layout`
+- [x] `duplicate_phash_rejected_no_second_copy`（红线：pHash 先算后拷，重复零磁盘代价）
+- [x] pHash 质量属性四测（相同=0 / 微扰≤10 实测0 / 无关≥16 / 已知值）；golden 夹具改为**程序化结构化图案**——纯色/棋盘属退化图，pHash 会落在浮点噪声区（教训已沉淀 spec）
+- [x] `async_copy_metadata_visible_before_copy_done`（D7 体感瞬时入库；暂停钩子保证确定性）
+- [x] `copy_queue_respects_backpressure_cap`
+- [x] 手动分类 / 未分类→「待分类」收件箱（D5）
+- [x] 视频导入派发 media job（D6 前半）；时长/缩略图实装随 M4 worker（断言 UI 进程路径无解码调用）
 
 ### M4 Worker 进程池（1 周）
 worker crate：
