@@ -1,6 +1,6 @@
 # Backend Guidelines — ui-viewmodels
 
-> ViewModel 层：桥接 UI 与核心 crates，纯 Rust 可全量单测。当前为占位，M5 实施（关键路径最大风险项）。
+> ViewModel 层：桥接 UI 与核心 crates，纯 Rust 可全量单测。M5 已完成(2026-08-22)。
 
 ---
 
@@ -24,5 +24,8 @@
 
 ## 关键事实速记
 
-- M5 风险预案：瀑布流两周 spike 达不到帧预算 → 回退等宽网格（TDD_PLAN 第十节）。
-- 参考：TDD_PLAN M5、DECISIONS.md D3/D9/D10。
+- M5 落地:`layout.rs`(masonry 纯函数,criterion 173µs@10k)+ `grid_vm.rs`(LibraryGridVm:过滤/排序/O(1) rect 表/ensure_window LRU 物化/事件)。
+- 内存守卫已测试锁定:100k 数据 + 容量注入式 LRU,窗外零缩略图驻留。
+- app-ui 只能依赖 ui-viewmodels+slint → Filter/Sorter/FacetIndex 经本 crate 再导出。
+- M7 待办:aspect 来源从 id 导出换媒体元数据;Rect 表 @1M ≈32MB 论证值需实测复核。
+- 参考:`crates/ui-viewmodels/src/{grid_vm.rs,layout.rs}`、TDD_PLAN M5、DECISIONS.md D3/D10。

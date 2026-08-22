@@ -105,15 +105,17 @@ worker crate：
 
 > 实现备注：stdio + NDJSON 协议（信封 `{"v":1,"req"/"res":…}`）；任务 Echo/ThumbnailPng；替补上限 3 次/池；视频抽帧实装因解码栈选型未决（ffmpeg sidecar vs 纯 Rust）另立任务，见任务 prd 范围外。
 
-### M5 UI 壳与虚拟化网格（2–3 周，最大风险项）
+### M5 UI 壳与虚拟化网格（2–3 周，最大风险项）✅ 已完成 2026-08-22（自动化部分）
 ui-viewmodels + app-ui：
-- [ ] `viewmodel_window_of_100k_model_loads_only_visible_slice`（内存守卫：可见窗口外零缩略图驻留）
-- [ ] `grid_layout_math_variable_aspect_no_overlap`（criterion：布局数学独立基准）
-- [ ] `scroll_jump_10k_items_keeps_frame_budget`（软件渲染下近似测量，标注 best-effort）
-- [ ] `selection_double_click_emits_open_asset_event`
-- [ ] `filter_panel_changes_propagate_to_viewmodel_query`
-- [ ] slintcn 组件以源码形式进 `app-ui/components/`，逐个冒烟实例化测试
+- [x] `viewmodel_window_of_100k_model_loads_only_visible_slice`（内存守卫：100k 数据 + capacity 注入式 LRU，窗外零缩略图驻留；load 调用数有界断言）
+- [x] `grid_layout_math_variable_aspect_no_overlap`（criterion @10k：173µs，spike 远优于预算，未触发等宽回退预案）
+- [x] `scroll_jump_10k_items_keeps_frame_budget`（软件渲染近似，50ms 宽裕上界，best-effort 标注）
+- [x] `selection_double_click_emits_open_asset_event`
+- [x] `filter_panel_changes_propagate_to_viewmodel_query`
+- [ ] slintcn 组件以源码形式进 `app-ui/components/`，逐个冒烟实例化测试 → **推迟**：网络不可用，v1 先用自写最小组件（哑渲染已够 M5 闭环）
 - [ ] 📋 手工验收清单：120fps 滚动体感、IME 中文输入、DPI 缩放
+
+> 实现备注：masonry 固定列数布局（最短列放置）；VM 全量预计算 Rect 表（O(1) 跳转，@1M≈32MB 待 M7 实测）；Slint 1.17 踩坑（MouseArea 移除/TouchArea double-clicked/name := 语法/property 可见性）已沉淀 app-ui spec。
 
 ### M6 粘贴管线（1.5 周）
 pipeline + platform crate：

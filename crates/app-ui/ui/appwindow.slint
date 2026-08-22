@@ -1,12 +1,108 @@
+﻿// 素材管理器主窗：哑渲染——只绑定属性与转发回调，业务逻辑全在 ui-viewmodels。
+export struct TileData {
+    x: length,
+    y: length,
+    w: length,
+    h: length,
+    asset-id: int,
+    label: string,
+    color: color,
+}
+
 export component AppWindow inherits Window {
     title: "素材管理器";
-    preferred-width: 800px;
-    preferred-height: 600px;
+    preferred-width: 1000px;
+    preferred-height: 700px;
+    background: #14171c;
 
-    Text {
-        text: "M0 脚手架就绪";
-        font-size: 24px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    // —— VM 绑定面（由壳层写入/读取）——
+    in-out property <length> content-height: 1px;
+    in-out property <length> content-y: 0px; // 与 Flickable viewport-y 双向绑定，壳层只读
+    in property <[TileData]> tiles;
+    in property <string> total-text: "";
+    in property <string> filter-label: "全部";
+
+    // —— 回调转发（无业务逻辑）——
+    callback scroll-changed(length);
+    callback double-clicked(int);
+    callback filter-selected(int); // -1 = 全部，其余为分类号
+
+    changed content-y => {
+        root.scroll-changed(root.content-y);
+    }
+
+    VerticalLayout {
+        // 工具栏：总数 + 过滤面板 v1 最小化（全部 + 分类按钮）
+        Rectangle {
+            height: 44px;
+            background: #1d222b;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                alignment: start;
+
+                Text {
+                    text: root.total-text + " · 视图: " + root.filter-label;
+                    vertical-alignment: center;
+                    color: #d8dee9;
+                    font-size: 13px;
+                }
+
+                for name[i] in ["全部", "分类0", "分类1", "分类2", "分类3", "分类4"]: Rectangle {
+                    width: 54px;
+                    border-radius: 4px;
+                    background: btn.pressed ? #3b4a61 : #262d38;
+
+                    Text {
+                        text: name;
+                        color: #d8dee9;
+                        font-size: 11px;
+                    }
+
+                    btn := TouchArea {
+                        clicked => {
+                            root.filter-selected(i - 1);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 虚拟化网格：Flickable + 绝对定位瓦片；滚动位置经 content-y 双向绑定回流壳层
+        flick := Flickable {
+            viewport-width: self.width;
+            viewport-height: Math.max(root.content-height, self.height);
+            viewport-y <=> root.content-y;
+
+            Rectangle {
+                width: flick.viewport-width;
+                height: flick.viewport-height;
+
+                for tile in root.tiles: Rectangle {
+                    x: tile.x;
+                    y: tile.y;
+                    width: tile.w;
+                    height: tile.h;
+                    background: tile.color;
+                    border-radius: 6px;
+
+                    Text {
+                        text: tile.label;
+                        color: #ffffff;
+                        font-size: 10px;
+                        x: 5px;
+                        y: 3px;
+                    }
+
+                    TouchArea {
+                        double-clicked => {
+                            root.double-clicked(tile.asset-id);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

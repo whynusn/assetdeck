@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/ui-viewmodels/backend/index.md", "reason": "VM 包总纲"}
+{"file": ".trellis/spec/ui-viewmodels/backend/directory-structure.md", "reason": "VM 划分与虚拟化数据窗口职责"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "禁 slint 依赖/内存守卫红线"}
+{"file": ".trellis/spec/app-ui/backend/directory-structure.md", "reason": "Slint 工具链踩坑(compat-1-2 等)"}
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "deps_guard/D10 预算责任"}
