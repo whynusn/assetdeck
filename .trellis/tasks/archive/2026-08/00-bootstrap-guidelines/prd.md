@@ -21,19 +21,24 @@ the rest conversationally.
 
 ## Status (update the checkboxes as you complete each item)
 
-- [ ] Fill guidelines for app-ui
-- [ ] Fill guidelines for domain
-- [ ] Fill guidelines for index
-- [ ] Fill guidelines for library
-- [ ] Fill guidelines for media
-- [ ] Fill guidelines for phash
-- [ ] Fill guidelines for pipeline
-- [ ] Fill guidelines for platform
-- [ ] Fill guidelines for store
-- [ ] Fill guidelines for ui-viewmodels
-- [ ] Fill guidelines for worker
-- [ ] Fill guidelines for bench-harness
-- [ ] Add code examples
+- [x] Fill guidelines for app-ui
+- [x] Fill guidelines for domain
+- [x] Fill guidelines for index
+- [x] Fill guidelines for library
+- [x] Fill guidelines for media
+- [x] Fill guidelines for phash
+- [x] Fill guidelines for pipeline
+- [x] Fill guidelines for platform
+- [x] Fill guidelines for store
+- [x] Fill guidelines for ui-viewmodels
+- [x] Fill guidelines for worker
+- [x] Fill guidelines for bench-harness
+- [x] Add code examples
+
+> 完成记录（2026-08-22）：全部 12 包 × 6 文件基于真实代码填充（M0–M3 已落地部分记录现实，
+> M4–M7 占位 crate 记录 TDD_PLAN/DECISIONS 锁定的契约与红线并明确标注「实施目标」）。
+> 语言沿用项目既有规范文档的中文。真实范例引用了实际文件路径
+> （如 crates/library/src/lib.rs、crates/app-ui/tests/deps_guard.rs）。
 
 ---
 
