@@ -1,38 +1,28 @@
-# Backend Development Guidelines
+# Backend Guidelines — phash
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> pHash 计算与汉明距离匹配。M3 已完成。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `crates/phash` |
+| 依赖 | image（GrayImage） |
+| 角色 | 64-bit DCT 感知哈希 + 汉明距离（导入去重基石，D7 连带义务） |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | 单文件算法 + 程序化测试夹具 |
+| [Database Guidelines](./database-guidelines.md) | 大端字节存储契约 |
+| [Error Handling](./error-handling.md) | 纯函数无错误路径 |
+| [Quality Guidelines](./quality-guidelines.md) | ⭐ 已填：退化图禁令、阈值联动、踩坑记录 |
+| [Logging Guidelines](./logging-guidelines.md) | 零日志 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- `perceptual_hash_gray` / `hamming_distance` 是仅有的两个公共函数。
+- 去重判定链：library enqueue → all_phashes 全量比对 → 距离 ≤8 判重。

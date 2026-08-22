@@ -1,51 +1,16 @@
-# Error Handling
+# Error Handling — pipeline
 
-> How errors are handled in this project.
+## 降级优先于报错（D8 红线）
 
----
+- 管线的失败语义是**降级**而非中断：
+  - 焦点校验失败 → 仅复制 + toast 提示，不注入；
+  - 剪贴板写入失败 → 向上返回错误（这是唯一硬失败）。
+- 目标窗口存活校验：用唤起面板时记录的「前一前台窗口」句柄；校验逻辑经 `WindowProvider` trait 抽象，测试注入 mock 死窗口。
 
-## Overview
+## 错误形态
 
-<!--
-Document your project's error handling conventions here.
+- 定义 `PipelineError` 枚举（Clipboard / AssetParse），实现 Display+Error；降级路径**不是** Err——用返回的枚举结果（如 `PasteOutcome::{Injected, CopiedOnly}`）表达，让调用方 UI 呈现 toast。
 
-Questions to answer:
-- What error types do you define?
-- How are errors propagated?
-- How are errors logged?
-- How are errors returned to clients?
--->
+## 禁止
 
-(To be filled by the team)
-
----
-
-## Error Types
-
-<!-- Custom error classes/types -->
-
-(To be filled by the team)
-
----
-
-## Error Handling Patterns
-
-<!-- Try-catch patterns, error propagation -->
-
-(To be filled by the team)
-
----
-
-## API Error Responses
-
-<!-- Standard error response format -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Error handling mistakes your team has made -->
-
-(To be filled by the team)
+- 校验失败时「重试后强注」——宁可少发不可误发到错误窗口。

@@ -1,38 +1,29 @@
-# Backend Development Guidelines
+# Backend Guidelines — library
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> .library 管理、异步拷贝队列与导入编排。M3 已完成。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `crates/library` |
+| 依赖 | store, phash, image, uuid |
+| 角色 | Eagle 式复制入库（D7）+ 导入去重 + 待分类收件箱（D5）+ 视频任务派发（D6） |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | 编排门面 + Mutex/Condvar 队列 + Dispatcher trait |
+| [Database Guidelines](./database-guidelines.md) | uuid↔AssetId 映射、双位置一致性、缩略图路径 |
+| [Error Handling](./error-handling.md) | LibraryError 收敛三层错误 |
+| [Quality Guidelines](./quality-guidelines.md) | pHash 先算后拷等五条红线 |
+| [Logging Guidelines](./logging-guidelines.md) | 观测点规划 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- enqueue 返回三态：`Ticket` / `Duplicate { existing_uuid }` / `Backpressure`。
+- `.library` 布局：`meta.db` + `objects/{uuid}/raw.{ext}` + `thumbs/`。
+- 参考：`crates/library/src/lib.rs`、`crates/library/tests/import_pipeline.rs`。

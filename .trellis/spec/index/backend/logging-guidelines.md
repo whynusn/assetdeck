@@ -1,51 +1,7 @@
-# Logging Guidelines
+# Logging Guidelines — index
 
-> How logging is done in this project.
+## 零日志原则
 
----
-
-## Overview
-
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
-
----
-
-## Log Levels
-
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+- 纯内存数据结构，操作均为 O(小) 位图运算，无需日志。
+- 性能观测走 criterion 基准（`benches/budget.rs`），不走日志。
+- 若未来引入 tracing，只允许在批量导入边界打 span，热路径（evaluate/tag_counts）禁止日志——D3 预算 100 万条 <1ms，任何格式化开销都超标。

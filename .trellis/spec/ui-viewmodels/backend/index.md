@@ -1,38 +1,28 @@
-# Backend Development Guidelines
+# Backend Guidelines — ui-viewmodels
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> ViewModel 层：桥接 UI 与核心 crates，纯 Rust 可全量单测。当前为占位，M5 实施（关键路径最大风险项）。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `crates/ui-viewmodels` |
+| 依赖 | domain, index, store, library, pipeline |
+| 角色 | TDD 第一原则的支点：业务逻辑住纯 Rust，`.slint` 哑渲染 |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | VM 划分、虚拟化数据窗口职责 |
+| [Database Guidelines](./database-guidelines.md) | 经门面访问、分页窗口 |
+| [Error Handling](./error-handling.md) | Result → UI 状态转译 |
+| [Quality Guidelines](./quality-guidelines.md) | ⭐ 禁 slint 依赖、内存守卫红线 |
+| [Logging Guidelines](./logging-guidelines.md) | 用户行为观测点 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- M5 风险预案：瀑布流两周 spike 达不到帧预算 → 回退等宽网格（TDD_PLAN 第十节）。
+- 参考：TDD_PLAN M5、DECISIONS.md D3/D9/D10。

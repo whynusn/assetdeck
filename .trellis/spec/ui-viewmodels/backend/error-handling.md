@@ -1,51 +1,5 @@
-# Error Handling
+# Error Handling — ui-viewmodels
 
-> How errors are handled in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's error handling conventions here.
-
-Questions to answer:
-- What error types do you define?
-- How are errors propagated?
-- How are errors logged?
-- How are errors returned to clients?
--->
-
-(To be filled by the team)
-
----
-
-## Error Types
-
-<!-- Custom error classes/types -->
-
-(To be filled by the team)
-
----
-
-## Error Handling Patterns
-
-<!-- Try-catch patterns, error propagation -->
-
-(To be filled by the team)
-
----
-
-## API Error Responses
-
-<!-- Standard error response format -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Error handling mistakes your team has made -->
-
-(To be filled by the team)
+- VM 层把底层 Result 转译为 UI 状态：错误以可展示消息（枚举/字符串资源）+ 重试动作暴露，不 panic。
+- 后台任务（导入进度、worker 结果）经事件/回调进入 VM 时必须容错：乱序、迟到、重复消息不得破坏状态机。
+- Slint 回调内的 Rust 代码禁止 unwrap 用户输入路径——解析失败显示占位并记录。

@@ -1,51 +1,12 @@
-# Logging Guidelines
+# Logging Guidelines — domain
 
-> How logging is done in this project.
+## 零日志原则
 
----
+- domain 是纯数据层，**禁止引入 log/tracing 等任何日志门面**。
+- 可观测性需求由调用方负责：library/store 层记录操作结果时携带 domain 类型的 Debug 输出即可。
+- 若调试需要，临时 `dbg!` 不允许提交；用测试断言代替打印。
 
-## Overview
+## 全 workspace 日志基线（供上层参考）
 
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
-
----
-
-## Log Levels
-
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+- 当前（M3 阶段）代码库尚未引入日志框架；引入时统一走 `tracing` 门面，在 app-ui 二进制入口初始化 subscriber。
+- 错误路径优先返回 `Result` 而非打日志——错误处理见各 crate 的 error-handling.md。

@@ -1,54 +1,14 @@
-# Directory Structure
+# Directory Structure — media
 
-> How backend code is organized in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's backend directory structure here.
-
-Questions to answer:
-- How are modules/packages organized?
-- Where does business logic live?
-- Where are API endpoints defined?
-- How are utilities and helpers organized?
--->
-
-(To be filled by the team)
-
----
-
-## Directory Layout
+## 布局
 
 ```
-<!-- Replace with your actual structure -->
-src/
-├── ...
-└── ...
+crates/media/
+└── src/lib.rs    # 仅接口定义：MediaJob 相关类型 / trait
 ```
 
----
+## 定位约束
 
-## Module Organization
-
-<!-- How should new features/modules be organized? -->
-
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- File and folder naming rules -->
-
-(To be filled by the team)
-
----
-
-## Examples
-
-<!-- Link to well-organized modules as examples -->
-
-(To be filled by the team)
+- **本 crate 只放接口**（任务类型、dispatcher 抽象的媒体侧定义），实现在 worker crate——TDD_PLAN 第二节依赖图的规定。
+- 注意：当前 `MediaJob`/`MediaDispatcher` 实际定义在 library/src/lib.rs（M3 时序产物）；M4 接入 worker 时应将共享类型迁移到 media crate，library 与 worker 都依赖它。迁移时保持 library 测试全绿。
+- **禁止**在本 crate 写解码代码或引入 image/ffmpeg 类依赖。

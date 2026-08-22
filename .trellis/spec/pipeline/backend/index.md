@@ -1,38 +1,28 @@
-# Backend Development Guidelines
+# Backend Guidelines — pipeline
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> 粘贴管线：格式协商 → 剪贴板 → 焦点校验 → 注入 → [auto-send]。当前为占位，M6 实施。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `crates/pipeline` |
+| 依赖 | domain, platform(trait) |
+| 角色 | D8 的实现载体：「双击 = 素材进输入框」，回车直发独立开关默认关 |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | 八阶段管线、表驱动协商 |
+| [Database Guidelines](./database-guidelines.md) | 配置持久化边界 |
+| [Error Handling](./error-handling.md) | 降级优先（焦点校验失败 → 仅复制） |
+| [Quality Guidelines](./quality-guidelines.md) | ⭐ 五条红线与守卫测试映射 |
+| [Logging Guidelines](./logging-guidelines.md) | 注入审计、禁记剪贴板内容 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- 闭环验收（行动项 A2）：双击素材 → 0.5s 内出现在 IM 输入框。
+- 参考：DECISIONS.md D8/D12、TDD_PLAN M6。

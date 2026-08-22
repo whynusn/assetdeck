@@ -1,51 +1,10 @@
-# Error Handling
+# Error Handling — media
 
-> How errors are handled in this project.
+## 接口层无错误类型
 
----
+- 任务派发（dispatch）是 fire-and-forget：失败在 worker 侧处理并通过 IPC 结果回报，不在接口层传播。
+- 结果回报的错误形态由 worker crate 的 IPC 协议定义（M4 `job_result_roundtrips_over_ipc_protocol`）；media crate 只保证任务描述类型可序列化（serde derive）。
 
-## Overview
+## 禁止
 
-<!--
-Document your project's error handling conventions here.
-
-Questions to answer:
-- What error types do you define?
-- How are errors propagated?
-- How are errors logged?
-- How are errors returned to clients?
--->
-
-(To be filled by the team)
-
----
-
-## Error Types
-
-<!-- Custom error classes/types -->
-
-(To be filled by the team)
-
----
-
-## Error Handling Patterns
-
-<!-- Try-catch patterns, error propagation -->
-
-(To be filled by the team)
-
----
-
-## API Error Responses
-
-<!-- Standard error response format -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Error handling mistakes your team has made -->
-
-(To be filled by the team)
+- 在 trait 方法签名引入 Result 强迫所有实现者处理派发失败——背压/降级策略属于 worker 池的内部决策。

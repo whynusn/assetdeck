@@ -1,38 +1,27 @@
-# Backend Development Guidelines
+# Backend Guidelines — bench-harness
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> 内存/帧率测量夹具：合成库生成器 + RSS 采样器。当前为占位，M7 实施（行动项 A2/A3 收口）。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `tools/bench-harness` |
+| 角色 | D10 验收的执行者：没有监控的预算等于没定 |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | ⭐ 生成器/RSS 采样器/CI 接入规划 |
+| [Database Guidelines](./database-guidelines.md) | 经公共 API 写合成库 |
+| [Error Handling](./error-handling.md) | 测量失败 = 红 |
+| [Quality Guidelines](./quality-guidelines.md) | 确定性红线、诚实测量 |
+| [Logging Guidelines](./logging-guidelines.md) | CI 可解析输出 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- M7 五个红灯测试：生成器 100k 行 / idle RSS / browse 100k RSS / 双击→输入框 <500ms / CI mem-regression job。
+- 参考：TDD_PLAN 第五、八节，DECISIONS.md D10、A2/A3。

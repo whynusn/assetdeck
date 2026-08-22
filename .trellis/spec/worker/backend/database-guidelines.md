@@ -1,51 +1,6 @@
-# Database Guidelines
+# Database Guidelines — worker
 
-> Database patterns and conventions for this project.
-
----
-
-## Overview
-
-<!--
-Document your project's database conventions here.
-
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
-
-(To be filled by the team)
-
----
-
-## Query Patterns
-
-<!-- How should queries be written? Batch operations? -->
-
-(To be filled by the team)
-
----
-
-## Migrations
-
-<!-- How to create and run migrations -->
-
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- Table names, column names, index names -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- worker 产物的落点：
+  - 缩略图 → `thumbs/{u}/{uu}/{uuid}.{ext}`（必须用 `store::thumbnail_cache_path`）；
+  - 时长/帧数等元数据 → 经池回报给宿主，由 library 层走 `store.upsert_asset` 回写；worker **不直接打开 meta.db**，避免双写竞争。
+- 坏文件隔离：解析失败的源文件记录 uuid + 失败原因，由上层标记状态；worker 不移动/删除用户文件。

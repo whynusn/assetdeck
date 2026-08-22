@@ -1,54 +1,23 @@
-# Directory Structure
+# Directory Structure — library
 
-> How backend code is organized in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's backend directory structure here.
-
-Questions to answer:
-- How are modules/packages organized?
-- Where does business logic live?
-- Where are API endpoints defined?
-- How are utilities and helpers organized?
--->
-
-(To be filled by the team)
-
----
-
-## Directory Layout
+## 布局
 
 ```
-<!-- Replace with your actual structure -->
-src/
-├── ...
-└── ...
+crates/library/
+├── Cargo.toml          # deps: store, phash, image(png,jpeg), uuid(v4)
+├── src/
+│   └── lib.rs          # Library 编排 + 异步拷贝队列 + MediaDispatcher trait
+└── tests/
+    └── import_pipeline.rs
 ```
 
----
+## 模块组织规则
 
-## Module Organization
+- `Library` 是编排门面：同步路径（解码→pHash→去重→落库）+ 异步路径（拷贝工作线程）。
+- 与 worker 的解耦点：`MediaDispatcher` trait（`fn dispatch(&self, job: MediaJob)`）。测试用 `RecordingDispatcher` 收集断言，生产用 NullDispatcher 占位（M4 接真 worker）。
+- 共享队列状态模式：`Arc<(Mutex<Shared>, Condvar)>`，`Shared { queue, states, active, paused }`。
 
-<!-- How should new features/modules be organized? -->
+## 命名约定
 
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- File and folder naming rules -->
-
-(To be filled by the team)
-
----
-
-## Examples
-
-<!-- Link to well-organized modules as examples -->
-
-(To be filled by the team)
+- 库目录布局常量：`objects/{uuid}/raw.{ext}`、`thumbs/`；「待分类」收件箱常量 `INBOX_CATEGORY`（D5）。
+- 测试确定性钩子：`set_paused(bool)` 暂停拷贝线程，保证队列语义可断言——新增异步行为必须配同类钩子或轮询等待辅助。

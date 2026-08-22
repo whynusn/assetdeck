@@ -1,51 +1,17 @@
-# Quality Guidelines
+# Quality Guidelines — app-ui
 
-> Code quality standards for backend development.
+## 红线
 
----
+1. **依赖白名单**：只许依赖 ui-viewmodels + slint。deps_guard 测试（`ui_cargo_toml_has_no_decode_layer_deps`）禁止 media/phash/worker 出现在 Cargo.toml——「UI 进程不解码」的编译期守卫之一。
+2. **`.slint` 不写业务**：过滤/排序/状态迁移全在 VM；.slint 只绑定属性与转发回调。
+3. **空闲 RSS ≤100MB（D10）**：本 crate 是预算的直接责任人——M0 实测空窗 WorkingSet 77.8MB，新增组件/渲染特性时必须复核。
 
-## Overview
+## 测试要求
 
-<!--
-Document your project's quality standards here.
+- `.slint` 只做冒烟级验证（可实例化、回调接通），不做单测。
+- 手工验收清单（诚实标注，不自动化）：120fps 滚动体感、IME 中文输入、DPI 缩放。
 
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
+## Code Review 清单
 
-(To be filled by the team)
-
----
-
-## Forbidden Patterns
-
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
-
----
-
-## Required Patterns
-
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
-
----
-
-## Testing Requirements
-
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
-
----
-
-## Code Review Checklist
-
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+- [ ] 新依赖是否过 cargo-deny licenses（GPLv3 警示：Slint 社区版，A1 未裁决）？
+- [ ] main.rs 是否仍无业务逻辑？

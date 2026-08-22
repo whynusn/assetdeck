@@ -1,51 +1,13 @@
-# Logging Guidelines
+# Logging Guidelines — library
 
-> How logging is done in this project.
+## 现状：无日志框架
 
----
+- 导入编排的观测点规划（引入 tracing 后）：
+  - enqueue 结果（Ticket/Duplicate/Backpressure）：`debug!` 带 uuid 与源文件名；
+  - 拷贝完成/失败：`info!` / `warn!`（失败带 uuid + 错误）；
+  - 去重命中：`info!`（existing_uuid），这是用户可感知行为。
 
-## Overview
+## 禁止
 
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
-
----
-
-## Log Levels
-
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+- 在拷贝进度回调（64KB chunk 粒度）打日志——高频热路径；
+- 日志替代 CopyState：UI 查询进度走 `state_of(ticket)`，日志只是旁路观测。

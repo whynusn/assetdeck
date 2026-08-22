@@ -1,51 +1,5 @@
-# Database Guidelines
+# Database Guidelines — phash
 
-> Database patterns and conventions for this project.
-
----
-
-## Overview
-
-<!--
-Document your project's database conventions here.
-
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
-
-(To be filled by the team)
-
----
-
-## Query Patterns
-
-<!-- How should queries be written? Batch operations? -->
-
-(To be filled by the team)
-
----
-
-## Migrations
-
-<!-- How to create and run migrations -->
-
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- Table names, column names, index names -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- 纯算法 crate 不接触数据库。
+- 存储契约：hash 以 **u64 大端字节**存 store 的 `phash BLOB` 列；读取时 `u64::from_be_bytes` 还原后用 `hamming_distance` 比对（比对逻辑在 library 层，阈值 8）。
+- 视频资产 phash 为 None（不参与图片去重），列可空。

@@ -1,51 +1,13 @@
-# Database Guidelines
+# Database Guidelines — index
 
-> Database patterns and conventions for this project.
+> index 是纯内存层，无数据库。本文件记录它与 store 的标识映射契约。
 
----
+## 标识映射契约
 
-## Overview
+- `FacetIndex` 以紧凑 `u32`（`domain::AssetId.0`）为键，RoaringBitmap 只吃 u32。
+- 持久层主键是 `uuid TEXT`（store/assets 表）。**uuid ↔ AssetId 映射发生在 library 编排层**，index 与 store 互不依赖。
+- 从库重建索引的路径：library 层读全量 AssetMeta → 分配/恢复 AssetId → 逐条 `insert(&Asset)`。索引是可重建缓存，不是事实源。
 
-<!--
-Document your project's database conventions here.
+## 内存预算参考（D3/D10）
 
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
-
-(To be filled by the team)
-
----
-
-## Query Patterns
-
-<!-- How should queries be written? Batch operations? -->
-
-(To be filled by the team)
-
----
-
-## Migrations
-
-<!-- How to create and run migrations -->
-
-(To be filled by the team)
-
----
-
-## Naming Conventions
-
-<!-- Table names, column names, index names -->
-
-(To be filled by the team)
-
----
-
-## Common Mistakes
-
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- 位图常驻几 MB / 百万条；assets HashMap（完整 Asset 元数据驻留）是最大头——若 M5/M7 实测超预算，优先把冷字段（如 tags 明细）下沉为 id→store 反查，而不是动位图。

@@ -1,51 +1,5 @@
-# Logging Guidelines
+# Logging Guidelines — app-ui
 
-> How logging is done in this project.
-
----
-
-## Overview
-
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
-
----
-
-## Log Levels
-
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+- main.rs 负责 tracing subscriber 初始化（引入后）；级别默认 info，`--verbose`/环境变量开 debug。
+- 启动序列记 `info!`：版本、库路径、worker 池启动结果。
+- 禁止记录：用户素材内容、完整窗口标题列表（隐私）。

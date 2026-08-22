@@ -1,38 +1,28 @@
-# Backend Development Guidelines
+# Backend Guidelines — platform
 
-> Best practices for backend development in this project.
-
----
-
-## Overview
-
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+> 平台抽象 trait + Win32 实现：剪贴板 / SendInput / 前台窗口。当前为占位，M6 实施。
 
 ---
+
+## 包定位
+
+| 项 | 值 |
+|---|---|
+| crate 路径 | `crates/platform` |
+| 依赖 | trait 部分零依赖；win32 模块用 windows crate |
+| 角色 | 依赖图最底层：`{domain,index,store,library,pipeline} → platform(trait)` |
 
 ## Guidelines Index
 
-| Guide | Description | Status |
-|-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| Guide | Description |
+|-------|-------------|
+| [Directory Structure](./directory-structure.md) | trait 与 win32 impl 分模块、v2 预留 |
+| [Database Guidelines](./database-guidelines.md) | 剪贴板格式常量归属 |
+| [Error Handling](./error-handling.md) | GetLastError → Err、UIPI 边界 |
+| [Quality Guidelines](./quality-guidelines.md) | trait 零依赖红线、D12 平台事实 |
+| [Logging Guidelines](./logging-guidelines.md) | 错误上下文、隐私禁令 |
 
----
+## 关键事实速记
 
-## How to Fill These Guidelines
-
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- Wayland/v2 分层方案归档在 DECISIONS.md 第四节，v1 不实现。
+- 参考：DECISIONS.md D8/D12、TDD_PLAN M6。

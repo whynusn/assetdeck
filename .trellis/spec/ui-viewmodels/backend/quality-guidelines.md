@@ -1,51 +1,17 @@
-# Quality Guidelines
+# Quality Guidelines — ui-viewmodels
 
-> Code quality standards for backend development.
+## 红线
 
----
+1. **禁 slint 依赖**：VM 全量 `cargo test` 可测；`.slint` 只做冒烟级验证。
+2. **内存守卫**（D10）：VM 持有的缩略图/资产数据必须按可见窗口分页加载——100k 浏览 ≤250MB 的验收线由本层保证。
+3. 依赖方向：可依赖 domain/index/store/library/pipeline；**禁止**依赖 media/phash/worker 实现 crate。
 
-## Overview
+## 测试要求
 
-<!--
-Document your project's quality standards here.
+- 每个 VM 公共方法全覆盖单测（TDD 第一原则的落点）。
+- 事件传播测试：filter panel 变更 → VM 查询刷新（`filter_panel_changes_propagate_to_viewmodel_query`）；双击选择 → open 事件（`selection_double_click_emits_open_asset_event`）。
 
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
+## Code Review 清单
 
-(To be filled by the team)
-
----
-
-## Forbidden Patterns
-
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
-
----
-
-## Required Patterns
-
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
-
----
-
-## Testing Requirements
-
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
-
----
-
-## Code Review Checklist
-
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+- [ ] 新 VM 字段是否引入了大对象常驻（缩略图缓存应走 LRU）？
+- [ ] Slint 类型是否渗入签名？
