@@ -6,6 +6,7 @@ on:
   # 每日定时跑 mem-regression（spec directory-structure：每日 + PR 触发）
   schedule:
     - cron: "0 3 * * *"
+  workflow_dispatch:
 
 jobs:
   lint-and-test:
@@ -56,3 +57,50 @@ jobs:
           name: mem-regression-trend
           path: ${{ runner.temp }}/trend-*.json
           if-no-files-found: ignore
+
+  # 统一打包（scripts/package.ps1）：一条流水线产出便携版 zip + 自解压安装版 exe。
+  # 质量门禁（lint/test + 许可证）通过后，每次 push/PR 都产出可下载候选包。
+  package:
+    needs: [lint-and-test, deny]
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 统一打包（便携版 + 安装版）
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1 -Stage all
+      - name: 上传便携版
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-manager-portable
+          path: artifacts/*.zip
+          if-no-files-found: error
+      - name: 上传安装版
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-manager-installer
+          path: artifacts/*.exe
+          if-no-files-found: error
+
+  # 打 v* tag（如 v0.1.0）时发布正式版：
+  # 内存预算（D10）+ 质量/许可证门禁全绿后，把候选包发布到 GitHub Release。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package, mem-regression, deny]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: asset-manager-portable
+          path: release/portable
+      - uses: actions/download-artifact@v4
+        with:
+          name: asset-manager-installer
+          path: release/installer
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*/*
+          generate_release_notes: true

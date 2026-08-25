@@ -1,4 +1,10 @@
 /target
+/installer/target/
+/dist/
+/dist.tar.gz
+/artifacts/
+/素材管理器-安装版.exe
+/素材管理器-便携版.exe
 Cargo.lock.bak
 *.pdb
 /mem-reports/
