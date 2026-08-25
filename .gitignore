@@ -8,3 +8,4 @@
 Cargo.lock.bak
 *.pdb
 /mem-reports/
+/crates/ui-viewmodels/target/
