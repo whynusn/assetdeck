@@ -97,7 +97,12 @@ fn sync_target_bar(
     ui.set_target_label(snapshot.label.into());
     ui.set_target_health_color(health_color(snapshot.health));
     ui.set_target_pinned(snapshot.pinned);
-    ui.set_target_mode(ui_enums::target_bar_mode(snapshot.mode));
+    let mode = ui_enums::target_bar_mode(snapshot.mode);
+    if mode != ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
+        // D53：目标下拉卸载即重置 shown，防重挂载时残留 true 跳过入场。
+        ui.set_target_picker_shown(false);
+    }
+    ui.set_target_mode(mode);
     choices_model.set_vec(
         snapshot
             .choices
@@ -1379,6 +1384,39 @@ fn main() {
         });
     }
 
+    // D53 旧三弹层入场：init 在首帧前跑（这正是旧「init 置 shown」无效的
+    // 根因），只让它报数，翻转交给 16ms 单发 Timer（必然落在首帧后）；
+    // 关动画时直接置 true（时长本就钳 0ms，无需 Timer）。
+    {
+        let ui = app.as_weak();
+        let settings = settings.clone();
+        app.on_overlay_mounted(move |which| {
+            let Some(ui) = ui.upgrade() else { return };
+            let animated = settings.borrow().ui_animations;
+            let weak = ui.as_weak();
+            let flip = move || {
+                if let Some(ui) = weak.upgrade() {
+                    match which {
+                        0 => ui.set_target_picker_shown(true),
+                        1 => ui.set_import_menu_shown(true),
+                        _ => ui.set_settings_shown(true),
+                    }
+                }
+            };
+            if animated {
+                CLASSIFY_ANIM_TIMER.with(|slot| {
+                    slot.borrow().start(
+                        slint::TimerMode::SingleShot,
+                        std::time::Duration::from_millis(16),
+                        flip,
+                    );
+                });
+            } else {
+                flip();
+            }
+        });
+    }
+
     // D50 归类弹窗回调：行内决策 / 取消 / 确认导入。
     {
         let flow = import_flow.clone();
@@ -2130,6 +2168,10 @@ fn main() {
         let ui = app.as_weak();
         app.on_settings_toggled(move || {
             let ui = ui.unwrap();
+            let closing = ui.get_settings_open();
+            if closing {
+                ui.set_settings_shown(false);
+            }
             ui.set_settings_open(!ui.get_settings_open());
         });
     }
@@ -2172,6 +2214,10 @@ fn main() {
         let ui = app.as_weak();
         app.on_import_menu_toggled(move || {
             let ui = ui.unwrap();
+            let closing = ui.get_import_menu_open();
+            if closing {
+                ui.set_import_menu_shown(false);
+            }
             ui.set_import_menu_open(!ui.get_import_menu_open());
         });
     }
@@ -2205,7 +2251,10 @@ fn main() {
         app.on_overlay_dismissed(move || {
             let ui = ui.unwrap();
             ui.set_settings_open(false);
+            ui.set_settings_shown(false);
             ui.set_import_menu_open(false);
+            ui.set_import_menu_shown(false);
+            ui.set_import_menu_shown(false);
             // D51 范围菜单两段式收起（点外部 = 取消开合）。
             ui.set_scope_menu_shown(false);
             ui.set_scope_menu_open(false);
@@ -2695,6 +2744,7 @@ fn main() {
             let ui = ui.unwrap();
             // 菜单项已选中：先收起弹层，再弹原生文件对话框。
             ui.set_import_menu_open(false);
+            ui.set_import_menu_shown(false);
             if importing.load(Ordering::SeqCst) {
                 show_notice(
                     &ui,
@@ -2754,6 +2804,7 @@ fn main() {
             let ui = ui.unwrap();
             // 菜单项已选中：先收起弹层，再弹原生文件夹对话框。
             ui.set_import_menu_open(false);
+            ui.set_import_menu_shown(false);
             if importing.load(Ordering::SeqCst) {
                 show_notice(
                     &ui,

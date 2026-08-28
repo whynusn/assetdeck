@@ -42,6 +42,9 @@ export struct TileData {
     color: color,
     // 浏览用缩略图（离线派生的 <=320px PNG）。缺图时为空 image，露出 color 兜底。
     thumb: image,
+    // D53 淡入标志：true = 有图（缓存命中/新装出），false = 缺图占位。
+    // false→true 翻转（fill 补齐）播 150ms 淡入；挂载即 true 不重播（滚动/切页）。
+    thumb-fade: bool,
     // 素材类别（UiEnums.card-kind-*，与 domain::AssetKind 对齐）：卡片按类别切表现。
     kind: int,
     // 文本类素材的预览（首行若干字符）；其余类别为空串。
@@ -231,6 +234,15 @@ export component AppWindow inherits Window {
     in property <int> search-scope: 0;
     in property <bool> scope-menu-open: false;
     in property <bool> scope-menu-shown: false; // 两段式动效翻转位（同 classify）
+
+    // —— D53 旧三弹层入场修复（init 技巧无效 → init 只报数，Rust 下帧翻转）。
+    // 出场维持现状（即时卸载）：目标下拉的关闭由轮询驱动的 sync_target_bar
+    // 拍板，两段式卸载会与轮询状态机竞态——差异走查记 design §1。
+    in property <bool> target-picker-shown: false;
+    in property <bool> import-menu-shown: false;
+    in property <bool> settings-shown: false;
+    // which: 0=目标下拉 1=导入菜单 2=设置面板。
+    callback overlay-mounted(int);
     callback scope-menu-toggled();
     callback scope-selected(int);
     // OS 拖入文件（IDropTarget 兜底，platform::win32::dragdrop 注册）：
@@ -918,6 +930,13 @@ export component AppWindow inherits Window {
                                 height: 100%;
                                 source: tile.thumb;
                                 image-fit: cover;
+                                // D53 瓦片淡入：缺图补齐时 thumb-fade 翻转播淡入；
+                                // 挂载即有图（缓存命中）时初值就是 1，不重播。
+                                opacity: tile.thumb-fade ? 1.0 : 0.0;
+                                animate opacity {
+                                    duration: root.animations-enabled ? 150ms : 0ms;
+                                    easing: ease-out;
+                                }
                             }
 
                             // 文本：中央图标 + 首行预览（文本素材从此可辨识，不再只是色块）。
@@ -1145,9 +1164,9 @@ export component AppWindow inherits Window {
         //（框架 animate，非手绘）。关闭端是 if 销毁、Slint 即时移除，无出场过渡；
         // 动画时长受「界面动画」设置钳制，关了就 0ms 直达。
         if root.target-mode == UiEnums.target-mode-choose: Rectangle {
-            property <bool> shown: !root.animations-enabled;
+            property <bool> shown: root.target-picker-shown;
             init => {
-                shown = true;
+                root.overlay-mounted(0);
             }
 
             opacity: shown ? 1.0 : 0.0;
@@ -1251,9 +1270,9 @@ export component AppWindow inherits Window {
 
         // 导入菜单：左下角「导入素材…」上方弹出（向上避免越过窗口底缘）。
         if root.import-menu-open: Rectangle {
-            property <bool> shown: !root.animations-enabled;
+            property <bool> shown: root.import-menu-shown;
             init => {
-                shown = true;
+                root.overlay-mounted(1);
             }
 
             opacity: shown ? 1.0 : 0.0;
@@ -1357,9 +1376,9 @@ export component AppWindow inherits Window {
 
         // 设置面板：右对齐锚在设置按钮下方。
         if root.settings-open: Rectangle {
-            property <bool> shown: !root.animations-enabled;
+            property <bool> shown: root.settings-shown;
             init => {
-                shown = true;
+                root.overlay-mounted(2);
             }
 
             opacity: shown ? 1.0 : 0.0;

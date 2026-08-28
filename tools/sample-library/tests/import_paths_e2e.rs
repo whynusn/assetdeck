@@ -27,7 +27,15 @@ fn temp_root(tag: &str) -> PathBuf {
 }
 
 fn write_png(path: &Path, gray: u8) {
-    let img = image::RgbImage::from_fn(32, 32, |_x, _y| image::Rgb([gray, gray, gray]));
+    // pHash 对平坦图全部同值（DCT 低频符号与亮度均值无关）：纯色 fixture
+    // 会随机触发导入去重（Duplicate 与并发调度顺序相关）。x/y 梯度给足结构。
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([
+            (x * 3) as u8,
+            (y * 3) as u8,
+            gray.wrapping_add((x * y) as u8),
+        ])
+    });
     DynamicImage::ImageRgb8(img)
         .save(path)
         .expect("写测试图失败");

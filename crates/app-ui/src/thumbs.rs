@@ -20,7 +20,7 @@
 //! 首次渲染本来就要做的解码，只是分期执行；缩略图生成 / 原始媒体解码仍全部在
 //! worker 进程。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -125,6 +125,8 @@ pub(crate) struct GridCtx {
     tiles: Rc<VecModel<TileData>>,
     thumbs: ThumbSource,
     cache: Rc<RefCell<ThumbCache>>,
+    /// 上一轮填充 pass 的滚动位置（D54 几何稳定判据：相邻两轮 <0.5px 视为静止）。
+    last_fill_y: Cell<f32>,
 }
 
 impl GridCtx {
@@ -141,6 +143,7 @@ impl GridCtx {
             tiles,
             thumbs,
             cache,
+            last_fill_y: Cell::new(f32::NAN),
         }
     }
 
@@ -189,10 +192,14 @@ impl GridCtx {
             built
         };
 
-        if built.missing == 0 {
-            // 补齐（含负缓存收敛）：停表。
+        // D54：停表判据 = 缺图补完 **且** 几何稳定（滚动回弹中缺图数会瞬态
+        // 归零，旧判据在此过早停表 → 底边漏补）。静止后的最终一轮空 pass 停表
+        // （多跑 ≤1 轮，D54 已接受）。
+        let this_y = scroll_top;
+        if fill_should_stop(built.missing, this_y, self.last_fill_y.get()) {
             return;
         }
+        self.last_fill_y.set(this_y);
 
         let row_count = self.tiles.row_count();
         for (row, tile) in &built.updates {
@@ -216,6 +223,16 @@ impl GridCtx {
         });
     }
 }
+
+/// D54 停表判据（纯函数，表驱动单测）：缺图数为 0 且滚动位置稳定（相邻两轮
+/// 位移 < 0.5px）才停。首次进入 fill_pass 时 last_fill_y 为 NaN → 判据恒假
+/// （NaN 比较不等），保证首 pass 至少续跑一轮拿到真实参考位。
+fn fill_should_stop(missing: usize, y_new: f32, y_last: f32) -> bool {
+    missing == 0 && (y_new - y_last).abs() < FILL_STABLE_EPSILON
+}
+
+/// 几何稳定阈值（逻辑像素）。低于这个位移视为滚动已静止。
+const FILL_STABLE_EPSILON: f32 = 0.5;
 
 /// 一次 build_rows 的产物。
 struct WindowBuild {
@@ -263,13 +280,20 @@ fn build_rows(
                 });
 
             let mut loaded_real = false;
+            // D53 淡入：缓存命中或新装出 = 有图（fade=true）；缺图占位与负缓存
+            // = false（fill 补齐翻转时才播；挂载即命中不重播）。
+            let mut thumb_fade = false;
             let thumb = match cache.get(id.0) {
-                Some(img) => img,
+                Some(img) => {
+                    thumb_fade = true;
+                    img
+                }
                 None if budget > 0 => {
                     budget -= 1;
                     match load_display_thumb(thumbs_guard.as_ref(), id) {
                         Some(img) => {
                             loaded_real = true;
+                            thumb_fade = true;
                             cache.put(id.0, img.clone());
                             img
                         }
@@ -302,6 +326,7 @@ fn build_rows(
                 thumb,
                 kind: ui_enums::card_kind(kind),
                 preview: card.preview.into(),
+                thumb_fade,
                 // D47 勾选态：瓦片重绘时从选区状态机现取（sync 由壳层在
                 // 选区变化后统一触发，这里不缓存）。
                 selected: vm.is_selected(id),
@@ -398,5 +423,28 @@ mod thumb_cache_spec {
         cache.put(7, slint::Image::default());
         assert_eq!(cache.len(), 1);
         assert!(cache.get(7).is_some());
+    }
+}
+
+#[cfg(test)]
+mod fill_stability_spec {
+    use super::fill_should_stop;
+
+    /// D54 表驱动：停/续/缺图/阈值内漂移四组（design §3）。
+    #[test]
+    fn fill_should_stop_table() {
+        let cases: &[(usize, f32, f32, bool, &str)] = &[
+            // (missing, y_new, y_last, 期望停表, 说明)
+            (0, 120.0, 120.0, true, "补完 + 稳定 = 停"),
+            (0, 120.0, 132.0, false, "补完 + 漂移 = 续（回弹中不许停）"),
+            (3, 120.0, 120.0, false, "缺图 + 稳定 = 续"),
+            (3, 120.0, 132.0, false, "缺图 + 漂移 = 续"),
+            (0, 120.0, 120.4, true, "阈值内漂移（<0.5px）= 稳定"),
+            (0, 120.0, 120.6, false, "阈值外漂移（≥0.5px）= 不稳定"),
+            (0, 0.0, f32::NAN, false, "首轮无参考位 = 续（NaN 判据恒假）"),
+        ];
+        for &(missing, y_new, y_last, expected, why) in cases {
+            assert_eq!(fill_should_stop(missing, y_new, y_last), expected, "{why}");
+        }
     }
 }
