@@ -3,7 +3,7 @@
   "name": "batch1-crud",
   "title": "素材 CRUD：回收站+多选模式+右键菜单（D46/D47/D48）",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": "app-ui",
