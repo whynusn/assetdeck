@@ -3,6 +3,7 @@
 //! 包格式支持通过 `packages::PackageRegistry` 注册（当前内置目录与千牛 .emo），
 //! 新增 zip/eagle 等格式不再改动本文件（综合分析报告「三.1」）。
 
+mod library_cmd;
 mod packages;
 
 use std::path::{Path, PathBuf};
@@ -89,6 +90,10 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
 
 fn run() -> Result<(), String> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // D46/D48 库写子命令族先于导入分支拦截（壳层 ChildTaskRunner 驱动）。
+    if let Some(cmd) = library_cmd::parse_library_cmd(&raw)? {
+        return library_cmd::execute(&cmd);
+    }
     if raw.first().map(String::as_str) == Some("export") {
         if raw.len() < 3 {
             return Err("usage: sample-library export <library-root> <output.emo>".into());

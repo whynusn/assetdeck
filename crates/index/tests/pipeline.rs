@@ -217,3 +217,90 @@ fn soa_rows_survive_upsert_and_remove_semantics() {
     assert_eq!(index.kind(1), AssetKind::Other);
     assert_eq!(ids(&index.evaluate(&Filter::HasTag(TAG_RED))), vec![2]);
 }
+
+// ---------------------------------------------------------------------------
+// D46 回收站：tombstone 位图——查询不可见但行数据可读；恢复回填类目成员；
+// insert_as_deleted 保持行号位置对齐（装载期契约）。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mark_deleted_hides_from_every_query_but_keeps_row() {
+    let mut index = idx();
+    assert!(index.mark_deleted(AssetId(2)));
+    // 一切查询路径不可见：活集 / All / 类目 / 标签 / 名称扫描 / 计数。
+    assert_eq!(index.len(), 4);
+    assert!(!index.all_ids().contains(2));
+    assert_eq!(ids(&index.evaluate(&Filter::All)), vec![1, 3, 4, 5]);
+    assert_eq!(
+        ids(&index.evaluate(&Filter::InCategory(CAT_PHOTO))),
+        vec![1]
+    );
+    assert_eq!(ids(&index.evaluate(&Filter::HasTag(TAG_RED))), vec![1]);
+    assert!(!index
+        .evaluate(&Filter::NameContains("b".into()))
+        .contains(2));
+    // 幂等：已删再删返回 false。
+    assert!(!index.mark_deleted(AssetId(2)));
+    // 但行数据必须可读（回收站视图/属性面板），且状态可查询。
+    assert_eq!(index.name(2), Some("b"));
+    assert!(index.asset(2).is_some());
+    assert!(index.is_deleted(AssetId(2)));
+}
+
+#[test]
+fn unmark_restores_category_membership_from_row_table() {
+    let mut index = idx();
+    index.mark_deleted(AssetId(2));
+    assert!(index.unmark_deleted(AssetId(2)));
+    assert_eq!(ids(&index.evaluate(&Filter::All)), vec![1, 2, 3, 4, 5]);
+    // 类目按行表回填；tags 不回填（v1 边界：恢复后走重载，位图真相在 store）。
+    assert_eq!(
+        ids(&index.evaluate(&Filter::InCategory(CAT_PHOTO))),
+        vec![1, 2]
+    );
+    assert_eq!(ids(&index.evaluate(&Filter::HasTag(TAG_RED))), vec![1]);
+    // 幂等：非回收站行 unmark 返回 false。
+    assert!(!index.unmark_deleted(AssetId(2)));
+}
+
+#[test]
+fn insert_revives_soft_deleted_row() {
+    let mut index = idx();
+    index.mark_deleted(AssetId(2));
+    // 「删后又改」（如移动到分类的 upsert 写回）必须复活行。
+    index.insert(&asset_of(2, "b2", Some(CAT_VIDEO), vec![TAG_BLUE], 200));
+    assert!(!index.is_deleted(AssetId(2)));
+    assert_eq!(
+        ids(&index.evaluate(&Filter::InCategory(CAT_VIDEO))),
+        vec![2, 3, 4]
+    );
+}
+
+#[test]
+fn insert_as_deleted_keeps_row_alignment_and_skips_facets() {
+    let mut index = idx();
+    let ghost = asset_of(9, "ghost", Some(CAT_PHOTO), vec![TAG_RED], 999);
+    index.insert_as_deleted(&ghost);
+    // 行号 9 落点即回收站：活集与 facet 都不含，len 不增。
+    assert_eq!(index.len(), 5);
+    assert!(!index.evaluate(&Filter::InCategory(CAT_PHOTO)).contains(9));
+    assert!(!index.evaluate(&Filter::HasTag(TAG_RED)).contains(9));
+    // 但行数据在（位置对齐：下标 9 即该行），可被恢复。
+    assert_eq!(index.name(9), Some("ghost"));
+    assert!(index.is_deleted(AssetId(9)));
+    assert!(index.unmark_deleted(AssetId(9)));
+    assert_eq!(
+        ids(&index.evaluate(&Filter::InCategory(CAT_PHOTO))),
+        vec![1, 2, 9]
+    );
+}
+
+#[test]
+fn remove_clears_tombstone_membership() {
+    let mut index = idx();
+    index.mark_deleted(AssetId(3));
+    // 彻底删除（重载前的 remove）：tombstone 集也不得留成员，否则行孔两栖。
+    index.remove(AssetId(3));
+    assert!(!index.is_deleted(AssetId(3)));
+    assert!(!index.unmark_deleted(AssetId(3)));
+}

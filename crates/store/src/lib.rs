@@ -8,9 +8,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 4;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -125,6 +125,15 @@ const MIGRATION_V3: &str = "
 CREATE INDEX IF NOT EXISTS idx_assets_phash ON assets(phash);
 ";
 
+/// v4：回收站（D46）。`deleted` 为 tombstone 标志（0=正常，1=回收站）。
+///
+/// 软删**不触 file_name**，FTS 行原样保留（AFTER UPDATE OF file_name 触发器
+/// 不发射）——因此一切面向用户的读取路径必须显式 `deleted = 0` 过滤，
+/// FTS 侧靠与 assets 的 JOIN 过滤。这条纪律写在这里，勿靠调用方自觉。
+const MIGRATION_V4: &str = "
+ALTER TABLE assets ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
+";
+
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -188,6 +197,9 @@ impl Store {
         }
         if found < 3 {
             conn.execute_batch(MIGRATION_V3)?;
+        }
+        if found < 4 {
+            conn.execute_batch(MIGRATION_V4)?;
         }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
@@ -298,6 +310,8 @@ impl Store {
 
     /// FTS5 trigram 全文检索：查询须为连续子串且 ≥3 字符（tokenizer 固有限制）。
     /// 查询以引号短语形式传入，规避 FTS5 查询语法对标点/保留字的解析。
+    /// D46 纪律：软删不触 file_name、FTS 行保留，所以这里必须 JOIN assets
+    /// 过滤 `deleted = 0`——回收站素材永不出现在搜索结果。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let conn = self.lock();
         let phrase = format!("\"{}\"", query.replace('"', "\"\""));
@@ -305,7 +319,7 @@ impl Store {
             "SELECT a.uuid, a.file_name
              FROM assets_fts
              JOIN assets a ON a.uuid = assets_fts.uuid
-             WHERE assets_fts MATCH ?1
+             WHERE assets_fts MATCH ?1 AND a.deleted = 0
              LIMIT ?2",
         )?;
         let hits = stmt.query_map(params![phrase, limit as i64], |row| {
@@ -327,14 +341,127 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// 全库资产计数（去重判定与测试用）。
+    // -------------------------------------------------------------------------
+    // D46 回收站（tombstone）。软删只翻标志位，行、tags、FTS 全部保留；
+    // 彻底删除仍走 delete_asset（FTS 删除触发 + tags 级联）。
+    // -------------------------------------------------------------------------
+
+    /// 批量移入回收站（UPDATE deleted=1）。返回命中的行数（不含已删除/不存在）；
+    /// 单次事务提交，批量语义与 upsert_assets 的 fsync 教训一致。
+    pub fn soft_delete_assets(&self, uuids: &[&str]) -> Result<usize> {
+        if uuids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome: Result<usize> = (|| {
+            let mut stmt = conn
+                .prepare_cached("UPDATE assets SET deleted = 1 WHERE uuid = ?1 AND deleted = 0")?;
+            let mut total = 0usize;
+            for uuid in uuids {
+                total += stmt.execute(params![uuid])?;
+            }
+            Ok(total)
+        })();
+        match outcome {
+            Ok(total) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(total)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 批量恢复（UPDATE deleted=0）。语义同 soft_delete_assets，返回命中行数。
+    pub fn restore_assets(&self, uuids: &[&str]) -> Result<usize> {
+        if uuids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome: Result<usize> = (|| {
+            let mut stmt = conn
+                .prepare_cached("UPDATE assets SET deleted = 0 WHERE uuid = ?1 AND deleted = 1")?;
+            let mut total = 0usize;
+            for uuid in uuids {
+                total += stmt.execute(params![uuid])?;
+            }
+            Ok(total)
+        })();
+        match outcome {
+            Ok(total) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(total)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 单行 tombstone 查询（属性面板/恢复路径的容错用）。行不存在 = false。
+    pub fn is_deleted(&self, uuid: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n: Option<i64> = conn
+            .query_row(
+                "SELECT deleted FROM assets WHERE uuid = ?1",
+                params![uuid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(n == Some(1))
+    }
+
+    /// 回收站 uuid 清单，升序（启动回填 FacetIndex 用，一次读；量级受回收站大小约束）。
+    pub fn deleted_uuids(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT uuid FROM assets WHERE deleted = 1 ORDER BY uuid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 窄列改分类（D48「移动到分类」/D50「统一归入」的唯一写口）。
+    ///
+    /// 同 set_dimensions 的理由：派生/UI 侧只改这一个字段，不读出整行再写回
+    /// （并发下旧快照会覆盖新字段）。`None` = 归待分类（category 置 NULL）。
+    pub fn set_category(&self, uuid: &str, category: Option<&str>) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE assets SET category = ?2 WHERE uuid = ?1",
+            params![uuid, category],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 窄列改名（D48 重命名）。UPDATE file_name 自动触发 FTS 重排（v1 触发器），
+    /// 不动 `objects/<uuid>/raw.<ext>` 物理路径——rel_path 与 file_name 解耦是 D14 起的既有语义。
+    pub fn rename_asset(&self, uuid: &str, new_name: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE assets SET file_name = ?2 WHERE uuid = ?1",
+            params![uuid, new_name],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 全库资产计数（导入不变量与测试用）。**含回收站行**——这是低层原语，
+    /// 语义如实命名；面向用户视图的计数走 distinct_categories / for_each_asset_active。
     pub fn all_assets_count(&self) -> Result<i64> {
         let conn = self.lock();
         conn.query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
             .map_err(StoreError::from)
     }
 
-    /// 列出去重后的分类及其计数（分面视图入口）。
+    /// 列出去重后的分类及其计数（分面视图入口），**排除回收站**（D46：回收站
+    /// 素材不占分类计数）。
     ///
     /// category IS NULL 归到 `INBOX_CATEGORY`（与 library 层落库缺省一致），
     /// 结果按分类名升序，确定性可测。
@@ -342,7 +469,7 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT COALESCE(category, ?1) AS name, COUNT(*)
-             FROM assets GROUP BY name ORDER BY name",
+             FROM assets WHERE deleted = 0 GROUP BY name ORDER BY name",
         )?;
         let rows = stmt.query_map(params![INBOX_CATEGORY], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -354,10 +481,15 @@ impl Store {
         Ok(out)
     }
 
-    /// 列出去重后的标签及其计数（分面视图入口），按标签名升序。
+    /// 列出去重后的标签及其计数（分面视图入口），按标签名升序，**排除回收站**
+    /// （D46：回收站素材不占标签计数；purge 级联删 tags 行，软删行 tags 保留但不可见）。
     pub fn distinct_tags(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT tag, COUNT(*) FROM tags GROUP BY tag ORDER BY tag")?;
+        let mut stmt = conn.prepare(
+            "SELECT tag, COUNT(*) FROM tags
+             WHERE asset_uuid IN (SELECT uuid FROM assets WHERE deleted = 0)
+             GROUP BY tag ORDER BY tag",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -420,7 +552,8 @@ impl Store {
     /// 可能对应多行（不同图撞出相同 64 位 hash），全部返回由调用方二次过滤。
     pub fn uuids_for_phash_exact(&self, bytes: &[u8]) -> Result<Vec<String>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached("SELECT uuid FROM assets WHERE phash = ?1 LIMIT 16")?;
+        let mut stmt = conn
+            .prepare_cached("SELECT uuid FROM assets WHERE phash = ?1 AND deleted = 0 LIMIT 16")?;
         let rows = stmt.query_map(params![bytes], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
@@ -429,10 +562,13 @@ impl Store {
         Ok(out)
     }
 
-    /// 全库 pHash 清单（uuid, hash 大端字节）。导入去重在 library 层比对。
+    /// 全库 pHash 清单（uuid, hash 大端字节），**排除回收站**（D46：回收站素材
+    /// 不得挡新导入的去重判定——恢复与导入的去重语义由 library 层组合）。
+    /// 导入去重在 library 层比对。
     pub fn all_phashes(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT uuid, phash FROM assets WHERE phash IS NOT NULL")?;
+        let mut stmt =
+            conn.prepare("SELECT uuid, phash FROM assets WHERE phash IS NOT NULL AND deleted = 0")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
@@ -443,22 +579,42 @@ impl Store {
         Ok(out)
     }
 
-    /// 按 uuid 升序遍历全库资产元数据，逐行回调（含 tags）。
+    /// 按 uuid 升序遍历全库资产元数据，逐行回调（含 tags）。**含回收站行**——
+    /// 审计/对账路径专用；面向用户视图（浏览/派生/导出）必须用
+    /// [`for_each_asset_active`](Self::for_each_asset_active)（D46 纪律）。
     ///
     /// 不物化全量 Vector——调用方边遍历边装配下游结构，峰值驻留只多一行，
     /// 契合 D3/D4「禁止全量载入内存」红线。行序 = uuid 字典序（索引扫描，
     /// 确定性）；tags 排序语义与 get_asset 一致。
     /// 注意：遍历期间持有连接锁（回调禁止再查同一 store，会自锁；跨进程
     /// 写不受影响——WAL 下读写各自独立）。
-    pub fn for_each_asset<F>(&self, mut visit: F) -> Result<()>
+    pub fn for_each_asset<F>(&self, visit: F) -> Result<()>
     where
         F: FnMut(AssetMeta),
     {
+        self.for_each_asset_impl(false, visit)
+    }
+
+    /// 同 [`for_each_asset`](Self::for_each_asset_active)，但跳过回收站行。
+    /// 两条路径共用 `ORDER BY uuid`——uuid 升序不变量是 FTS 结果二分映射
+    /// （D52）与行号定位的地基，任何改动不得破坏（store_spec 有守卫测试）。
+    pub fn for_each_asset_active<F>(&self, visit: F) -> Result<()>
+    where
+        F: FnMut(AssetMeta),
+    {
+        self.for_each_asset_impl(true, visit)
+    }
+
+    fn for_each_asset_impl<F>(&self, only_active: bool, mut visit: F) -> Result<()>
+    where
+        F: FnMut(AssetMeta),
+    {
+        const SQL_ALL: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
+             FROM assets ORDER BY uuid";
+        const SQL_ACTIVE: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
+             FROM assets WHERE deleted = 0 ORDER BY uuid";
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
-             FROM assets ORDER BY uuid",
-        )?;
+        let mut stmt = conn.prepare_cached(if only_active { SQL_ACTIVE } else { SQL_ALL })?;
         let mut tag_stmt =
             conn.prepare_cached("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
         let mut rows = stmt.query([])?;

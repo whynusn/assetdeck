@@ -291,3 +291,197 @@ fn distinct_tags_group_count_across_assets() {
     assert_eq!(map.get("促销"), Some(&1));
     assert_eq!(map.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// D46 回收站（tombstone）：schema v4 软删除语义。
+// 契约：软删不动正本行、FTS 行保留（查询侧必须 JOIN 过滤 deleted）、
+// 恢复即复位标志；彻底删除仍走 delete_asset 硬删。
+// ---------------------------------------------------------------------------
+
+/// v3 旧库打开必须原地升 v4：`deleted` 列出现、历史行默认 0、FTS/数据不丢。
+#[test]
+fn v3_database_migrates_in_place_to_v4() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy3.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL,
+               file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '',
+               category TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash BLOB,
+               width INTEGER,
+               height INTEGER
+             );
+             CREATE TABLE tags (
+               asset_uuid TEXT NOT NULL REFERENCES assets(uuid) ON DELETE CASCADE,
+               tag TEXT NOT NULL,
+               PRIMARY KEY (asset_uuid, tag)
+             );
+             CREATE VIRTUAL TABLE assets_fts USING fts5(uuid UNINDEXED, name, tokenize='trigram');
+             CREATE INDEX idx_assets_phash ON assets(phash);
+             INSERT INTO assets (uuid, file_name, rel_path) VALUES ('old-9', '老图三.jpg', 'objects/old-9/raw.jpg');
+             INSERT INTO assets_fts (uuid, name) VALUES ('old-9', '老图三.jpg');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
+    let s = Store::open(&db_path).unwrap();
+    assert_eq!(s.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    // 历史行存在且默认未删除；FTS 命中保持。
+    assert!(s.get_asset("old-9").unwrap().is_some());
+    assert!(!s.is_deleted("old-9").unwrap());
+    assert_eq!(s.search("老图三", 10).unwrap().len(), 1);
+    // 软删该历史行 → deleted_uuids 含之，search 不再命中。
+    assert_eq!(s.soft_delete_assets(&["old-9"]).unwrap(), 1);
+    assert_eq!(s.deleted_uuids().unwrap(), vec!["old-9".to_string()]);
+    assert!(
+        s.search("老图三", 10).unwrap().is_empty(),
+        "FTS 查询必须过滤回收站"
+    );
+    // 重开幂等：不得重复 ALTER。
+    drop(s);
+    let again = Store::open(&db_path).unwrap();
+    assert!(again.is_deleted("old-9").unwrap());
+}
+
+/// 软删 → 恢复闭环：标志位翻转、行与 tags 全程保留。
+#[test]
+fn soft_delete_then_restore_keeps_row_and_tags() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("u-a", "甲图.jpg")).unwrap();
+    s.upsert_asset(&meta("u-b", "乙图.jpg")).unwrap();
+
+    assert_eq!(
+        s.soft_delete_assets(&["u-a", "missing", "u-b"]).unwrap(),
+        2,
+        "不存在的 uuid 只少计，不报错"
+    );
+    assert!(s.is_deleted("u-a").unwrap());
+    assert_eq!(
+        s.deleted_uuids().unwrap(),
+        vec!["u-a".to_string(), "u-b".to_string()]
+    );
+    // 软删不是删行：get_asset 仍可读（恢复/属性面板要用），计数不变。
+    assert_eq!(s.get_asset("u-a").unwrap().unwrap().file_name, "甲图.jpg");
+    assert_eq!(s.all_assets_count().unwrap(), 2);
+
+    assert_eq!(s.restore_assets(&["u-a"]).unwrap(), 1);
+    assert!(!s.is_deleted("u-a").unwrap());
+    assert_eq!(s.deleted_uuids().unwrap(), vec!["u-b".to_string()]);
+
+    // 恢复不存在/未删除的行：返回 0，不报错。
+    assert_eq!(s.restore_assets(&["missing"]).unwrap(), 0);
+    assert_eq!(s.restore_assets(&["u-a"]).unwrap(), 0);
+}
+
+/// 分类/标签分面计数、pHash 去重清单、active 遍历全部排除回收站。
+#[test]
+fn facet_and_dedup_reads_exclude_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("f-1", "a.jpg");
+    a.category = Some("风景".to_string());
+    let mut b = meta("f-2", "b.jpg");
+    b.category = Some("风景".to_string());
+    let mut c = meta("f-3", "c.jpg");
+    c.category = Some("表情".to_string());
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&b).unwrap();
+    s.upsert_asset(&c).unwrap();
+
+    s.soft_delete_assets(&["f-2"]).unwrap();
+    let map: std::collections::HashMap<_, _> =
+        s.distinct_categories().unwrap().into_iter().collect();
+    assert_eq!(map.get("风景"), Some(&1), "回收站素材不占分类计数");
+
+    s.soft_delete_assets(&["f-1", "f-3"]).unwrap();
+    assert!(s.distinct_categories().unwrap().is_empty());
+
+    // 去重清单：三个 phash 相同，全删后清单为空（回收站素材不得挡新导入）。
+    assert!(s.all_phashes().unwrap().is_empty());
+    assert!(s.uuids_for_phash_exact(&[0xAB; 8]).unwrap().is_empty());
+}
+
+/// `for_each_asset_active` 跳过 deleted 且保持 uuid 升序（FTS 二分映射的不变量）。
+#[test]
+fn for_each_asset_active_skips_deleted_and_stays_sorted() {
+    let s = Store::open_in_memory().unwrap();
+    for (uuid, name) in [("z-1", "z.jpg"), ("a-1", "a.jpg"), ("m-1", "m.jpg")] {
+        s.upsert_asset(&meta(uuid, name)).unwrap();
+    }
+    s.soft_delete_assets(&["m-1"]).unwrap();
+
+    let mut seen = Vec::new();
+    s.for_each_asset_active(|m| seen.push(m.uuid)).unwrap();
+    assert_eq!(
+        seen,
+        vec!["a-1".to_string(), "z-1".to_string()],
+        "跳删且升序"
+    );
+    // 无过滤版行为不变：仍见全部三行。
+    let mut all = Vec::new();
+    s.for_each_asset(|m| all.push(m.uuid)).unwrap();
+    assert_eq!(all.len(), 3);
+}
+
+/// 窄列改名：UPDATE file_name 后 FTS 触发器自动重排索引（新名命中、旧名消失）。
+#[test]
+fn rename_asset_reindexes_fts_via_trigger() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("r-1", "红色卫衣.jpg")).unwrap();
+
+    assert!(s.rename_asset("r-1", "蓝色夹克.jpg").unwrap());
+    assert_eq!(
+        s.get_asset("r-1").unwrap().unwrap().file_name,
+        "蓝色夹克.jpg"
+    );
+    assert!(
+        s.search("红色卫衣", 10).unwrap().is_empty(),
+        "旧名不得残留索引"
+    );
+    assert_eq!(s.search("蓝色夹克", 10).unwrap().len(), 1, "新名必须可检索");
+    assert!(
+        !s.rename_asset("missing", "x.jpg").unwrap(),
+        "行不存在返回 false"
+    );
+}
+
+/// 窄列改分类：只动 category，其余字段（尺寸/tags/…）不受扰动。
+#[test]
+fn set_category_narrow_update_perturbs_nothing_else() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("c-1", "c.jpg")).unwrap();
+    s.set_dimensions("c-1", 100, 50).unwrap();
+
+    assert!(s.set_category("c-1", Some("新分类")).unwrap());
+    let after = s.get_asset("c-1").unwrap().unwrap();
+    assert_eq!(after.category.as_deref(), Some("新分类"));
+    assert_eq!((after.width, after.height), (Some(100), Some(50)));
+    assert_eq!(after.tags.len(), 2, "tags 不动");
+
+    // Some(None 语义)：归入待分类 = 置 NULL。
+    assert!(s.set_category("c-1", None).unwrap());
+    assert_eq!(s.get_asset("c-1").unwrap().unwrap().category, None);
+    assert!(!s.set_category("missing", Some("x")).unwrap());
+}
+
+/// 软删素材改名后再恢复：检索按新名命中（改名不要求先恢复）。
+#[test]
+fn renamed_deleted_asset_searchable_after_restore() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("n-1", "旧文件名.jpg")).unwrap();
+    s.soft_delete_assets(&["n-1"]).unwrap();
+    s.rename_asset("n-1", "新文件名.jpg").unwrap();
+    assert!(
+        s.search("新文件名", 10).unwrap().is_empty(),
+        "回收站中不可见"
+    );
+    s.restore_assets(&["n-1"]).unwrap();
+    assert_eq!(s.search("新文件名", 10).unwrap().len(), 1);
+}

@@ -27,6 +27,9 @@ pub struct FacetIndex {
     by_tag: HashMap<u32, RoaringBitmap>,
     /// 活集合：contains(id) 恒等于「id 对应行可被查询」（remove 只退位图，行留孔）。
     all: RoaringBitmap,
+    /// D46 回收站 tombstone：与 `all` 互斥的行集。mark 后行数据保留（属性
+    /// 面板/恢复要读），evaluate/len/name 等一切查询路径视同不存在。
+    deleted: RoaringBitmap,
     tag_counts_cache: Option<HashMap<TagId, u64>>,
 }
 
@@ -36,9 +39,46 @@ impl FacetIndex {
     }
 
     /// 插入或覆盖（upsert 语义）：同 id 旧记录的所有 facet 成员关系先被撤销。
+    /// 覆盖写会把被 D46 标删的行重新复活——「重写即活行」是 store 侧 upsert
+    /// 的既有语义，索引必须一致，否则删后又改的素材会隐身。
+    /// 例外：[`insert_as_deleted`] 以「装载期回收站回填」为目的，保留标删态。
     pub fn insert(&mut self, asset: &Asset) {
+        self.insert_impl(asset, false);
+    }
+
+    /// 装载期专用：按 upsert 语义写行数据，但目标行落点在回收站（不进活集、
+    /// 不进 facet 位图、不占标签计数缓存）。`load_real_library` 用它保持
+    /// 「行号 = uuids 下标」的位置对齐契约不破（D52 二分映射的地基）。
+    pub fn insert_as_deleted(&mut self, asset: &Asset) {
+        self.insert_impl(asset, true);
+    }
+
+    fn insert_impl(&mut self, asset: &Asset, deleted: bool) {
         let id = asset.id.0;
         let row = id as usize;
+        if deleted {
+            // 标删行先彻底退位（可能曾是活行被覆盖写），再只写行表。
+            self.all.remove(id);
+            for bitmap in self.by_category.values_mut() {
+                bitmap.remove(id);
+            }
+            for bitmap in self.by_tag.values_mut() {
+                bitmap.remove(id);
+            }
+            self.deleted.insert(id);
+        } else {
+            self.deleted.remove(id);
+        }
+        if deleted {
+            // 标删行只写行表：不进活集、不进 facet 位图。
+            self.ensure_row(row);
+            self.names[row] = asset.name.clone().into_boxed_str();
+            self.categories[row] = asset.category.map(|c| c.0);
+            self.created_at[row] = asset.created_at;
+            self.sizes[row] = asset.size_bytes;
+            self.kinds[row] = asset.kind;
+            return;
+        }
         if self.all.contains(id) {
             // 覆盖写既有行：先撤销旧的 facet 成员关系。
             for bitmap in self.by_category.values_mut() {
@@ -67,6 +107,7 @@ impl FacetIndex {
     }
 
     pub fn remove(&mut self, id: AssetId) {
+        self.deleted.remove(id.0);
         if !self.all.remove(id.0) {
             return;
         }
@@ -79,6 +120,46 @@ impl FacetIndex {
         self.tag_counts_cache = None;
     }
 
+    /// D46：把行标进回收站——从活集与 facet 位图摘除，但**保留行数据**
+    /// （属性面板与恢复路径要读；恢复后类目直接按行表回填）。返回是否发生
+    /// 迁移（已删/不存在的行返回 false，幂等）。
+    ///
+    /// 已知 v1 边界：tag 成员关系不回填（标签真相在 store，恢复后走一次
+    /// 库重载即一致）；类目成员在 unmark 时从行表恢复。
+    pub fn mark_deleted(&mut self, id: AssetId) -> bool {
+        if !self.all.remove(id.0) {
+            return false;
+        }
+        for bitmap in self.by_category.values_mut() {
+            bitmap.remove(id.0);
+        }
+        for bitmap in self.by_tag.values_mut() {
+            bitmap.remove(id.0);
+        }
+        self.deleted.insert(id.0);
+        self.tag_counts_cache = None;
+        true
+    }
+
+    /// 恢复出回收站：回到活集，类目成员按行表回填；tags 不回填（见上边界）。
+    /// 返回是否发生迁移（非回收站行返回 false，幂等）。
+    pub fn unmark_deleted(&mut self, id: AssetId) -> bool {
+        if !self.deleted.remove(id.0) {
+            return false;
+        }
+        self.all.insert(id.0);
+        if let Some(Some(cat)) = self.categories.get(id.0 as usize).copied() {
+            self.by_category.entry(cat).or_default().insert(id.0);
+        }
+        self.tag_counts_cache = None;
+        true
+    }
+
+    /// 行是否处于回收站（区分「留孔的 remove」与「软删」两种不可见）。
+    pub fn is_deleted(&self, id: AssetId) -> bool {
+        self.deleted.contains(id.0)
+    }
+
     pub fn len(&self) -> u64 {
         self.all.len()
     }
@@ -87,10 +168,11 @@ impl FacetIndex {
         self.all.is_empty()
     }
 
-    /// 兼容视图重建：返回自持的 Asset 副本（不含 tags）。
-    /// 仅供测试/演示路径使用；热路径请用 [`Self::name`] / [`Self::kind`] 等窄接口。
+    /// 兼容视图重建：返回自持的 Asset 副本（不含 tags）。活行与回收站行都可
+    /// 读（后者供回收站视图）。仅供测试/演示路径使用；热路径请用
+    /// [`Self::name`] / [`Self::kind`] 等窄接口。
     pub fn asset(&self, id: u32) -> Option<Asset> {
-        if !self.all.contains(id) {
+        if !self.visible_row(id) {
             return None;
         }
         let row = id as usize;
@@ -109,17 +191,23 @@ impl FacetIndex {
         })
     }
 
-    /// 活集合内某资产的文件名（渲染热路径，零分配借引用）。
+    /// 行数据可见性判定：活行与回收站行都**可**读——回收站视图与属性面板
+    /// 要显示它们；「查询不可见」由各过滤器求值走 `all`/facet 位图保证。
+    fn visible_row(&self, id: u32) -> bool {
+        self.all.contains(id) || self.deleted.contains(id)
+    }
+
+    /// 活集合内某资产的文件名（渲染热路径，零分配借引用）；回收站行同样可读。
     pub fn name(&self, id: u32) -> Option<&str> {
-        if !self.all.contains(id) {
+        if !self.visible_row(id) {
             return None;
         }
         self.names.get(id as usize).map(|s| s.as_ref())
     }
 
-    /// 活集合内某资产的素材类别；未知行回落 Other。
+    /// 行数据所属类别（活行与回收站行都可读）；未知行回落 Other。
     pub fn kind(&self, id: u32) -> AssetKind {
-        if !self.all.contains(id) {
+        if !self.visible_row(id) {
             return AssetKind::Other;
         }
         self.kinds

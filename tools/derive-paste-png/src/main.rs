@@ -57,7 +57,8 @@ fn run() -> Result<(), String> {
     let mut missing_source = 0usize;
 
     store
-        .for_each_asset(|meta| {
+        .for_each_asset_active(|meta| {
+            // D46：回收站素材不回填派生 paste.png。
             let ext = extension_of(&meta.rel_path);
             if !DERIVABLE.contains(&ext.as_str()) {
                 skipped_kind += 1;

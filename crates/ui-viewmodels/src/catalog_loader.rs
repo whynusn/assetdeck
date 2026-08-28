@@ -187,6 +187,13 @@ impl RealAssetResolver {
         &self.facets
     }
 
+    /// FTS5 全文检索直通（store 侧已 JOIN 过滤 `deleted=0`，回收站行不泄漏）。
+    /// 检索 UI 的两条路之一：内存名扫描走 `FacetIndex::NameContains`，
+    /// 全文/标签语义走这里，结果以 uuid 二分回 `uuids` 行号（D52）。
+    pub fn store_search(&self, query: &str, limit: usize) -> Result<Vec<store::SearchHit>> {
+        Ok(self.store.search(query, limit)?)
+    }
+
     /// 浏览用缩略图的绝对路径；文件不存在时返回 `None`（瓦片回落纯色）。
     ///
     /// 只回路径不读字节：渲染端按需装载并自己管住驻留，避免「VM 存编码字节 +
@@ -347,35 +354,55 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
     // 名称 → 命中计数（按 id 累加），装配 LibraryFacets 时排序为条目表。
     let mut category_counts: HashMap<String, u32> = HashMap::new();
     let mut tag_counts: HashMap<String, u32> = HashMap::new();
+    // D46：回收站清单先行（遍历回调内不可再查 store——连接锁自锁）。
+    // 行号必须与 uuids 位置对齐（D52 的 FTS uuid 二分地基），所以回收站行
+    // 也占号：走 insert_as_deleted（写行表、不进活集/facet、不计入分面计数）。
+    let deleted: std::collections::HashSet<String> = store.deleted_uuids()?.into_iter().collect();
     let mut next_id: u32 = 0;
-    store.for_each_asset(|meta| {
-        let next_category_id = category_ids.len() as u32;
-        let category = meta.category.as_deref().map(|name| {
-            *category_counts.entry(name.to_string()).or_insert(0) += 1;
-            *category_ids
-                .entry(name.to_string())
-                .or_insert_with(|| CategoryId(next_category_id))
-        });
-        let next_tag_id = tag_ids.len() as u32;
-        let tags = meta
-            .tags
-            .iter()
-            .map(|name| {
-                *tag_counts.entry(name.clone()).or_insert(0) += 1;
-                *tag_ids
-                    .entry(name.clone())
-                    .or_insert_with(|| TagId(next_tag_id))
-            })
-            .collect();
-        idx.insert(&Asset {
+    store.for_each_asset(|mut meta| {
+        let is_deleted = deleted.contains(&meta.uuid);
+        let (category, tags) = if is_deleted {
+            // 回收站行：只占行号保位置对齐，分面注册表与计数都不碰——
+            // 恢复语义走整库重载（与 FacetIndex::unmark_deleted 的 v1 边界一致）。
+            (None, Vec::new())
+        } else {
+            let next_category_id = category_ids.len() as u32;
+            let category = meta.category.as_deref().map(|name| {
+                *category_counts.entry(name.to_string()).or_insert(0) += 1;
+                *category_ids
+                    .entry(name.to_string())
+                    .or_insert_with(|| CategoryId(next_category_id))
+            });
+            let next_tag_id = tag_ids.len() as u32;
+            let tags = meta
+                .tags
+                .iter()
+                .map(|name| {
+                    *tag_counts.entry(name.clone()).or_insert(0) += 1;
+                    *tag_ids
+                        .entry(name.clone())
+                        .or_insert_with(|| TagId(next_tag_id))
+                })
+                .collect();
+            (category, tags)
+        };
+        let kind = media::kind_of(std::path::Path::new(&meta.rel_path));
+        let created_at = meta.created_at;
+        let size_bytes = std::mem::take(&mut meta.size_bytes);
+        let asset = Asset {
             id: AssetId(next_id),
-            name: meta.file_name,
+            name: std::mem::take(&mut meta.file_name),
             category,
             tags,
-            created_at: meta.created_at,
-            size_bytes: Some(meta.size_bytes as u64),
-            kind: media::kind_of(std::path::Path::new(&meta.rel_path)),
-        });
+            created_at,
+            size_bytes: Some(size_bytes as u64),
+            kind,
+        };
+        if is_deleted {
+            idx.insert_as_deleted(&asset);
+        } else {
+            idx.insert(&asset);
+        }
         uuids.push(meta.uuid);
         next_id += 1;
     })?;

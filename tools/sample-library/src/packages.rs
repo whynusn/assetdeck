@@ -440,7 +440,8 @@ fn export_qianniu(
 
         library
             .store()
-            .for_each_asset(|meta| {
+            .for_each_asset_active(|meta| {
+                // D46：回收站素材不得进导出包。
                 if error.borrow().is_some() {
                     return;
                 }

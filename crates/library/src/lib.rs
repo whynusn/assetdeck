@@ -16,8 +16,10 @@ use domain::AssetKind;
 use store::Store;
 
 pub mod rules;
+pub mod trash;
 
 pub use rules::{CategoryContext, CategoryRule, GroupNameRule, ParentDirectoryRule, RuleChain};
+pub use trash::TRASH_DIR;
 
 pub const INBOX_CATEGORY: &str = "待分类";
 /// 去重判定：汉明距离 ≤ 该值视为同一资产（phash 测试安全边际 ≥16 的两倍关系）。
@@ -33,6 +35,11 @@ pub enum LibraryError {
     Image(image::ImageError),
     /// D37：enqueue 后等待元数据落库确认超时（写线程故障时所有票都会顶到这里）。
     MetaTimeout(String),
+    /// D46：回收站目录迁移失败（rename 拒绝 / objects 与 trash 并存待对账）。
+    Trash {
+        uuid: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for LibraryError {
@@ -42,6 +49,9 @@ impl fmt::Display for LibraryError {
             LibraryError::Io(e) => write!(f, "IO 错误: {e}"),
             LibraryError::Image(e) => write!(f, "图像解码错误: {e}"),
             LibraryError::MetaTimeout(uuid) => write!(f, "元数据落库等待超时（票 {uuid}）"),
+            LibraryError::Trash { uuid, reason } => {
+                write!(f, "回收站操作失败（{uuid}）: {reason}")
+            }
         }
     }
 }
@@ -364,6 +374,12 @@ impl Library {
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("thumbs"))?;
         let store = Store::open(&root.join("meta.db"))?;
+
+        // D46 启动对账（仅当有 tombstone 行或 trash 目录存在才付出成本）：
+        // 修复 move/restore 中途崩溃造成的目录漂移。常态库 = 一次 COUNT。
+        if !store.deleted_uuids()?.is_empty() || root.join(TRASH_DIR).is_dir() {
+            trash::reconcile_trash_at(root, &store)?;
+        }
 
         // 启动即装载全库 pHash 到内存（百万条约 8MB，进程生命周期内一次成本）。
         let phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>> =

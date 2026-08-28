@@ -80,7 +80,8 @@ fn run() -> Result<(), String> {
     let mut paste_needed = 0usize;
 
     store
-        .for_each_asset(|meta| {
+        .for_each_asset_active(|meta| {
+            // D46：回收站素材不派生（正本在 trash/，恢复后下轮派生补上）。
             let ext = extension_of(&meta.rel_path);
             // 缩略图能力判定收敛到 crates/media 注册表（综合分析报告
             // 「扩展性缺口 #2」）：新格式只需在 MEDIA_TYPES 加一行，本工具
