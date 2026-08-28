@@ -21,6 +21,14 @@
 | 4 | `MATCH` 左侧必须是**真实表名**，不能用别名（`f MATCH` → "no such column: f"） | SQL 书写规范 |
 | 5 | assets_fts 列为 `(uuid UNINDEXED, name)`；其他字段一律 JOIN 回 assets 取 | search() 的 JOIN 形态 |
 
+## 软删除与 FTS（v4 起，D46）
+
+- **FTS 行不随软删移除**：`deleted=1` 墓碑行的 assets_fts 条目仍在（恢复路径免重建），
+  一切检索 SQL **必须** JOIN 回 assets 后加 `deleted=0` 过滤。新查询忘加 = 回收站内容
+  混进搜索结果。测试锁定：`search_excludes_deleted`。
+- 占号不显形：墓碑行保留 rowid 槽位，uuid→行号二分（ui-viewmodels 的 D52 契约）不得
+  因行回收而错位；行回收只在整库重建/清库时发生。
+
 ## Query Patterns
 
 - 写路径统一 `upsert_asset`：事务内 `INSERT .. ON CONFLICT(uuid) DO UPDATE` + tags 全量重写（DELETE+INSERT OR IGNORE）。

@@ -517,6 +517,8 @@ if (click_count % 2) == 1 {
 
 **落点**：store（tombstone）、library、ui-viewmodels、appwindow.slint。
 
+**落地（2026-08-28，批1-crud）**：store schema v4（deleted 列 + 迁移）；library `trash.rs`（move/restore/purge/empty/reconcile，open 时自动纠偏）；index `deleted: RoaringBitmap`「占号不显形」（墓碑行保留行号槽位，uuid→行二分不错位，见测试契约）；UI 侧 `Filter::Trash` 走侧栏 -3 哨兵入口 + 角标；库写全部走 `sample-library --cmd trash|restore|purge|empty-trash|rename|move-category` 子命令（单写者纪律，deps_guard 禁 app-ui 依赖 library）。删除反馈 UI 先行（本地 hide_locally），子命令收尾整库重载对齐，失败行显形回来 + 错误上通知条。
+
 ### D47 多选机制与显式多选模式（2026-08-28）
 
 **内容**：修饰键多选（Ctrl 点选切换 / Shift 范围 / Ctrl+A 全选）+ 顶栏「选择」按钮进入的**多选模式**：期间单击 = 选中/取消（不再触发上框）、双击无操作，底部浮出操作条「已选 N 张｜全选｜移动到分类｜删除｜取消」；退出（再点/Esc/取消）即清空选区恢复常态。
@@ -525,11 +527,15 @@ if (click_count % 2) == 1 {
 
 **推迟**：橡皮筋框选（Flickable 滚动手势冲突 + 自绘 overlay 成本），记录为已知边界。
 
+**落地（2026-08-28）**：`ui-viewmodels::selection` 状态机（锚点语义对齐 Explorer：无修饰单击移锚点、Ctrl 切换不移锚点、Shift 范围替换、Ctrl+Shift 范围并集；过滤变化选区自动修剪陈旧成员）；瓦片 `pointer-event` 修饰键拆件（spike S1 源码查证：up 事件 `modifiers` 取窗口全局键态可靠；带修饰的按下会抑制 clicked/double-clicked——mod-on-down 标志）；Ctrl+A/Esc 走根 FocusScope capture 通道（检索框持焦时让位）；多选模式期间上框链路连 active_asset_id 都不留（paste_asset 入口级红线 A）。
+
 ### D48 右键菜单与批量归类（2026-08-28）
 
 **内容**：瓦片右键菜单五项——复制 / 移动到分类 / 重命名 / 属性（尺寸·大小·导入时间·路径）/ 删除。此前全库无任何右键菜单、无重命名/移动分类 UI。批量归类 = 多选 + 「移动到分类」，是 A4（D5 积压缓解）的第一半。
 
 **后续计划**：编辑标签（动工前先查证标签写回层级）、大图预览浮层。
+
+**落地（2026-08-28）**：菜单五项常量入 VM 层（穷举测试锁文案）；目标集 = 命中在选区内则整份选区、否则收窄到命中张。「复制」为独立缝合层 `copy_to_clipboard`（negotiate_detailed 后只写剪贴板，绝不 activate/注入——与上框链路共享格式协商、隔离注入面）；重命名/归类校验在壳层（Slint 无 trim 内建，spike 结论）；属性弹窗四字段 + explorer /select 定位。
 
 ### D49 通用导入：混选 + 拖拽（2026-08-28）
 
