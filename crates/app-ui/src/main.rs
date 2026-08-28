@@ -314,6 +314,15 @@ fn main() {
     });
     logging::info!("app 启动 args={:?}", std::env::args().collect::<Vec<_>>());
 
+    // panic 进日志（D39 精神）：默认 panic 只打 stderr，真机 GUI 无控制台时
+    // 就是黑洞——挂钩后 panic 现场连同 backtrace 进文件日志，低配机/CI 崩溃
+    // 才可回溯。同时保留 stderr 输出，测试与控制台场景仍直接可见。
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        logging::error!("panic: {info}\n{backtrace}");
+        eprintln!("panic: {info}");
+    }));
+
     let mut library_root = parse_library_root(&std::env::args().skip(1).collect::<Vec<_>>());
     // 便携约定：未显式指定 --library-root 时，用 exe 同目录的 library/meta.db 则自动打开。
     if library_root.is_none() {

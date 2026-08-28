@@ -94,7 +94,11 @@ fn idle_rss_under_100mb() {
         Ok(None) => {}
         Ok(Some(status)) => {
             let _ = child.wait();
-            panic!("测量失败=红: idle 子进程在采样窗口内自行退出({status})");
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!(
+                "测量失败=红: idle 子进程在采样窗口内自行退出({status})\n== 子进程 stderr ==\n{stderr}\n== app 日志 ==\n{}",
+                dump_newest_app_log()
+            );
         }
         Err(e) => panic!("测量失败=红: wait 失败: {e}"),
     }
