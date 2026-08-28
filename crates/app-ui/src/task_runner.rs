@@ -26,6 +26,9 @@ pub struct ChildTask {
     pub on_progress: Box<dyn Fn(u32, u32) + Send>,
     /// 子进程 NOTICE\t 行回调：整体成功但局部失败需要用户知情（默认吞掉）。
     pub on_notice: Box<dyn Fn(String) + Send>,
+    /// 非 PROGRESS/NOTICE 的 stdout 行回调（D50：--probe-categories 的
+    /// `PROBE\t…` 结果行）。协议保留行不进此回调。
+    pub on_line: Box<dyn Fn(String) + Send>,
     pub on_finished: Box<dyn Fn(bool, String) + Send>,
 }
 
@@ -39,6 +42,7 @@ impl ChildTask {
             hide_window: true,
             on_progress: Box::new(|_, _| {}),
             on_notice: Box::new(|_| {}),
+            on_line: Box::new(|_| {}),
             on_finished: Box::new(|_, _| {}),
         }
     }
@@ -56,6 +60,12 @@ impl ChildTask {
 
     pub fn with_notice(mut self, on_notice: impl Fn(String) + Send + 'static) -> Self {
         self.on_notice = Box::new(on_notice);
+        self
+    }
+
+    /// 非 PROGRESS/NOTICE 的 stdout 行回调（D50 probe 结果行等）。
+    pub fn with_line(mut self, on_line: impl Fn(String) + Send + 'static) -> Self {
+        self.on_line = Box::new(on_line);
         self
     }
 
@@ -120,6 +130,8 @@ impl ChildTask {
                         if !text.is_empty() {
                             (self.on_notice)(text.to_string());
                         }
+                    } else {
+                        (self.on_line)(line);
                     }
                 }
             }

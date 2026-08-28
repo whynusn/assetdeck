@@ -13,7 +13,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use slint::{ModelRc, Timer, TimerMode, VecModel};
+use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
+use ui_viewmodels::classify::{self, EntryKind, GroupKind, GroupMode, ImportEntry, SourceGroup};
 use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::{
@@ -30,6 +31,8 @@ use thumbs::{GridCtx, ThumbCache, ThumbSource, THUMB_CACHE_CAPACITY};
 thread_local! {
     /// 成功提示的自动消隐计时器。Slint 的 Timer 非 Send，只能在 UI 线程持有；
     /// 放线程局部里，供 `show_notice` 每次成功时重启，警告/错误时停掉。
+    // D50 弹窗两段式动效的单发定时器：入场下一帧翻转 / 出场播完再卸载。
+    static CLASSIFY_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     static NOTICE_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
 }
 
@@ -413,6 +416,432 @@ impl CrudCtx {
             };
             show_notice(&ui, TargetNoticeTone::Error, format!("{label}失败{detail}"));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D49/D50 通用导入流：三入口汇流 → 分类数预扫描 → 归类弹窗 → 清单子进程。
+// ---------------------------------------------------------------------------
+
+/// 弹窗行模型在壳层的持有物 + 决策装配。全部 UI 线程访问。
+struct ImportFlow {
+    ui: slint::Weak<AppWindow>,
+    rows: Rc<VecModel<ClassifyRowData>>,
+    groups: Rc<RefCell<Vec<SourceGroup>>>,
+    entries: Rc<RefCell<Vec<ImportEntry>>>,
+    /// 待预扫描条目数（probe 回来一个减一个，归零即 finalize）。
+    pending: Rc<Cell<u32>>,
+    settings: Rc<RefCell<AppSettings>>,
+    settings_path: Rc<std::path::PathBuf>,
+    categories: Rc<RefCell<Vec<String>>>,
+    importing: Arc<AtomicBool>,
+    library_root: Option<String>,
+}
+
+fn mode_code(mode: GroupMode) -> i32 {
+    match mode {
+        GroupMode::PerSource => 0,
+        GroupMode::Unified => 1,
+        GroupMode::Inbox => 2,
+    }
+}
+
+fn mode_of(code: i32) -> GroupMode {
+    match code {
+        1 => GroupMode::Unified,
+        2 => GroupMode::Inbox,
+        _ => GroupMode::PerSource,
+    }
+}
+
+/// 档位 → --mode 值（D37）。
+fn import_mode_arg(settings: &AppSettings) -> &'static str {
+    if settings.fast_import_mode {
+        "fast"
+    } else {
+        "background"
+    }
+}
+
+impl ImportFlow {
+    /// 入口：三入口汇流（混选多选 / 文件夹 / .emo）。先归纳条目，需要 N
+    /// 标注的（目录与 .emo）逐个起 `--probe-categories`，全部回来再 finalize。
+    fn open(self: &Rc<Self>, paths: Vec<std::path::PathBuf>) {
+        if self.importing.load(Ordering::SeqCst) {
+            if let Some(ui) = self.ui.upgrade() {
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "已经在导入素材，请等进度条结束后再操作".to_string(),
+                );
+            }
+            return;
+        }
+        let entries: Vec<ImportEntry> = paths
+            .into_iter()
+            .map(|path| {
+                let kind = if path.is_dir() {
+                    EntryKind::Directory
+                } else if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("emo"))
+                {
+                    EntryKind::EmoPackage
+                } else {
+                    EntryKind::LooseFile
+                };
+                ImportEntry {
+                    path,
+                    kind,
+                    category_count: None,
+                }
+            })
+            .collect();
+        let pending = entries
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::Directory | EntryKind::EmoPackage))
+            .count() as u32;
+        *self.entries.borrow_mut() = entries;
+        self.pending.set(pending);
+        if pending == 0 {
+            self.finalize();
+            return;
+        }
+        let paths: Vec<std::path::PathBuf> = self
+            .entries
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e.kind, EntryKind::Directory | EntryKind::EmoPackage))
+            .map(|e| e.path.clone())
+            .collect();
+        for path in paths {
+            self.spawn_probe(path);
+        }
+    }
+
+    /// 单条来源的 N 预扫描：stdout 一行 `PROBE<HT>categories=<n|none>`；
+    /// 子进程线程只许 Weak<AppWindow>（Send 纪律），结果经回调回 UI 线程。
+    fn spawn_probe(self: &Rc<Self>, path: std::path::PathBuf) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let weak_ui = ui.as_weak();
+        let weak_done = ui.as_weak();
+        let mut task = ChildTask::new(
+            helper_exe("sample-library.exe"),
+            vec![
+                "--probe-categories".into(),
+                path.to_string_lossy().into_owned(),
+            ],
+        );
+        if let Some(dir) = logging::logs_dir() {
+            task = task
+                .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
+                .with_env("DSH_LOG_LEVEL", logging::current_level().as_str());
+        }
+        let probe_path = path.clone();
+        let _ = task
+            .with_line(move |line| {
+                // 行形如 `PROBE<HT>categories=3`；解析失败视作 none。
+                let count = line
+                    .strip_prefix("PROBE	categories=")
+                    .and_then(|rest| rest.trim().parse::<usize>().ok())
+                    .map(|n| n as i32)
+                    .unwrap_or(-1);
+                let weak = weak_ui.clone();
+                let path = probe_path.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_classify_probe_result(
+                            path.to_string_lossy().into_owned().into(),
+                            count,
+                        );
+                    }
+                });
+            })
+            .with_finished(move |success, message| {
+                let weak = weak_done.clone();
+                let path_text = path.to_string_lossy().into_owned();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if !success {
+                            logging::warn!("分类数预扫描失败 path={path_text}：{message}");
+                        }
+                        ui.invoke_classify_probe_finished();
+                    }
+                });
+            })
+            .run_in_background();
+    }
+
+    /// probe 结果落账（UI 线程）。
+    fn apply_probe(&self, path: &std::path::Path, count: Option<usize>) {
+        if let Some(entry) = self
+            .entries
+            .borrow_mut()
+            .iter_mut()
+            .find(|e| e.path == path)
+        {
+            entry.category_count = count;
+        }
+    }
+
+    /// probe 终态（成败都算）：归零即装配弹窗。
+    fn probe_done(self: &Rc<Self>) {
+        let remaining = self.pending.get().saturating_sub(1);
+        self.pending.set(remaining);
+        if remaining == 0 {
+            self.finalize();
+        }
+    }
+
+    /// 全部 probe 就绪：D50 表分组 → 记忆预填 → 全记忆直通 / 弹窗。
+    fn finalize(self: &Rc<Self>) {
+        let groups = classify::plan_groups(&self.entries.borrow());
+        if groups.is_empty() {
+            return;
+        }
+        let (ask, memories) = {
+            let settings = self.settings.borrow();
+            (
+                settings.ask_classify_on_import,
+                classify::memory_defaults(&groups, &settings),
+            )
+        };
+        if !ask && memories.iter().all(Option::is_some) {
+            // R8：全部组有记忆 → 不弹窗直接套用。
+            let decisions: Vec<(GroupMode, Option<String>)> = memories
+                .iter()
+                .map(|m| m.clone().expect("all Some 已判"))
+                .collect();
+            self.do_import(&groups, &decisions);
+            return;
+        }
+
+        let rows: Vec<ClassifyRowData> = groups
+            .iter()
+            .zip(&memories)
+            .map(|(group, memory)| {
+                let (summary, kind_code) = match group.kind {
+                    GroupKind::Package => (
+                        format!("素材包（.emo / 千牛目录）· {} 个", group.paths.len()),
+                        0,
+                    ),
+                    GroupKind::Folder => (format!("文件夹 · {} 个", group.paths.len()), 1),
+                    GroupKind::Loose => (format!("散文件 · {} 个", group.paths.len()), 2),
+                };
+                let (chosen, unified) = memory
+                    .clone()
+                    .map(|(mode, category)| (mode_code(mode), category.unwrap_or_default()))
+                    .unwrap_or((mode_code(group.default_mode), String::new()));
+                ClassifyRowData {
+                    kind: kind_code,
+                    summary: summary.into(),
+                    category_count: group.category_count.map_or(-1, |n| n as i32),
+                    default_mode: mode_code(group.default_mode),
+                    chosen_mode: chosen,
+                    unified_name: unified.into(),
+                }
+            })
+            .collect();
+        *self.groups.borrow_mut() = groups;
+        self.rows.set_vec(rows);
+
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let candidates: Vec<slint::SharedString> = self
+            .categories
+            .borrow()
+            .iter()
+            .skip(1) // 下标 0 = 「全部」，不是分类
+            .cloned()
+            .map(slint::SharedString::from)
+            .collect();
+        ui.set_classify_categories(slint::ModelRc::from(Rc::new(VecModel::from(candidates))));
+        ui.set_classify_open(true);
+        // 入场动效下一帧翻转（D53 结论：init 技巧无效，首帧前置位不触发过渡）。
+        let weak = self.ui.clone();
+        CLASSIFY_ANIM_TIMER.with(|slot| {
+            slot.borrow().start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(16),
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_classify_shown(true);
+                    }
+                },
+            );
+        });
+    }
+
+    /// 出场两段式：先收 shown 播反向过渡，播完再收 open 卸载。
+    fn close(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        ui.set_classify_shown(false);
+        let animated = self.settings.borrow().ui_animations;
+        let weak = self.ui.clone();
+        CLASSIFY_ANIM_TIMER.with(|slot| {
+            slot.borrow().start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(if animated { 170 } else { 0 }),
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_classify_open(false);
+                    }
+                },
+            );
+        });
+    }
+
+    fn set_row_mode(&self, index: usize, code: i32) {
+        if let Some(mut row) = self.rows.row_data(index) {
+            row.chosen_mode = code;
+            self.rows.set_row_data(index, row);
+        }
+    }
+
+    fn set_row_name(&self, index: usize, name: slint::SharedString) {
+        if let Some(mut row) = self.rows.row_data(index) {
+            row.unified_name = name;
+            self.rows.set_row_data(index, row);
+        }
+    }
+
+    /// 「导入」确认：勾了记住就先落设置，再拼清单文件起子进程；「取消」路径
+    /// 只 close，不产生任何库副作用。
+    fn confirm(self: &Rc<Self>, remember: bool) {
+        let groups = self.groups.borrow().clone();
+        let decisions: Vec<(GroupMode, Option<String>)> = (0..self.rows.row_count())
+            .filter_map(|i| self.rows.row_data(i))
+            .map(|row| {
+                let mode = mode_of(row.chosen_mode);
+                let category = if mode == GroupMode::Unified {
+                    let name = row.unified_name.trim().to_string();
+                    if name.is_empty() {
+                        None
+                    } else {
+                        Some(name)
+                    }
+                } else {
+                    None
+                };
+                (mode, category)
+            })
+            .collect();
+        if remember {
+            self.remember_choices(&groups, &decisions);
+        }
+        self.do_import(&groups, &decisions);
+        self.close();
+    }
+
+    /// R8：把每行决策写进设置（方式 + 统一归入的分类名）并关掉询问。
+    fn remember_choices(&self, groups: &[SourceGroup], decisions: &[(GroupMode, Option<String>)]) {
+        {
+            let mut settings = self.settings.borrow_mut();
+            settings.ask_classify_on_import = false;
+            for (group, (mode, category)) in groups.iter().zip(decisions) {
+                let mode_str = match mode {
+                    GroupMode::PerSource => "per_source",
+                    GroupMode::Unified => "unified",
+                    GroupMode::Inbox => "inbox",
+                };
+                let category_value = category.clone().unwrap_or_default();
+                match group.kind {
+                    GroupKind::Package => {
+                        settings.remember_package_mode = mode_str.to_string();
+                        settings.remember_package_category = category_value;
+                    }
+                    GroupKind::Folder => {
+                        settings.remember_folder_mode = mode_str.to_string();
+                        settings.remember_folder_category = category_value;
+                    }
+                    GroupKind::Loose => {
+                        settings.remember_loose_mode = mode_str.to_string();
+                        settings.remember_loose_category = category_value;
+                    }
+                }
+            }
+        }
+        if let Err(error) = self.settings.borrow().save(&self.settings_path) {
+            logging::warn!("记忆归类选择写入设置失败: {error}");
+        }
+    }
+
+    /// 决策 → 清单文件 → `--import-paths` 子进程管线（进度条/失败提示/缩略图
+    /// 派生与旧两入口全同路）。
+    fn do_import(&self, groups: &[SourceGroup], decisions: &[(GroupMode, Option<String>)]) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let mut lines = String::new();
+        let mut total = 0usize;
+        for (group, (mode, category)) in groups.iter().zip(decisions) {
+            let mode_field = classify::decision_to_mode_field(*mode, category.as_deref());
+            for path in &group.paths {
+                let kind_char = if path.is_dir() {
+                    "d"
+                } else if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("emo"))
+                {
+                    "p"
+                } else {
+                    "f"
+                };
+                lines.push_str(&format!(
+                    "{kind_char}	{mode_field}	{}
+",
+                    path.display()
+                ));
+                total += 1;
+            }
+        }
+        if total == 0 {
+            return;
+        }
+        let list = std::env::temp_dir().join(format!(
+            "assetdeck_import_paths_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        if let Err(error) = std::fs::write(&list, lines) {
+            show_notice(
+                &ui,
+                TargetNoticeTone::Error,
+                format!("无法写入导入清单 {}: {error}", list.display()),
+            );
+            return;
+        }
+        let root = self
+            .library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        let mode_arg = import_mode_arg(&self.settings.borrow());
+        let args = vec![
+            "--import-paths".to_string(),
+            list.to_string_lossy().into_owned(),
+            "--library".to_string(),
+            root.clone(),
+            "--mode".to_string(),
+            mode_arg.to_string(),
+        ];
+        spawn_import_pipeline(
+            self.ui.clone(),
+            args,
+            root,
+            self.importing.clone(),
+            format!("{total} 项素材"),
+            self.settings.borrow().fast_import_mode,
+        );
     }
 }
 
@@ -803,6 +1232,21 @@ fn main() {
     };
     // 启动即摆正回收站角标（库里可能已有墓碑行）。
     app.set_trash_count(crud.vm.borrow().trash_count() as i32);
+
+    // D49/D50 通用导入流（三入口汇流 → 预扫描 → 归类弹窗 → 清单子进程）。
+    let import_flow = Rc::new(ImportFlow {
+        ui: app.as_weak(),
+        rows: Rc::new(VecModel::default()),
+        groups: Rc::new(RefCell::new(Vec::new())),
+        entries: Rc::new(RefCell::new(Vec::new())),
+        pending: Rc::new(Cell::new(0)),
+        settings: settings.clone(),
+        settings_path: settings_path.clone(),
+        categories: filter_categories.clone(),
+        importing: importing.clone(),
+        library_root: library_root.clone(),
+    });
+    app.set_classify_rows(ModelRc::from(import_flow.rows.clone()));
     // 最近一次动作目标（右键命中的那张 / 重命名与属性打开的那张）。菜单收起
     // 不清它——下一次菜单或操作条动作会重新设定，读侧只在弹窗里回显。
     let menu_target: Rc<RefCell<Option<AssetId>>> = Rc::new(RefCell::new(None));
@@ -874,6 +1318,54 @@ fn main() {
         });
     }
 
+    // D50 归类弹窗回调：行内决策 / 取消 / 确认导入。
+    {
+        let flow = import_flow.clone();
+        app.on_classify_row_mode_changed(move |index, code| {
+            flow.set_row_mode(index.max(0) as usize, code);
+        });
+    }
+    {
+        let flow = import_flow.clone();
+        app.on_classify_row_name_changed(move |index, name| {
+            flow.set_row_name(index.max(0) as usize, name);
+        });
+    }
+    {
+        let flow = import_flow.clone();
+        app.on_classify_canceled(move || {
+            flow.close();
+        });
+    }
+    {
+        let flow = import_flow.clone();
+        app.on_classify_confirmed(move |remember| {
+            flow.confirm(remember);
+        });
+    }
+
+    // probe 结果回调（子进程线程经 Weak<AppWindow> 转接的落点）。
+    {
+        let flow = import_flow.clone();
+        app.on_classify_probe_result(move |path, count| {
+            let path = std::path::PathBuf::from(path.as_str());
+            flow.apply_probe(
+                &path,
+                if count < 0 {
+                    None
+                } else {
+                    Some(count as usize)
+                },
+            );
+        });
+    }
+    {
+        let flow = import_flow.clone();
+        app.on_classify_probe_finished(move || {
+            flow.probe_done();
+        });
+    }
+
     // 顶栏「选择」按钮：切换多选模式；退出清选区（R8/R9）。
     {
         let crud = crud.clone();
@@ -907,11 +1399,17 @@ fn main() {
         });
     }
 
-    // Esc：关闭链（菜单→移动→重命名→属性→清空选区退多选），自内向外的栈式收起。
+    // Esc：关闭链（归类弹窗→菜单→移动→重命名→属性→清空选区退多选）。
     {
         let crud = crud.clone();
+        let import_flow = import_flow.clone();
         app.on_escape_pressed(move || {
             let Some(ui) = crud.ui.upgrade() else { return };
+            // 归类弹窗是模态最上层，Esc = 取消本次导入。
+            if ui.get_classify_open() {
+                import_flow.close();
+                return;
+            }
             if ui.get_context_menu_open() {
                 ui.set_context_menu_open(false);
             } else if ui.get_move_menu_open() {
@@ -1481,6 +1979,39 @@ fn main() {
         });
     }
 
+    // D49 主导入：文件对话框多选（素材 + .emo 混选）→ 归类弹窗。
+    {
+        let import_flow = import_flow.clone();
+        let routing = routing.clone();
+        let importing_flag = importing.clone();
+        app.on_import_files_requested(move || {
+            if importing_flag.load(Ordering::SeqCst) {
+                if let Some(ui) = import_flow.ui.upgrade() {
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        "已经在导入素材，请等进度条结束后再操作".to_string(),
+                    );
+                }
+                return;
+            }
+            let filter = "素材与素材包 (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo|所有文件 (*.*)|*.*";
+            match routing.borrow_mut().dialogs().pick_open_files("选择要导入的素材", filter) {
+                Ok(Some(paths)) if !paths.is_empty() => import_flow.open(paths),
+                Ok(_) => {} // 取消 / 空选 = 零副作用
+                Err(error) => {
+                    if let Some(ui) = import_flow.ui.upgrade() {
+                        show_notice(
+                            &ui,
+                            TargetNoticeTone::Error,
+                            format!("无法打开文件选择器: {error}"),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     // 导入菜单（左下角单入口弹层）开合。
     {
         let ui = app.as_weak();
@@ -1515,11 +2046,13 @@ fn main() {
         let ui = app.as_weak();
         let routing = routing.clone();
         let target_choices = target_choices.clone();
+        let import_flow = import_flow.clone();
         app.on_overlay_dismissed(move || {
             let ui = ui.unwrap();
             ui.set_settings_open(false);
             ui.set_import_menu_open(false);
             // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
+            import_flow.close();
             ui.set_context_menu_open(false);
             ui.set_move_menu_open(false);
             ui.set_rename_open(false);
@@ -1997,10 +2530,9 @@ fn main() {
     // 文件根本不可见——实测用户反馈「弹出的文件选择器无法看见 .emo 文件」。
     {
         let ui = app.as_weak();
-        let library_root = library_root.clone();
         let routing = routing.clone();
         let importing = importing.clone();
-        let import_settings = settings.clone();
+        let import_flow = import_flow.clone();
         app.on_import_emo_requested(move || {
             let ui = ui.unwrap();
             // 菜单项已选中：先收起弹层，再弹原生文件对话框。
@@ -2048,17 +2580,8 @@ fn main() {
                 return;
             }
 
-            let root = library_root
-                .clone()
-                .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
-
-            spawn_import_pipeline(
-                ui.as_weak(),
-                package.to_string_lossy().into_owned(),
-                root,
-                importing.clone(),
-                import_settings.borrow().fast_import_mode,
-            );
+            // R2：.emo 入口同样汇流归类弹窗（默认「按包内分类」）。
+            import_flow.open(vec![package]);
         });
     }
 
@@ -2066,10 +2589,9 @@ fn main() {
     // → sample-library 后台导入 → derive-thumbs 后台派生缩略图（ChildTaskRunner 编排）。
     {
         let ui = app.as_weak();
-        let library_root = library_root.clone();
         let routing = routing.clone();
         let importing = importing.clone();
-        let import_settings = settings.clone();
+        let import_flow = import_flow.clone();
         app.on_import_requested(move || {
             let ui = ui.unwrap();
             // 菜单项已选中：先收起弹层，再弹原生文件夹对话框。
@@ -2089,7 +2611,7 @@ fn main() {
                 .dialogs()
                 .pick_folder("选择要导入的素材文件夹")
             {
-                Ok(Some(path)) => path.to_string_lossy().to_string(),
+                Ok(Some(path)) => path,
                 Ok(None) => return, // 用户取消
                 Err(error) => {
                     show_notice(
@@ -2101,13 +2623,8 @@ fn main() {
                 }
             };
 
-            // 库根目录落定后交给共享管线；目录创建/权限问题在管线内前置校验。
-            let root = library_root
-                .clone()
-                .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
-
-            let fast_mode = import_settings.borrow().fast_import_mode;
-            spawn_import_pipeline(ui.as_weak(), dir, root, importing.clone(), fast_mode);
+            // R2：文件夹入口汇流归类弹窗（每批一次、确认才进管线）。
+            import_flow.open(vec![dir]);
         });
     }
 
@@ -2154,10 +2671,11 @@ fn main() {
 ///    <root> 下无 meta.db」，把真正的导入错误掩盖掉了。
 fn spawn_import_pipeline(
     ui: slint::Weak<AppWindow>,
-    source: String,
+    import_args: Vec<String>,
     root: String,
     importing: Arc<AtomicBool>,
-    fast_mode: bool,
+    label: String,
+    fast_import_mode: bool,
 ) {
     let ui_ready = ui.upgrade().expect("导入时 UI 已不可用");
 
@@ -2189,9 +2707,9 @@ fn spawn_import_pipeline(
     show_notice(
         &ui_ready,
         TargetNoticeTone::Success,
-        format!("开始导入：{}", source),
+        format!("开始导入：{label}"),
     );
-    logging::info!("开始导入 source={source} root={root} fast_mode={fast_mode}");
+    logging::info!("开始导入 label={label} root={root} args={import_args:?}");
 
     let weak = ui.clone();
     let root_thread = root;
@@ -2202,9 +2720,8 @@ fn spawn_import_pipeline(
     let importing_phase1 = Arc::clone(&importing);
     let importing_phase2 = Arc::clone(&importing);
 
-    // D37/D38：把档位与日志约定传给子进程（sample-library / derive-thumbs /
-    // decode-worker 各自 init_from_env 读取）。
-    let mode_arg: &'static str = if fast_mode { "fast" } else { "background" };
+    // D37/D38：日志约定传给子进程（derive-thumbs / decode-worker 读 env）；
+    // 导入档位（--mode）已由调用方拼进 import_args。
     let logs_dir_arg = logging::logs_dir();
     let log_level_arg = logging::current_level().as_str();
 
@@ -2212,15 +2729,7 @@ fn spawn_import_pipeline(
     // NOTICE 行 = 整体成功但个别素材失败（伪装扩展名/损坏图），弹警示避免
     // 「部分失败被当成全成」的静默丢素材。
     let weak_notice = weak.clone();
-    let mut phase1_task = ChildTask::new(
-        helper,
-        vec![
-            source,
-            root_thread.clone(),
-            "--mode".into(),
-            mode_arg.into(),
-        ],
-    );
+    let mut phase1_task = ChildTask::new(helper, import_args);
     if let Some(dir) = logs_dir_arg.clone() {
         phase1_task = phase1_task
             .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
@@ -2289,6 +2798,12 @@ fn spawn_import_pipeline(
                 });
                 return;
             }
+            // D37 档位沿用：派生速度与导入档一致（设置在启动后可改，按当前值）。
+            let mode_arg: &'static str = if fast_import_mode {
+                "fast"
+            } else {
+                "background"
+            };
             let weak_derived_progress = weak.clone();
             let weak_derived_finished = weak.clone();
             let mut phase2_task = ChildTask::new(
@@ -2299,7 +2814,7 @@ fn spawn_import_pipeline(
                     "--worker-exe".into(),
                     worker.to_string_lossy().into_owned(),
                     "--mode".into(),
-                    mode_arg.into(),
+                    mode_arg.to_string(),
                 ],
             );
             if let Some(dir) = logs_dir_arg.clone() {

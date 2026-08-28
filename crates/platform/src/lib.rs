@@ -163,6 +163,12 @@ pub trait FileDialogs {
     /// 段数为奇数时末组以规格兼任名称，空串表示不过滤。用户取消返回 `Ok(None)`。
     fn pick_open_file(&self, title: &str, filter: &str) -> Result<Option<PathBuf>>;
 
+    /// 多选打开（D49 主导入混选素材+.emo）。默认退化为单选向量——只支持
+    /// 单选的后端自动可用，无需每个实现方陪跑。
+    fn pick_open_files(&self, title: &str, filter: &str) -> Result<Option<Vec<PathBuf>>> {
+        Ok(self.pick_open_file(title, filter)?.map(|path| vec![path]))
+    }
+
     /// 选择保存路径（模态）。`filter` 形如 `"Qianniu Emo (*.emo)|*.emo"`。
     fn pick_save_path(
         &self,

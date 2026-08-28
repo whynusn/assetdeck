@@ -21,10 +21,10 @@
 
 ## 阶段 3 — 弹窗 UI + 三入口接线（app-ui）
 
-- [ ] 3.1 ClassifyDialog 组件（appwindow.slint）：分组行 + 单选 + 条件性统一归入下拉（S2 结论）+ 记住勾选 + 导入/取消；入场下一帧翻转、出场两段式（按 motion 的既定模式先行实现）。
-- [ ] 3.2 main.rs：三入口（主导入按钮 → 文件多选对话框（含 .emo 过滤）、导入文件夹、导入 .emo）汇流 `open_classify_dialog(paths)`；确认后拼 `--import-paths` 临时清单文件 → 现有 `spawn_import_pipeline`（阶段失败不触发重载，D36② 纪律保持）；取消 = 直接 return（零副作用）。
-- [ ] 3.3 文件对话框多选：`FileDialogs` trait 扩 `pick_open_files`（FOS_ALLOWMULTISELECT，platform win32 增量；D16 装配不变）。
-- [ ] 3.4 冒烟：samples/inbox 手工走三入口 + 混选；取消后库计数不变。
+- [x] 3.1 ClassifyDialog 组件（appwindow.slint）：分组行 + 单选 + 条件性统一归入下拉（S2 结论）+ 记住勾选 + 导入/取消；入场下一帧翻转、出场两段式（按 motion 的既定模式先行实现）。
+- [x] 3.2 main.rs：三入口（主导入按钮 → 文件多选对话框（含 .emo 过滤）、导入文件夹、导入 .emo）汇流 `open_classify_dialog(paths)`；确认后拼 `--import-paths` 临时清单文件 → 现有 `spawn_import_pipeline`（阶段失败不触发重载，D36② 纪律保持）；取消 = 直接 return（零副作用）。
+- [x] 3.3 文件对话框多选：`FileDialogs` trait 扩 `pick_open_files`（FOS_ALLOWMULTISELECT，platform win32 增量；D16 装配不变）。
+- [x] 3.4 冒烟：samples/inbox 手工走三入口 + 混选；取消后库计数不变。
 
 ## 阶段 4 — 拖拽导入（按 S1 路线二选一）
 

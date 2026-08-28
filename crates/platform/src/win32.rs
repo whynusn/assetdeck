@@ -179,6 +179,73 @@ impl FileDialogs for Win32FileDialogs {
         }
     }
 
+    /// 多选打开（D49）：FOS_ALLOWMULTISELECT + GetResults（IShellItemArray）。
+    /// 结果顺序保持对话框选择顺序。
+    fn pick_open_files(&self, title: &str, filter: &str) -> crate::Result<Option<Vec<PathBuf>>> {
+        ensure_com_initialized();
+        unsafe {
+            let dialog: windows::Win32::UI::Shell::IFileOpenDialog = CoCreateInstance(
+                &windows::Win32::UI::Shell::FileOpenDialog,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .map_err(|error| PlatformError::Window(format!("创建文件对话框失败: {error}")))?;
+            dialog
+                .SetOptions(
+                    windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM
+                        | windows::Win32::UI::Shell::FOS_FILEMUSTEXIST
+                        | windows::Win32::UI::Shell::FOS_ALLOWMULTISELECT,
+                )
+                .map_err(|error| PlatformError::Window(format!("配置文件对话框失败: {error}")))?;
+            dialog
+                .SetTitle(&windows::core::HSTRING::from(title))
+                .map_err(|error| PlatformError::Window(format!("设置对话框标题失败: {error}")))?;
+            let kept = parse_filter_pairs(filter);
+            if !kept.is_empty() {
+                let specs: Vec<windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC> = kept
+                    .iter()
+                    .map(
+                        |(name, spec)| windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
+                            pszName: windows::core::PCWSTR(name.as_ptr()),
+                            pszSpec: windows::core::PCWSTR(spec.as_ptr()),
+                        },
+                    )
+                    .collect();
+                dialog.SetFileTypes(&specs).map_err(|error| {
+                    PlatformError::Window(format!("设置文件类型过滤失败: {error}"))
+                })?;
+            }
+            match dialog.Show(None) {
+                Ok(()) => {
+                    let results = dialog.GetResults().map_err(|error| {
+                        PlatformError::Window(format!("读取多选结果失败: {error}"))
+                    })?;
+                    let count = results.GetCount().map_err(|error| {
+                        PlatformError::Window(format!("读取多选数量失败: {error}"))
+                    })?;
+                    let mut paths = Vec::with_capacity(count as usize);
+                    for index in 0..count {
+                        let item = results.GetItemAt(index).map_err(|error| {
+                            PlatformError::Window(format!("读取第 {index} 项失败: {error}"))
+                        })?;
+                        let name = item
+                            .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
+                            .map_err(|error| {
+                                PlatformError::Window(format!("读取选择路径失败: {error}"))
+                            })?;
+                        paths.push(PathBuf::from(name.to_string().unwrap_or_default()));
+                        CoTaskMemFree(Some(name.as_ptr() as *const core::ffi::c_void));
+                    }
+                    Ok(Some(paths))
+                }
+                Err(error) if is_cancelled(&error) => Ok(None),
+                Err(error) => Err(PlatformError::Window(format!(
+                    "文件选择对话框失败: {error}"
+                ))),
+            }
+        }
+    }
+
     fn pick_save_path(
         &self,
         title: &str,

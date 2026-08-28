@@ -3,7 +3,7 @@
 // 配色/圆角/图标一律走 theme.slint 的令牌与字形表；输入框、按钮、进度条用内置
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
-import { Button, LineEdit, ProgressIndicator, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox, CheckBox } from "std-widgets.slint";
 import { Theme, Icon, Glyph, IconButton, DangerButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
@@ -64,6 +64,19 @@ export struct TargetChoiceData {
     status: string,
     health-color: color,
     available: bool,
+}
+
+// D50 归类弹窗行：一行 = 一个来源组 + 一个归类决策。
+// kind: 0=包(.emo/千牛目录) 1=文件夹 2=散文件；
+// chosen-mode/default-mode: 0=按来源规则 1=统一归入 2=放入待分类；
+// category-count: -1 = 无「含 N 个分类」标注。
+export struct ClassifyRowData {
+    kind: int,
+    summary: string,
+    category-count: int,
+    default-mode: int,
+    chosen-mode: int,
+    unified-name: string,
 }
 
 export component AppWindow inherits Window {
@@ -146,6 +159,23 @@ export component AppWindow inherits Window {
     in property <bool> move-menu-open: false;
     in property <string> move-error: "";
 
+    // —— D50 导入归类弹窗 ——
+    // open 挂载 / shown 是入场动效翻转位：壳层在 open 置位后的下一帧再置
+    // shown（D53 结论：init 技巧无效，首帧前翻转不会触发过渡）；出场两段式
+    // 由壳层先收 shown 播完 150ms 再收 open。
+    in property <bool> classify-open: false;
+    in property <bool> classify-shown: false;
+    in property <[ClassifyRowData]> classify-rows;
+    in property <[string]> classify-categories;
+    // probe 结果转接（子进程线程只许 Weak<AppWindow>，计数经回调回 UI 线程；
+    // count -1 = none；finished 不带数据只做归零计数）。
+    callback classify-probe-result(string, int);
+    callback classify-probe-finished();
+    callback classify-row-mode-changed(int, int);
+    callback classify-row-name-changed(int, string);
+    callback classify-canceled();
+    callback classify-confirmed(bool);
+
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
     callback viewport-resized();
@@ -193,6 +223,8 @@ export component AppWindow inherits Window {
     callback setting-toggled(string);
     callback overlay-dismissed();
     callback import-requested();
+    // D49 主导入：文件对话框多选（素材 + .emo 混选）。
+    callback import-files-requested();
     callback import-emo-requested();
     callback import-menu-toggled();
     callback sidebar-resize-ended(length);
@@ -1046,7 +1078,8 @@ export component AppWindow inherits Window {
         if root.settings-open || root.import-menu-open
             || root.target-mode == UiEnums.target-mode-choose
             || root.context-menu-open || root.move-menu-open
-            || root.rename-open || root.properties-open: TouchArea {
+            || root.rename-open || root.properties-open
+            || root.classify-open: TouchArea {
             width: 100%;
             height: 100%;
             clicked => {
@@ -1188,6 +1221,15 @@ export component AppWindow inherits Window {
             import-menu-layout := VerticalLayout {
                 padding: 6px;
                 spacing: 4px;
+
+                MenuItem {
+                    glyph: Glyph.import;
+                    text: "导入素材…";
+                    detail: "混选图片 / 视频 / 文本与 .emo 素材包";
+                    clicked => {
+                        root.import-files-requested();
+                    }
+                }
 
                 MenuItem {
                     glyph: Glyph.folder;
@@ -1613,6 +1655,194 @@ export component AppWindow inherits Window {
                     Button { text: "打开所在文件夹"; clicked => { root.properties-folder-requested(); } }
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "关闭"; clicked => { root.properties-closed(); } }
+                }
+            }
+        }
+
+        // D50 导入归类弹窗：居中卡片，行 = 来源组。入场下一帧翻转（shown 由
+        // 壳层在 open 后置位），出场两段式（shown 先收、open 延迟一拍收）。
+        if root.classify-open: Rectangle {
+            property <bool> shown: root.classify-shown;
+
+            opacity: shown ? 1.0 : 0.0;
+            y: 96px + (shown ? 0px : 8px);
+            x: (root.width - self.width) / 2;
+            width: 480px;
+            height: classify-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            classify-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                SectionLabel {
+                    height: 14px;
+                    text: "导入归类";
+                }
+
+                Text {
+                    text: "选择这批素材如何归入分类；点「导入」即开始。";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                }
+
+                for row[i] in root.classify-rows: Rectangle {
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    background: Theme.bg-panel;
+                    height: row-layout.preferred-height;
+
+                    row-layout := VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: row.summary;
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 600;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            if row.category-count >= 0: Rectangle {
+                                border-radius: 999px;
+                                background: Theme.accent-soft;
+                                height: 18px;
+                                width: badge-label.preferred-width + 14px;
+                                badge-label := Text {
+                                    text: "含 " + row.category-count + " 个分类";
+                                    color: Theme.accent;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            // 方式一：按来源规则（散文件组没有这一项）。
+                            if row.kind != 2: Rectangle {
+                                property <bool> active: row.chosen-mode == 0;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: active ? Theme.accent : Theme.line-strong;
+                                background: active ? Theme.accent-soft : transparent;
+                                height: 28px;
+                                min-width: 96px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: center;
+                                    Text {
+                                        text: row.kind == 0 ? "按包内分类" : "按文件夹名归类";
+                                        color: active ? Theme.accent : Theme.text-2;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => { root.classify-row-mode-changed(i, 0); }
+                                }
+                            }
+
+                            // 方式二：统一归入。
+                            Rectangle {
+                                property <bool> active: row.chosen-mode == 1;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: active ? Theme.accent : Theme.line-strong;
+                                background: active ? Theme.accent-soft : transparent;
+                                height: 28px;
+                                min-width: 96px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: center;
+                                    Text {
+                                        text: "统一归入…";
+                                        color: active ? Theme.accent : Theme.text-2;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => { root.classify-row-mode-changed(i, 1); }
+                                }
+                            }
+
+                            // 方式三：放入待分类。
+                            Rectangle {
+                                property <bool> active: row.chosen-mode == 2;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: active ? Theme.danger : Theme.line-strong;
+                                background: active ? Theme.danger-soft : transparent;
+                                height: 28px;
+                                min-width: 96px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: center;
+                                    Text {
+                                        text: "放入待分类";
+                                        color: active ? Theme.danger : Theme.text-2;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => { root.classify-row-mode-changed(i, 2); }
+                                }
+                            }
+                        }
+
+                        // 统一归入展开：自由文本（新名即新建）+ 现有分类下拉回填
+                        // （S2 结论：ComboBox 不吃自由文本，LineEdit+下拉组合）。
+                        if row.chosen-mode == 1: HorizontalLayout {
+                            spacing: 6px;
+                            LineEdit {
+                                text: row.unified-name;
+                                placeholder-text: "分类名（留空 = 待分类）";
+                                edited(text) => { root.classify-row-name-changed(i, text); }
+                                accepted(text) => { root.classify-row-name-changed(i, text); }
+                            }
+                            ComboBox {
+                                width: 132px;
+                                model: root.classify-categories;
+                                current-value: "现有分类";
+                                selected => {
+                                    root.classify-row-name-changed(i, self.current-value);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                remember-box := CheckBox {
+                    text: "记住我的选择，不再询问";
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "取消"; clicked => { root.classify-canceled(); } }
+                    Button { text: "导入"; primary: true; clicked => { root.classify-confirmed(remember-box.checked); } }
                 }
             }
         }
