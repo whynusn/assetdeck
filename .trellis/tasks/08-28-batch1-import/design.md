@@ -39,6 +39,36 @@
 - 无 → platform 层兜底：`RegisterDragDrop`（`IDropTarget`）装在主窗口 HWND（`win32_runtime_deps()` 装配，D16）；`DragQueryFileW` 取路径 → channel 送 UI 事件循环（`slint::invoke_from_event_loop`）。`DropTarget` 须处理 `WM_DROPFILES`/OleSetClipboard 竞争与 `DND_OLE_NOT_INITED`——窗口过程由 Slint 持有，兜底采用**子类化（SetWindowSubclass）**还是 `IDropTarget` 注册，spike 时一并定，落 `platform::win32::dragdrop`，trait `FileDropSink` 进 lib 层供装配。
 - 风险登记：Slint 内部可能已注册自有 drop 处理（文本 drop），实现时先验证共存。
 
+### 4.1 Spike S1 结论（2026-08-28，源码查证 1.17.1，走 4.1b 兜底路线）
+
+**判定：Slint 1.17.1 不支持 OS 文件拖入，`DropArea` 仅覆盖应用内 DnD。**
+
+证据链（安装源即 ground truth）：
+1. `i-slint-core` 有 `DragArea`/`DropArea` 元素与 `DataTransfer`（items/drag_n_drop.rs），
+   但核心 input.rs 的 drop 事件只有 `DragMove/Drop`（源 = 本进程 DragArea）；
+2. `i-slint-backend-winit` 全文 grep `DroppedFile` **零命中**——winit 0.30 已转发该事件
+   （OS 文件拖入），Slint 的 match 臂 `_ => {}` 直接吞掉；
+3. `RegisterDragDrop`/`OleInitialize`/`DragAcceptFiles` 在 Slint 任何 crate 零命中，
+   **零共存冲突**（风险登记的担忧解除：Slint 根本没注册 drop 处理）。
+
+兜底路线定案（4.1b）：
+- `IDropTarget` via `RegisterDragDrop`（**不是** `DragAcceptFiles`/WM_DROPFILES——后者只给
+  文件名、无 OLE 反馈，拖拽时光标不显示「复制」且无法动态 Accept/Drop 决策；IDropTarget
+  可经 `GetAncestor(GA_ROOT)` 拿 winit HWND 注册，无需子类化、无需碰 Slint 的窗口过程）。
+- UI 线程已是 COM STA（win32.rs `ensure_com_initialized`，OleInitialize 在其上补一次即可）；
+  IDropTarget 回调天然在消息循环线程派发 → drop 路径经 mpsc/channel 送 `invoke_from_event_loop`。
+- 释放：`CoTaskMemFree` 取 `HDROP`（`DragQueryFileW` 计数+取名）+ `ReleaseStgMedium`。
+- `FileDropSink` trait 进 lib 层（装配签名进 `win32_runtime_deps()`，D16 边界不变）。
+- 悬停视觉反馈（可选，若工期允许）：DropArea 的 can-drop 回调收不到 OS 悬停，改用
+  `drag_enter/leave` 计数经属性透传一个高亮 Rectangle（简单态：整窗描边）。
+
+### 4.2 Spike S2 结论（ComboBox 自由文本）
+
+Slint 1.17 `ComboBox` 只从 model 选择、无自由文本输入。定案组合 =
+**行内 LineEdit（输入即新建候选）+ 下方分类下拉**（下拉选中回填 LineEdit；
+「统一归入」以 LineEdit 现值为准）。比 PopupMenu 组合少一层浮层管理，
+且天然支持「输入新名即新建」的 R7 语义。
+
 ## 5. 失败与边界
 
 - 弹窗→子进程起功前失败（锁库/磁盘）：沿用 D36② 纪律（阶段一失败不得触发 thumbnails_generated 重载）。

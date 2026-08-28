@@ -5,8 +5,8 @@
 
 ## 阶段 0 — Spike（先做，结论回写 design.md 对应节）
 
-- [ ] S1 Slint 1.17 OS 文件拖入能力查证（design §4）：跑最小样本确认是否有 drop 事件；无 → 定 platform `IDropTarget` 兜底路线（子类化 vs 注册的共存结论一并定）。
-- [ ] S2 「统一归入 ▼」控件选型：ComboBox 不吃自由文本 → 验证 PopupMenu+输入行组合的可行最小实现。
+- [x] S1 Slint 1.17 OS 文件拖入能力查证（design §4）：跑最小样本确认是否有 drop 事件；无 → 定 platform `IDropTarget` 兜底路线（子类化 vs 注册的共存结论一并定）。
+- [x] S2 「统一归入 ▼」控件选型：ComboBox 不吃自由文本 → 验证 PopupMenu+输入行组合的可行最小实现。
 
 ## 阶段 1 — sample-library 收集层 + CLI
 
