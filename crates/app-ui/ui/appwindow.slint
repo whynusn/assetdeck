@@ -225,6 +225,9 @@ export component AppWindow inherits Window {
     callback import-requested();
     // D49 主导入：文件对话框多选（素材 + .emo 混选）。
     callback import-files-requested();
+    // OS 拖入文件（IDropTarget 兜底，platform::win32::dragdrop 注册）：
+    // 路径列表进同一归类弹窗；不支持类型由 VM 过滤（R4）。
+    callback files-dropped([string]);
     callback import-emo-requested();
     callback import-menu-toggled();
     callback sidebar-resize-ended(length);

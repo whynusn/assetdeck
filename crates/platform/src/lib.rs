@@ -153,6 +153,13 @@ pub trait ClipboardSink {
     fn write(&mut self, payload: &ClipboardPayload<'_>) -> Result<()>;
 }
 
+/// OS 拖入文件的接收端（D49）。win32 侧在主窗口 HWND 上注册 IDropTarget；
+/// Drop 回调经注册线程的消息泵派发（= UI 线程），实现方拿到完整路径列表
+/// （文件与目录混排，过滤语义在上层 VM）。Send+Sync：注册后由 COM 持有。
+pub trait FileDropSink: Send + Sync + 'static {
+    fn files_dropped(&self, paths: Vec<std::path::PathBuf>);
+}
+
 /// 原生文件对话框（打开/保存）。trait 化：实现收拢在 win32 模块（IFileDialog），
 /// 壳层只表达意图。用户取消返回 `Ok(None)`，与「失败」语义区分。
 pub trait FileDialogs {

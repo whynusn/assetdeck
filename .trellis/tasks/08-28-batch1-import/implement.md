@@ -28,9 +28,9 @@
 
 ## 阶段 4 — 拖拽导入（按 S1 路线二选一）
 
-- [ ] 4.1a（原生可行）：slint drop 回调 → 转路径清单进 `open_classify_dialog`。
-- [ ] 4.1b（兜底）：`platform::win32::dragdrop`（IDropTarget + 路径提取 + 超时保护）；trait `FileDropSink` 进 lib 层；main.rs 装配进 `win32_runtime_deps()`，drop 事件经 channel → `invoke_from_event_loop`。
-- [ ] 4.2 红灯/守卫：拖入含不支持类型文件 → 该文件跳过、其余正常进弹窗（mock sink 单测）。
+- [ ] 4.1a（原生可行，未采用——S1 判无原生支持）：slint drop 回调 → 转路径清单进 `open_classify_dialog`。
+- [x] 4.1b（兜底）：`platform::win32::dragdrop`（IDropTarget + 路径提取 + 超时保护）；trait `FileDropSink` 进 lib 层；main.rs 装配进 `win32_runtime_deps()`，drop 事件经 channel → `invoke_from_event_loop`。
+- [x] 4.2 红灯/守卫：拖入含不支持类型文件 → 该文件跳过、其余正常进弹窗（mock sink 单测）。
 
 ## 阶段 5 — 收口
 

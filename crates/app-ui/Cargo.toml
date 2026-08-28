@@ -17,6 +17,8 @@ ui-viewmodels = { path = "../ui-viewmodels" }
 platform = { path = "../platform" }
 # D41 壳层缩略图缓存的 LRU（与 ui-viewmodels 同一 crate）。
 lru = "0.12"
+# 主窗口 HWND 提取（拖拽注册用）；slint 侧经 raw-window-handle-06 暴露。
+raw-window-handle = "0.6"
 slint = { version = "1", default-features = false, features = [
     "std",
     "compat-1-2",
@@ -29,6 +31,8 @@ slint = { version = "1", default-features = false, features = [
     # 的后端选择处）。软件渲染的局部重绘会在窗口透明时露出桌面，钉不透明后
     # DWM 不再按像素 alpha 合成，残留像素也不会再穿透成「透明」。
     "unstable-winit-030",
+    # 拖拽导入（D49）：取主窗口 HWND 给 platform 的 RegisterDragDrop。
+    "raw-window-handle-06",
 ] }
 
 [build-dependencies]

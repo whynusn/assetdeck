@@ -913,6 +913,68 @@ fn format_timestamp(secs: i64) -> String {
     )
 }
 
+/// D49 拖入接收端：OS Drop 回调（UI 线程消息泵派发）只把路径转交事件循环，
+/// 不做任何导入决策——决策全在 classify VM 与 ImportFlow。
+struct SlintFileDropSink {
+    ui: slint::Weak<AppWindow>,
+}
+
+impl platform::FileDropSink for SlintFileDropSink {
+    fn files_dropped(&self, paths: Vec<std::path::PathBuf>) {
+        let weak = self.ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let model = slint::VecModel::from(
+                    paths
+                        .iter()
+                        .map(|p| slint::SharedString::from(p.to_string_lossy().into_owned()))
+                        .collect::<Vec<_>>(),
+                );
+                ui.invoke_files_dropped(slint::ModelRc::new(model));
+            }
+        });
+    }
+}
+
+/// HWND 就绪后注册拖入目标（winit 窗口在事件循环首轮才创建；未就绪则退避
+/// 重试，上限 5 秒后放弃——拖拽导入是增强项，失败不阻断主流程）。
+fn register_file_drop_when_ready(
+    app: slint::Weak<AppWindow>,
+    sink: std::sync::Arc<SlintFileDropSink>,
+    attempt: u32,
+) {
+    use raw_window_handle::HasWindowHandle;
+    const MAX_ATTEMPTS: u32 = 50;
+    let Some(ui) = app.upgrade() else {
+        return;
+    };
+    let hwnd = match ui.window().window_handle().window_handle() {
+        Ok(handle) => match handle.as_raw() {
+            raw_window_handle::RawWindowHandle::Win32(win32) => win32.hwnd.get(),
+            _ => 0,
+        },
+        Err(_) => 0,
+    };
+    if hwnd == 0 && attempt < MAX_ATTEMPTS {
+        // Timer 回调是 FnMut（不可移动捕获）：闭包只跑一次，用 Option.take 取出。
+        let mut next = Some((app, sink));
+        slint::Timer::default().start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(100),
+            move || {
+                if let Some((app, sink)) = next.take() {
+                    register_file_drop_when_ready(app, sink, attempt + 1);
+                }
+            },
+        );
+        return;
+    }
+    match platform::win32::dragdrop::register_file_drop(hwnd, sink) {
+        Ok(()) => logging::info!("拖拽导入已注册（hwnd={hwnd:#x}）"),
+        Err(error) => logging::warn!("拖拽导入注册失败：{error}（可继续用导入入口）"),
+    }
+}
+
 /// 总数文案 + 空态文案的唯一出口。
 fn sync_counts(ui: &AppWindow, total: usize, has_library: bool) {
     ui.set_total_text(format!("共 {total} 项").into());
@@ -1363,6 +1425,21 @@ fn main() {
         let flow = import_flow.clone();
         app.on_classify_probe_finished(move || {
             flow.probe_done();
+        });
+    }
+
+    // D49 拖入：路径进同一归类弹窗（importing 守卫在 open 内）。
+    {
+        let flow = import_flow.clone();
+        app.on_files_dropped(move |paths| {
+            let paths: Vec<std::path::PathBuf> = paths
+                .iter()
+                .map(|s| std::path::PathBuf::from(s.as_str()))
+                .collect();
+            if paths.is_empty() {
+                return;
+            }
+            flow.open(paths);
         });
     }
 
@@ -2629,6 +2706,11 @@ fn main() {
     }
 
     grid.sync();
+    // D49 拖拽导入：等 HWND 就绪后注册（run 前排队，循环首轮起跑重试退避）。
+    {
+        let sink = std::sync::Arc::new(SlintFileDropSink { ui: app.as_weak() });
+        register_file_drop_when_ready(app.as_weak(), sink, 0);
+    }
     // 键盘捕获根（Esc / Ctrl+A）在启动时拿到焦点：capture 模式不抢输入焦点，
     // 检索框等 LineEdit 仍可正常打字（其聚焦态在 key-root 的让位判断里处理）。
     app.invoke_key_focus_requested();

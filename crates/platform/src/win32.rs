@@ -2553,3 +2553,150 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// D49 拖入兜底：IDropTarget（RegisterDragDrop）。spike S1 结论：Slint 1.17
+// 不支持 OS 文件拖入（DropArea 仅应用内 DnD、winit 后端零处理、无注册冲突），
+// 故经 OLE 注册自主 IDropTarget。回调在注册线程（UI 消息泵）派发。
+// ---------------------------------------------------------------------------
+pub mod dragdrop {
+    use std::sync::{Arc, OnceLock};
+    use windows::core::implement;
+    use windows::Win32::Foundation::{HGLOBAL, HWND, POINTL};
+    use windows::Win32::System::Com::{
+        IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
+    };
+    use windows::Win32::System::Ole::{
+        IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+        RevokeDragDrop, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY,
+    };
+    use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    use crate::{FileDropSink, PlatformError};
+
+    /// OLE 初始化（RegisterDragDrop 前置；STA 上幂等）。失败则拖拽不可用，
+    /// 由调用方降级（导入三入口仍在）。
+    fn ensure_ole_initialized() -> Result<(), PlatformError> {
+        static OLE_READY: OnceLock<Result<(), String>> = OnceLock::new();
+        let ready = OLE_READY.get_or_init(|| unsafe {
+            // 线程公寓在本进程已是 STA（CoInitializeEx），OleInitialize 返回
+            // S_FALSE 表示已装；RPC_E_CHANGED_MODE 表示公寓冲突，拖拽放弃。
+            match OleInitialize(None) {
+                Ok(()) => Ok(()),
+                Err(e) if e.code() == windows::core::HRESULT(0x0001_0101u32 as i32) => Ok(()), // S_FALSE（已初始化）
+                Err(e) => Err(format!("OleInitialize 失败: {e}")),
+            }
+        });
+        ready.clone().map_err(PlatformError::Window).and(Ok(()))
+    }
+
+    #[implement(IDropTarget)]
+    struct FileDropTarget {
+        sink: Arc<dyn FileDropSink>,
+    }
+
+    impl IDropTarget_Impl for FileDropTarget_Impl {
+        fn DragEnter(
+            &self,
+            _pdataobj: windows::core::Ref<'_, IDataObject>,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            // 仅接受复制语义；不接受时 effect 置 0，OS 自行显示禁止光标。
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+            Ok(())
+        }
+
+        fn DragOver(
+            &self,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+            Ok(())
+        }
+
+        fn DragLeave(&self) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn Drop(
+            &self,
+            pdataobj: windows::core::Ref<'_, IDataObject>,
+            _grfkeystate: MODIFIERKEYS_FLAGS,
+            _pt: &POINTL,
+            pdweffect: *mut DROPEFFECT,
+        ) -> windows::core::Result<()> {
+            unsafe { *pdweffect = DROPEFFECT_COPY };
+            let Ok(data) = pdataobj.ok() else {
+                return Ok(());
+            };
+            let format = FORMATETC {
+                cfFormat: CF_HDROP.0,
+                ptd: std::ptr::null_mut(),
+                dwAspect: DVASPECT_CONTENT.0,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL.0 as u32,
+            };
+            let Ok(mut medium) = (unsafe { data.GetData(&format) }) else {
+                // 非 CF_HDROP 拖入（纯文本等）：不处理，OS 按不接受呈现。
+                return Ok(());
+            };
+            let paths = unsafe { extract_hdrop_paths(&medium) };
+            unsafe { ReleaseStgMedium(&mut medium) };
+            if !paths.is_empty() {
+                self.sink.files_dropped(paths);
+            }
+            Ok(())
+        }
+    }
+
+    /// HDROP → 路径列表（DragQueryFileW 计数 + 逐条取名）。
+    unsafe fn extract_hdrop_paths(medium: &STGMEDIUM) -> Vec<std::path::PathBuf> {
+        let hglobal: HGLOBAL = medium.u.hGlobal;
+        if hglobal.0.is_null() {
+            return Vec::new();
+        }
+        let hdrop = HDROP(hglobal.0);
+        let count = DragQueryFileW(hdrop, u32::MAX, None) as usize;
+        let mut paths = Vec::with_capacity(count);
+        for index in 0..count as u32 {
+            let len = DragQueryFileW(hdrop, index, None) as usize;
+            if len == 0 {
+                continue;
+            }
+            let mut buffer = vec![0u16; len];
+            let written = DragQueryFileW(hdrop, index, Some(&mut buffer)) as usize;
+            if written == 0 {
+                continue;
+            }
+            let text = String::from_utf16_lossy(&buffer[..written]);
+            if !text.is_empty() {
+                paths.push(std::path::PathBuf::from(text));
+            }
+        }
+        paths
+    }
+
+    /// 在主窗口 HWND 上注册拖入接收。重复注册会失败（先 Revoke 再注册）。
+    pub fn register_file_drop(
+        hwnd: isize,
+        sink: Arc<dyn FileDropSink>,
+    ) -> Result<(), PlatformError> {
+        if hwnd == 0 {
+            return Err(PlatformError::Window("窗口句柄为空，拖拽导入不可用".into()));
+        }
+        ensure_ole_initialized()?;
+        let target: IDropTarget = FileDropTarget { sink }.into();
+        let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+        unsafe {
+            // 同一 HWND 重复注册返回 E_FAIL；先撤销再装，幂等。
+            let _ = RevokeDragDrop(hwnd);
+            RegisterDragDrop(hwnd, &target)
+                .map_err(|error| PlatformError::Window(format!("注册拖入目标失败: {error}")))
+        }
+    }
+}

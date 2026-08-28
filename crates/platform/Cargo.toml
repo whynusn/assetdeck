@@ -12,6 +12,7 @@ publish.workspace = true
 # 未初始化时宏为空操作，不破坏「平台层不打高频日志」的纪律。
 [target.'cfg(windows)'.dependencies]
 log = "0.4"
+windows-core = "0.62"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -27,6 +28,11 @@ windows-sys = { version = "0.59", features = [
 windows = { version = "0.62", default-features = false, features = [
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemServices",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",

@@ -140,6 +140,7 @@ dependencies = [
  "logging",
  "lru",
  "platform",
+ "raw-window-handle",
  "slint",
  "slint-build",
  "ui-viewmodels",
@@ -3680,6 +3681,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "windows",
+ "windows-core",
  "windows-sys 0.59.0",
 ]
 
@@ -4347,9 +4349,11 @@ dependencies = [
 name = "sample-library"
 version = "0.1.0"
 dependencies = [
+ "image",
  "library",
  "logging",
  "media",
+ "rusqlite",
  "serde_json",
 ]
 
@@ -4592,6 +4596,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

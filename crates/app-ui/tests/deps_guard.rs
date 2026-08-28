@@ -30,6 +30,9 @@ fn ui_cargo_toml_has_no_decode_layer_deps() {
 /// 其余 crate 一律不许直接依赖它（日志门面语义只属于基座，业务见 D39 落点表）。
 /// `lru` 是 D43 扩的一项：通用数据结构（非实现 crate），守卫精神是防解码层/
 /// 实现层 crate 混入，lru 与 whitelist 语义不冲突（ui-viewmodels 早已在用）。
+/// `raw-window-handle` 是 D49 扩的一项：纯 trait 定义（零逻辑、零系统调用），
+/// 从 Slint 窗口抽象取 HWND 供 platform 的 RegisterDragDrop 注册；slint/winit
+/// 本就传递引入同一版本，不新增二进制面。
 #[test]
 fn ui_cargo_toml_dependency_whitelist_is_exact() {
     let toml = read_repo_file("Cargo.toml");
@@ -53,7 +56,15 @@ fn ui_cargo_toml_dependency_whitelist_is_exact() {
 
     for name in &deps {
         assert!(
-            ["ui-viewmodels", "slint", "platform", "logging", "lru"].contains(&name.as_str()),
+            [
+                "ui-viewmodels",
+                "slint",
+                "platform",
+                "logging",
+                "lru",
+                "raw-window-handle",
+            ]
+            .contains(&name.as_str()),
             "红线违规：app-ui 依赖白名单外的 crate `{name}`"
         );
     }
