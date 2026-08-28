@@ -311,12 +311,14 @@ impl PasteSession {
         let alive = deps.focus.is_alive(hwnd);
         let fg = deps.focus.foreground();
         let after_preinject = Instant::now();
-        if std::env::var_os("PASTE_PIPELINE_TRACE").is_some() {
-            eprintln!(
-                "trace[preinject] alive={alive} fg={:?} target_hwnd={:?} focus_outcome={:?} signal_verified={verified}",
-                fg.0, hwnd.0, focus_outcome
-            );
-        }
+        // 注入前最后一道门的状态快照（D44 前台归属 / D21 焦点结果 / verified）。
+        // Debug 级 + paste_trace::pipeline target：与 settle/事件明细同一 grep 域，
+        // 默认 Info 下零格式化开销，verbose_diagnostics 开启后进文件可回溯。
+        log::debug!(
+            target: "paste_trace::pipeline",
+            "preinject alive={alive} fg={:?} target_hwnd={:?} focus_outcome={:?} signal_verified={verified}",
+            fg.0, hwnd.0, focus_outcome
+        );
         if !alive {
             return copied_only(
                 target.label.clone(),

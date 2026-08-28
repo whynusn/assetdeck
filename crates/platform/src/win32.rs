@@ -713,9 +713,8 @@ fn settle_on_input_surface(surface: &mut Box<dyn EventWait>, settle_ms: u64) {
         // 在我们侧还是对端侧的关键观测点（Debug 级，开 verbose 细查时可见）。
         log::debug!("settle 输入表面等待 outcome={outcome:?} cap_ms={settle_ms}");
     }
-    if std::env::var_os("PASTE_LATENCY_TRACE").is_some() {
-        eprintln!("trace[settle] {outcome:?}");
-    }
+    // （D41 收编）原 PASTE_LATENCY_TRACE 的 trace[settle] 与上方 debug 行同点
+    // 同数据，属严格冗余，直接删除。
 }
 
 /// 常驻前台观察器。不再自持 `SetWinEventHook`——改为订阅进程级事件泵（见 `pump()`），
@@ -1241,7 +1240,6 @@ impl EventWait for Win32EventWait {
         let Some(receiver) = self.receiver.as_ref() else {
             return WaitOutcome::Unavailable;
         };
-        let debug = std::env::var_os("PASTE_EVENT_TRACE").is_some();
         // 第一步：先抽干**已经缓冲**的事件，不占用时间预算。
         // 订阅可能远早于本次 `wait`（如输入表面在激活动作之前就订阅），目标事件
         // 可能在 `wait` 被调用前就已到达并躺在通道里。这一步保证「事件已来」的
@@ -1249,17 +1247,21 @@ impl EventWait for Win32EventWait {
         loop {
             match receiver.try_recv() {
                 Ok(event) if self.matcher.matches(&event) => {
-                    if debug {
-                        eprintln!("evt[buffered-hit] {:?} evt=0x{:X} obj={}", self.matcher, event.event, event.object_id);
-                    }
+                    log::trace!(
+                        target: "paste_trace::platform::events",
+                        "evt[buffered-hit] {:?} evt=0x{:X} obj={}",
+                        self.matcher, event.event, event.object_id
+                    );
                     return WaitOutcome::Observed {
                         elapsed_ms: self.since.elapsed().as_millis() as u64,
                     }
                 }
                 Ok(other) => {
-                    if debug {
-                        eprintln!("evt[buffered-miss] evt=0x{:X} obj={} hwnd={:?} root={:?} pid={}", other.event, other.object_id, other.hwnd.0, other.root.0, other.process_id);
-                    }
+                    log::trace!(
+                        target: "paste_trace::platform::events",
+                        "evt[buffered-miss] evt=0x{:X} obj={} hwnd={:?} root={:?} pid={}",
+                        other.event, other.object_id, other.hwnd.0, other.root.0, other.process_id
+                    );
                     continue;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1275,18 +1277,22 @@ impl EventWait for Win32EventWait {
             };
             match receiver.recv_timeout(remaining) {
                 Ok(event) if self.matcher.matches(&event) => {
-                    if debug {
-                        eprintln!("evt[live-hit] {:?} evt=0x{:X} obj={}", self.matcher, event.event, event.object_id);
-                    }
+                    log::trace!(
+                        target: "paste_trace::platform::events",
+                        "evt[live-hit] {:?} evt=0x{:X} obj={}",
+                        self.matcher, event.event, event.object_id
+                    );
                     return WaitOutcome::Observed {
                         elapsed_ms: self.since.elapsed().as_millis() as u64,
                     }
                 }
                 // 不匹配的事件继续丢弃：一条通道承载全部事件，过滤在此处完成。
                 Ok(other) => {
-                    if debug {
-                        eprintln!("evt[live-miss] evt=0x{:X} obj={} hwnd={:?} root={:?} pid={}", other.event, other.object_id, other.hwnd.0, other.root.0, other.process_id);
-                    }
+                    log::trace!(
+                        target: "paste_trace::platform::events",
+                        "evt[live-miss] evt=0x{:X} obj={} hwnd={:?} root={:?} pid={}",
+                        other.event, other.object_id, other.hwnd.0, other.root.0, other.process_id
+                    );
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => return WaitOutcome::CappedOut,
