@@ -543,6 +543,8 @@ if (click_count % 2) == 1 {
 
 **⚠️ 前置 spike**：Slint 1.17 对原生文件拖入（OS 级 drag-drop 取路径）的支持未查证；若无现成支持则 platform 层 `RegisterDragDrop` 兜底（D16 装配边界不变）。
 
+**落地（2026-08-28，批1-import）**：spike S1 源码查证定论——Slint 1.17.1 **无 OS 文件拖入**（DragArea/DropArea 仅应用内 DnD；winit 后端对 `WindowEvent::DroppedFile` 零处理；Slint 自身未注册 drop 处理器，故无共存冲突），走兜底路线：platform `win32::dragdrop` 模块 `#[implement(IDropTarget)]` + `RegisterDragDrop`（Drop 取 CF_HDROP → DragQueryFileW 路径 → FileDropSink trait），OleInitialize 幂等；HWND 经 slint 的 raw-window-handle-06 提取（deps_guard 白名单扩一项，纯 trait 定义零逻辑）。主导入按钮升级为 `pick_open_files` 多选混选（FOS_ALLOWMULTISELECT），三入口全部汇流归类弹窗（R2 保留原入口语义）。
+
 ### D50 导入归类弹窗（2026-08-28）
 
 **内容**：所有导入入口统一弹、每批一次；「取消」= 放弃本次导入（零文件进库）。选项按来源条件化，默认项恒为该来源最合理的解释，回车即走默认：
@@ -554,6 +556,8 @@ if (click_count % 2) == 1 {
 「统一归入 ▼」= 已有分类下拉 + 输入即新建。☐「记住我的选择，不再询问」：记住方式；方式为统一归入时连分类一并记住；设置面板可恢复询问。
 
 **意义**：D5「导入时手动分类」自 2026-08-21 定盘以来首次真正落地（此前 RuleChain 静默自动归类），是「待分类收件箱积压死亡」已记录风险的主缓解。
+
+**落地（2026-08-28）**：弹窗 = ui-viewmodels `classify.rs` 纯函数（D50 选项表穷举测试锁定；混选按来源分桶、N 标注多包求和；散文件按 media 注册表过滤=R4 语义）；「统一归入」控件 = LineEdit + ComboBox 组合（spike S2：ComboBox 无自由文本输入）；N 预扫描走 `sample-library --probe-categories` 子进程（.emo 只读 zip 中央目录不解压，千牛目录与读取器同判定数 groupName——C2 零解码）；每批决策以 `--import-paths` 逐行指令（kind<HT>mode<HT>path，auto/inbox/category:名）一次子进程跑完（修订 design §1.2：全局 override 会覆盖 .emo 包内分类，弃用）；R8 记忆 = AppSettings `ask_classify_on_import`（默认询问）+ 三组 mode/category 字段，全组有记忆则跳过弹窗直通，设置面板恢复询问；取消路径零副作用（空清单不建库）；弹窗动效出生即正确（下一帧翻转入场 + 两段式出场，motion 任务后续回改旧三处）。
 
 ### D51 搜索范围与大小写统一（2026-08-28）
 

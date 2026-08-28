@@ -34,5 +34,5 @@
 
 ## 阶段 5 — 收口
 
-- [ ] 5.1 三道门全绿（含 layering_guard/deps_guard；若 4.1b 落地，platform 新模块须过 deps 白名单评审）。
-- [ ] 5.2 D49/D50 回写 DECISIONS.md（含 spike 结论、记忆边界）；新约定进 spec（导入入口单弹窗纪律、库写子命令复用）走 trellis-update-spec。
+- [x] 5.1 三道门全绿（含 layering_guard/deps_guard；若 4.1b 落地，platform 新模块须过 deps 白名单评审）。
+- [x] 5.2 D49/D50 回写 DECISIONS.md（含 spike 结论、记忆边界）；新约定进 spec（导入入口单弹窗纪律、库写子命令复用）走 trellis-update-spec。
