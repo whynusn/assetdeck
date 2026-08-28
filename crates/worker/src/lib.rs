@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +23,8 @@ use std::thread;
 
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{
-    GetPriorityClass, OpenProcess, SetPriorityClass, IDLE_PRIORITY_CLASS,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetPriorityClass, OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+    IDLE_PRIORITY_CLASS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 pub mod protocol;
@@ -54,8 +55,30 @@ struct PoolState {
 
 struct PoolInner {
     exe: PathBuf,
+    priority: PoolPriority,
     state: Mutex<PoolState>,
     shutdown: AtomicBool,
+}
+
+/// worker 进程调度档位（D37）：前台高速导入时放弃 idle 压制换取吞吐；
+/// 后台/浏览补图维持 D11 的 idle 语义不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolPriority {
+    /// D11 默认：IDLE_PRIORITY_CLASS，worker 内部线程自设背景模式（IO/内存
+    /// 优先级 VERY_LOW）。供「不惊扰用户」的场景。
+    BackgroundIdle,
+    /// 用户显式发起的导入：BELOW_NORMAL_PRIORITY_CLASS + 不启用内部背景模式，
+    /// 页缓存不被立即驱逐，海量小文件的随机 IO 不再被压到最低档。
+    ForegroundBelowNormal,
+}
+
+impl PoolPriority {
+    fn win_priority_class(self) -> u32 {
+        match self {
+            PoolPriority::BackgroundIdle => IDLE_PRIORITY_CLASS,
+            PoolPriority::ForegroundBelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
+        }
+    }
 }
 
 /// 解码 worker 进程池。
@@ -67,16 +90,33 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     /// 测试/默认构造：经 cargo 的 `CARGO_BIN_EXE_decode-worker` 定位 worker 二进制。
-    /// 生产装配请用 [`WorkerPool::with_exe`] 显式指定路径。
+    /// 生产装配请用 [`WorkerPool::with_exe`] 显式指定路径。默认后台 idle 档。
     pub fn with_size(size: usize) -> Self {
         let exe = std::env::var("CARGO_BIN_EXE_decode-worker")
             .expect("CARGO_BIN_EXE_decode-worker 未设置：请在 cargo 测试环境运行，或改用 with_exe");
         Self::with_exe(Path::new(&exe), size)
     }
 
-    /// 以显式二进制路径构造池。启动即拉满 n 个子进程，
+    /// 便携/生产构造：从当前可执行文件同目录找 `decode-worker.exe`（idle 档）。
+    ///
+    /// 这是打包后双击主 exe 的路径约定；找不到时仍然会构造池，但所有槽位
+    /// 以初始拉起失败进入 `degraded`，调用方可通过 [`WorkerPool::degraded`] 感知。
+    pub fn with_sibling_exe(size: usize) -> Self {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|dir| dir.join("decode-worker.exe")))
+            .unwrap_or_else(|| PathBuf::from("decode-worker.exe"));
+        Self::with_exe(&exe, size)
+    }
+
+    /// 以显式二进制路径构造池（D11 后台 idle 档）。启动即拉满 n 个子进程，
     /// n 被钳制到 CPU 核数（红线：池大小按核数封顶），下限 1。
     pub fn with_exe(exe: &Path, size: usize) -> Self {
+        Self::with_priority(exe, size, PoolPriority::BackgroundIdle)
+    }
+
+    /// 显式档位构造（D37）：前台导入走 ForegroundBelowNormal。
+    pub fn with_priority(exe: &Path, size: usize, priority: PoolPriority) -> Self {
         let cpus = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -86,7 +126,7 @@ impl WorkerPool {
         let mut readers: Vec<(usize, ChildStdout)> = Vec::new();
         let mut degraded = false;
         for idx in 0..size {
-            match spawn_worker(exe) {
+            match spawn_worker(exe, priority) {
                 Ok((slot, stdout)) => {
                     slots.push(Some(slot));
                     readers.push((idx, stdout));
@@ -101,6 +141,7 @@ impl WorkerPool {
 
         let inner = Arc::new(PoolInner {
             exe: exe.to_path_buf(),
+            priority,
             state: Mutex::new(PoolState {
                 slots,
                 pending: HashMap::new(),
@@ -206,18 +247,24 @@ pub fn query_priority_class(pid: u32) -> Option<u32> {
 }
 
 /// 拉起单个 worker 子进程并配置好 writer 线程，返回槽位与待接管的 stdout。
-fn spawn_worker(exe: &Path) -> std::io::Result<(WorkerSlot, ChildStdout)> {
-    let mut child = Command::new(exe)
+fn spawn_worker(exe: &Path, priority: PoolPriority) -> std::io::Result<(WorkerSlot, ChildStdout)> {
+    let mut child = Command::new(exe);
+    // 前台档通过旗标告知子进程别自压 IO/内存优先级（decode-worker 入口解析）。
+    if matches!(priority, PoolPriority::ForegroundBelowNormal) {
+        child.arg("--foreground");
+    }
+    let mut child = child
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // 日志通道与协议通道分离：不留 stderr 混流入口
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW：避免 GUI 启动时带出黑框控制台
         .spawn()?;
-    // D11 idle 优先级：CPU 调度层面用 IDLE_PRIORITY_CLASS（跨进程可设、
-    // GetPriorityClass 可实测读回）。不用 PROCESS_MODE_BACKGROUND_BEGIN——
-    // 仅限当前进程自设、GetPriorityClass 读不回、且带 32MiB 工作集封顶陷阱；
-    // IO/内存层面由 worker 入口自设 THREAD_MODE_BACKGROUND_BEGIN 兜底。
+    // 优先级档位（D11/D37）：后台档维持 IDLE_PRIORITY_CLASS；前台高速导入换
+    // BELOW_NORMAL_PRIORITY_CLASS——仍让位于用户普通操作，但不再把海量
+    // 小文件随机 IO 压到 VERY_LOW（THREAD_MODE_BACKGROUND_BEGIN 由子进程
+    // 收到 --foreground 时跳过）。GetPriorityClass 可实测读回。
     unsafe {
-        SetPriorityClass(child.as_raw_handle(), IDLE_PRIORITY_CLASS);
+        SetPriorityClass(child.as_raw_handle(), priority.win_priority_class());
     }
     let pid = child.id();
     let stdin = child.stdin.take().expect("stdin 已 piped");
@@ -311,7 +358,7 @@ fn supervise_death(inner: &Arc<PoolInner>, idx: usize) {
         return;
     }
     st.restarts += 1;
-    match spawn_worker(&inner.exe) {
+    match spawn_worker(&inner.exe, inner.priority) {
         Ok((slot, stdout)) => {
             st.slots[idx] = Some(slot);
             // 持锁期间拉 reader 线程安全：新线程先读管道，与宿主持锁无线程等待环。

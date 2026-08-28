@@ -6,10 +6,21 @@ publish.workspace = true
 
 # D11 红线：解码实现依赖（image 等）只允许出现在本 crate。
 [dependencies]
+logging = { path = "../logging" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# features 与 media 注册表 Image 类目对齐（png/jpg/jpeg/gif/webp/bmp）：
+# IMAGE_CRATE_EXTS 列出的扩展名必须真能解码，否则全部退到 Shell 抽帧降级。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# 视频抽帧走 Windows Shell 缩略图工厂（ffmpeg 不在环境里，且不想引入外部二进制依赖）。
+# 只有本 crate 允许触碰解码/抽帧（D11），故 COM/GDI 依赖收在这里。
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
 
 [dev-dependencies]
 tempfile = "3"

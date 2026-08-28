@@ -25,6 +25,7 @@ fn expect_ok(result: JobResult, job_id: u64) -> String {
         JobResult::Ok {
             job_id: id,
             payload,
+            ..
         } => {
             assert_eq!(id, job_id);
             payload
@@ -77,6 +78,8 @@ fn job_result_roundtrips_over_ipc_protocol() {
             source: PathBuf::from("C:/pics/raw.png"),
             dest: PathBuf::from("thumbs/a/ab/uuid.png"),
             max_edge: 256,
+            paste_dest: None,
+            paste_max_edge: 4096,
         },
     };
     let json = serde_json::to_string(&req).unwrap();
@@ -99,10 +102,26 @@ fn job_result_roundtrips_over_ipc_protocol() {
     let ok = Envelope::response(JobResult::Ok {
         job_id: 42,
         payload: "thumbs/a/ab/uuid.png".into(),
+        width: Some(1920),
+        height: Some(1080),
     });
     let ok_json = serde_json::to_string(&ok).unwrap();
     assert!(ok_json.contains(r#""v":1"#));
     assert_eq!(serde_json::from_str::<Envelope>(&ok_json).unwrap(), ok);
+
+    // 尺寸是可选扩展位：旧 worker 不带 width/height 的响应仍须能解析，
+    // 否则一次协议演进就会让在跑的 worker 变成哑巴。
+    let legacy = r#"{"v":1,"res":{"type":"ok","job_id":9,"payload":"x.png"}}"#;
+    let parsed: Envelope = serde_json::from_str(legacy).expect("旧格式 Ok 响应必须可解析");
+    assert_eq!(
+        parsed,
+        Envelope::response(JobResult::Ok {
+            job_id: 9,
+            payload: "x.png".into(),
+            width: None,
+            height: None,
+        })
+    );
 
     let failed = Envelope::response(JobResult::Failed {
         job_id: 43,
@@ -214,6 +233,8 @@ fn poison_asset_fails_job_not_pool() {
         source: missing,
         dest: dir.path().join("thumbs/out1.png"),
         max_edge: 64,
+        paste_dest: None,
+        paste_max_edge: 4096,
     });
     expect_failed(wait_result(rx), 1001);
 
@@ -225,6 +246,8 @@ fn poison_asset_fails_job_not_pool() {
         source: corrupt,
         dest: dir.path().join("thumbs/out2.png"),
         max_edge: 64,
+        paste_dest: None,
+        paste_max_edge: 4096,
     });
     expect_failed(wait_result(rx), 1002);
 
@@ -243,8 +266,17 @@ fn poison_asset_fails_job_not_pool() {
         source: src,
         dest: dest.clone(),
         max_edge: 64,
+        paste_dest: None,
+        paste_max_edge: 4096,
     });
-    expect_ok(wait_result(rx), 1004);
+    let result = wait_result(rx);
+    // 回报的必须是**原始**尺寸而非缩放后尺寸——瀑布流要的是素材真实宽高比。
+    assert_eq!(
+        result.dimensions(),
+        Some((96, 96)),
+        "缩略图结果应携带源图原始像素尺寸，实际 {result:?}"
+    );
+    expect_ok(result, 1004);
     assert!(dest.exists(), "缩略图应已写盘");
     let dims = image::GenericImageView::dimensions(&image::open(&dest).unwrap());
     assert!(
@@ -253,6 +285,79 @@ fn poison_asset_fails_job_not_pool() {
     );
 
     assert!(!pool.degraded(), "毒资产不得拖垮池");
+}
+
+/// D20 双路输出：同一份解码旁挂「上框用 paste.png」，缩略图与 paste 同时落盘。
+/// 千牛一类目标只认 CF_PNG，jpg 必须拿到这份派生 PNG 才能上框而非退化为仅复制。
+#[test]
+fn thumbnail_job_with_paste_dest_writes_both_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = WorkerPool::with_size(2);
+
+    // 源图 256x256：缩略图上限 64 -> 等比 64x64；paste 上限 4096 -> 原尺寸透传。
+    let src = make_png(dir.path(), "big.jpg", 256);
+    // make_png 写的是 PNG 字节，扩展名骗 worker 走 image crate 也无妨（内容决定解码）。
+    let thumb = dir.path().join("thumbs/ab/thumb.png");
+    let paste = dir.path().join("objects/uuid/paste.png");
+    let rx = pool.submit(JobRequest::ThumbnailPng {
+        job_id: 1101,
+        source: src,
+        dest: thumb.clone(),
+        max_edge: 64,
+        paste_dest: Some(paste.clone()),
+        paste_max_edge: 4096,
+    });
+    let result = wait_result(rx);
+    assert_eq!(
+        result.dimensions(),
+        Some((256, 256)),
+        "尺寸回报的必须是源图原始像素（缩放前），实际 {result:?}"
+    );
+    expect_ok(result, 1101);
+
+    assert!(thumb.exists(), "缩略图应已写盘");
+    assert!(paste.exists(), "上框用 paste.png 应已写盘");
+    let (tw, th) = image::GenericImageView::dimensions(&image::open(&thumb).unwrap());
+    assert!(
+        tw <= 64 && th <= 64 && tw > 0 && th > 0,
+        "缩略图应等比缩到最长边 64 内，实际 {tw}x{th}"
+    );
+    let (pw, ph) = image::GenericImageView::dimensions(&image::open(&paste).unwrap());
+    assert_eq!(
+        (pw, ph),
+        (256, 256),
+        "paste 走更高上限应保持原尺寸，实际 {pw}x{ph}"
+    );
+    assert!(!pool.degraded());
+}
+
+/// 回归：PNG 内容挂 .jpg 名。旧实现按扩展名进 JPEG 解码器报
+/// 「Illegal start bytes: 89504e47…」，全靠 Shell 抽帧兜底才没失败（分辨率与
+/// 动图都受损）；image crate 改按内容嗅探后应直接走对路解码。
+#[test]
+fn misnamed_png_with_jpg_extension_decodes_by_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = WorkerPool::with_size(1);
+
+    let src = make_png(dir.path(), "伪装.jpg", 48);
+    let dest = dir.path().join("thumbs/cd/uuid.png");
+    let rx = pool.submit(JobRequest::ThumbnailPng {
+        job_id: 1201,
+        source: src,
+        dest: dest.clone(),
+        max_edge: 32,
+        paste_dest: None,
+        paste_max_edge: 4096,
+    });
+    let result = wait_result(rx);
+    assert_eq!(
+        result.dimensions(),
+        Some((48, 48)),
+        "伪装扩展名不影响尺寸回报，实际 {result:?}"
+    );
+    expect_ok(result, 1201);
+    assert!(dest.exists());
+    assert!(!pool.degraded());
 }
 
 /// 门 2 补充断言：重启预算耗尽后进入 degraded，后续 submit 直接 Failed。
