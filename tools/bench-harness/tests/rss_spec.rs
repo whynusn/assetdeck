@@ -61,25 +61,31 @@ fn locate_app_exe() -> PathBuf {
 fn idle_rss_under_100mb() {
     let exe = locate_app_exe();
     // idle 模式无参启动（design 契约）：真实 GUI 路径含渲染器驻留。
-    // stderr 落盘：无 GPU 环境（CI runner/远程桌面）若启动即退，把 panic 现场
-    // 带回失败信息——「测量失败=红」必须可归因，不允许黑洞退出。
+    // stderr 落盘：若启动即退，把 panic 现场带回失败信息——「测量失败=红」
+    // 必须可归因，不允许黑洞退出。
     let stderr_path = std::env::temp_dir().join("asset-manager-idle-stderr.log");
-    let mut child = Command::new(&exe)
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(
-            std::fs::File::create(&stderr_path).expect("stderr 落盘失败"),
-        ))
-        .spawn()
-        .expect("测量失败=红: 拉起 asset-manager 失败");
+    // 首拉预设回退哨兵：禁用应用内「GL 失败自愈重启」，避免首拉进程悄悄换出
+    // 孤儿子进程污染测量；由本测试显式决定是否以软件档重测。
+    let mut child = spawn_idle(&exe, false);
     let report = match sample_median(child.id(), POLL_MS, WARMUP, IDLE_HOLD_MS) {
         Ok(report) => report,
-        Err(e) => {
+        Err(first) => {
+            // 首拉即退（无 GL 环境：femtovg 初始化失败）。以软件渲染档重测一次
+            // ——测的就是「这台机器上应用实际跑起来的形态」（D10 预算对最坏
+            // 渲染路径守门）。重测再失败才判红，并带回两轮证据。
             let _ = child.wait();
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            panic!(
-                "测量失败=红: idle 采样中止({e})\n== 子进程 stderr ==\n{stderr}\n== app 日志目录 ==\n{}",
-                dump_newest_app_log()
-            );
+            let child2 = spawn_idle(&exe, true);
+            match sample_median(child2.id(), POLL_MS, WARMUP, IDLE_HOLD_MS) {
+                Ok(report2) => {
+                    child = child2;
+                    report2
+                }
+                Err(second) => panic!(
+                    "测量失败=红: idle 采样中止(首拉={first} 重测={second})\n== 首拉 stderr ==\n{stderr}\n== app 日志 ==\n{}",
+                    dump_newest_app_log()
+                ),
+            }
         }
     };
     // idle 进程在窗口内自行退出 = 提前退出 = 测量失败（PRD 红线）：
@@ -101,6 +107,24 @@ fn idle_rss_under_100mb() {
         "idle 中位数 {} 字节超 D10 预算 {IDLE_BUDGET_BYTES} 字节",
         report.median_bytes
     );
+}
+
+/// 拉起 idle 测量子进程。force_software 时显式钉软件渲染档（重测路径）；
+/// 否则预设 ASSETDECK_RENDER_FALLBACK 哨兵（首拉不做应用内自愈重启）。
+fn spawn_idle(exe: &PathBuf, force_software: bool) -> std::process::Child {
+    let stderr_path = std::env::temp_dir().join("asset-manager-idle-stderr.log");
+    let mut cmd = Command::new(exe);
+    if force_software {
+        cmd.env("SLINT_BACKEND", "winit-software");
+    } else {
+        cmd.env("ASSETDECK_RENDER_FALLBACK", "1");
+    }
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_path).expect("stderr 落盘失败"),
+        ))
+        .spawn()
+        .expect("测量失败=红: 拉起 asset-manager 失败")
 }
 
 #[test]

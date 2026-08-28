@@ -1358,7 +1358,29 @@ fn main() {
     }
 
     grid.sync();
-    app.run().expect("Slint 事件循环异常退出");
+    // GL 驱动缺失的自愈（实测：CI runner/远程桌面等无 GL 环境，femtovg 在事件循环
+    // 启动时报 "Failed to initialize OpenGL driver: Could not locate glCreateShader
+    // symbol" 直接退出）。winit 一进程只允许一个事件循环，进程内换后端不可行，
+    // 唯一出路是换档重启：SLINT_BACKEND=winit-software + 哨兵防无限循环。这是
+    // 上文渲染后端选择注释「gpu_rendering > 软件渲染」回退链的最后一级。
+    if let Err(e) = app.run() {
+        let can_fallback = settings.borrow().gpu_rendering
+            && std::env::var_os("SLINT_BACKEND").is_none()
+            && std::env::var_os("ASSETDECK_RENDER_FALLBACK").is_none();
+        if !can_fallback {
+            panic!("Slint 事件循环异常退出: {e}");
+        }
+        logging::warn!("GL 渲染初始化失败({e})，以软件渲染档重启自身");
+        let exe = std::env::current_exe().expect("取当前 exe 失败");
+        let respawn = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .env("SLINT_BACKEND", "winit-software")
+            .env("ASSETDECK_RENDER_FALLBACK", "1")
+            .spawn();
+        if let Err(spawn_err) = respawn {
+            panic!("Slint 事件循环异常退出: {e}（软件渲染档重启也失败: {spawn_err}）");
+        }
+    }
 }
 
 /// 导入管线共享编排（文件夹 / .emo 包两条入口共用）：
