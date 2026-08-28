@@ -7,16 +7,29 @@ publish.workspace = true
 # 依赖纪律（spec/platform 红线 1）：trait 层 lib.rs 零依赖；
 # windows-sys 仅被 #[cfg(windows)] 的 win32 模块消费，用 target 门隔离，
 # 非 Windows 目标编译本 crate 时 trait 层不受影响。
+# log 是纯门面（零传递依赖），供 win32 模块上报低频关键事件（WinEvent 泵
+# 握手超时/重装、修饰键复位）；由壳层的 logging crate 安装全局 sink，
+# 未初始化时宏为空操作，不破坏「平台层不打高频日志」的纪律。
 [target.'cfg(windows)'.dependencies]
+log = "0.4"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Threading",
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
 ] }
 
 # 集成测试 win32_manual 直接调用 Win32 API 轮询前台窗口进程归属。
