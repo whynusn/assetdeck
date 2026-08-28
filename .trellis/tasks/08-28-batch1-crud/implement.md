@@ -43,7 +43,7 @@
 
 ## 阶段 6 — 收口
 
-- [ ] 6.1 全量三道门（test/clippy/fmt）+ layering_guard/deps_guard 绿。
-- [ ] 6.2 DECISIONS.md 回写（D46–D48 落点 + spike 结论/边界）；CONTEXT.md 若冒出新词补录。
-- [ ] 6.3 trellis-update-spec：store 的「FTS 行不随软删移除，查询侧必须 JOIN 过滤」纪律 + 库写子命令模式进 spec。
-- [ ] 6.4 提交（Phase 3.4）。
+- [x] 6.1 全量三道门（test/clippy/fmt）+ layering_guard/deps_guard 绿。
+- [x] 6.2 DECISIONS.md 回写（D46–D48 落点 + spike 结论/边界）；CONTEXT.md 若冒出新词补录。
+- [x] 6.3 trellis-update-spec：store 的「FTS 行不随软删移除，查询侧必须 JOIN 过滤」纪律 + 库写子命令模式进 spec。
+- [x] 6.4 提交（Phase 3.4）。
