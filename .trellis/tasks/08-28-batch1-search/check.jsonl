@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/store/backend/database-guidelines.md", "reason": "验收复核：FTS 路排除回收站、NameIn 候选集与 deleted 位图语义闭环"}
+{"file": ".trellis/spec/index/backend/quality-guidelines.md", "reason": "验收复核：无分配改造 + budget 测试不退红、oracle 一致性测试绿"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "验收复核：路由判定/scope 穷举/二分不变量为可单测纯逻辑"}
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "验收复核：键入不引入 UI 线程新全量扫描；切档重跑走既有 set_filter+sync 单点"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 uuid→AssetId 契约只增不改既有语义、D4 候选集抽象未破"}
+{"file": "TDD_PLAN.md", "reason": "红线↔守卫映射：D52 路由与 D10 内存纪律的守卫齐备，未把 bench 未跑写成已交付"}
+{"file": "research/latency-ledger.md", "reason": "延迟账本格式先例：新增查询延迟节须同格式，可归因"}

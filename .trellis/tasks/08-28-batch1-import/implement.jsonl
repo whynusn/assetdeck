@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/library/backend/index.md", "reason": "归类落库走 enqueue 的 ImportRequest.category（explicit 通路），须沿用 D29 RuleChain 与单写者纪律"}
+{"file": ".trellis/spec/store/backend/database-guidelines.md", "reason": "统一归入写 category 复用 crud 的窄列 UPDATE；导入批量写事务纪律须对齐"}
+{"file": ".trellis/spec/app-ui/backend/index.md", "reason": "弹窗接线、三入口汇流与 ChildTaskRunner 子进程管线都落 app-ui 壳层"}
+{"file": ".trellis/spec/app-ui/backend/directory-structure.md", "reason": "新增壳层模块（classify 对话框装配、dragdrop）的文件落点约定"}
+{"file": ".trellis/spec/platform/backend/index.md", "reason": "S1 兜底路线时 RegisterDragDrop 实现与 FileDialogs 扩展受平台层 trait 零依赖纪律约束"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "拖放兜底的可测性/mock 约定须对齐平台层最低契约"}
+{"file": ".trellis/spec/media/backend/index.md", "reason": "混选按扩展名分发依赖 D23 注册表，新增格式不得绕过 kind_of 判定"}
+{"file": ".trellis/spec/ui-viewmodels/backend/index.md", "reason": "classify.rs 纯函数 VM 须零 slint 零 cfg(windows)，沿用 settings 描述化模式"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务跨 sample-library/ui-viewmodels/app-ui/platform 四层，拖放路径与契约方向按此推演"}

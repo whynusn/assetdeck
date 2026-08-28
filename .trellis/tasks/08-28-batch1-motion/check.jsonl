@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "复核：底边修复零常态开销、弹层重入无鬼影、动画开关全量钳制"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "复核：动效改造未把逻辑塞进壳层（fill_should_stop 纯函数可单测）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查 TileData 表现字段扩展未泄漏 VM 语义进 slint"}
+{"file": "TDD_PLAN.md", "reason": "守卫映射核对：window_spec/D43/interaction 既有测试全绿，动效任务不得以目测代替表驱动单测"}

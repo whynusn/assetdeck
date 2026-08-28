@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/store/backend/database-guidelines.md", "reason": "验收复核：v3→v4 迁移无损、deleted=0 过滤出现在全部读取路径、FTS 行不随软删退行"}
+{"file": ".trellis/spec/library/backend/quality-guidelines.md", "reason": "验收复核：trash 的 rename 失败回滚、reconcile 双向对账、purge 清目录+行+thumbs 全删"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "验收复核：Multi 模式零 OpenAsset 红线守卫、常态点击行为回归守卫在 VM 层可单测"}
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "验收复核：壳层未新增 UI 进程解码、库写走子进程、D45 连击合并语义未被破坏"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查五层契约变更方向正确（域类型不反向依赖、trait 只在装配点 new）"}
+{"file": "TDD_PLAN.md", "reason": "核对红线↔守卫映射：D13/D16/D47 的既有守卫无一退红，未把降级路径写成已交付"}
+{"file": "CONTEXT.md", "reason": "UI 文案与命名用语核对：回收站/彻底删除/多选模式，_Avoid_ 词零出现"}

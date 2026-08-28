@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/index/backend/index.md", "reason": "search_names 无分配改造与 Filter::NameIn 分支落此层，SoA 纪律须保持"}
+{"file": ".trellis/spec/index/backend/quality-guidelines.md", "reason": "1M 行 budget 测试为验收基线：改造只准更快、阈值不放宽"}
+{"file": ".trellis/spec/domain/backend/index.md", "reason": "Filter 枚举扩展属 domain 契约变更，须核对 evaluate/sorter 穷举分支同步"}
+{"file": ".trellis/spec/store/backend/database-guidelines.md", "reason": "FTS5 接缝：search 的 deleted=0 依赖与 trigram/ASCII 折叠边界记录在此"}
+{"file": ".trellis/spec/ui-viewmodels/backend/index.md", "reason": "SearchProvider trait 签名演化与 RealAssetResolver 新方法落在 ui-viewmodels 纯逻辑层"}
+{"file": ".trellis/spec/app-ui/backend/index.md", "reason": "搜索框前缀下拉与回调扩展落壳层，UiEnums 收口与既有回调模式沿用"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "大小写折叠工具函数在 index/ui-viewmodels 共享前先查既有实现，避免两处各写"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "FTS→行号映射横跨 store/index/ui-viewmodels，方向按此推演"}

@@ -1,0 +1,10 @@
+{"file": ".trellis/spec/store/backend/index.md", "reason": "store schema v4 迁移与新窄 API 落在此层，须遵守其迁移与事务纪律"}
+{"file": ".trellis/spec/store/backend/database-guidelines.md", "reason": "tombstone 列、FTS 触发器不随软删退行的查询侧过滤纪律、窄列 UPDATE 模式须按此规范"}
+{"file": ".trellis/spec/library/backend/index.md", "reason": "trash 目录操作（move/restore/purge/reconcile）落在此层，open 路径与单写者纪律须沿用"}
+{"file": ".trellis/spec/library/backend/directory-structure.md", "reason": "trash/<uuid>/ 新目录须符合库包目录约定（objects/thumbs 同级）"}
+{"file": ".trellis/spec/index/backend/index.md", "reason": "FacetIndex 增 deleted 位图须遵守 SoA 行孔与位图 membership 语义（D25）"}
+{"file": ".trellis/spec/ui-viewmodels/backend/index.md", "reason": "选区状态机与菜单 VM 落在 ui-viewmodels，须纯逻辑零 slint 零 cfg(windows)"}
+{"file": ".trellis/spec/app-ui/backend/index.md", "reason": "壳层接线（pointer-event、操作条、回收站入口、子进程派发）遵守既有装配与 D16 边界"}
+{"file": ".trellis/spec/app-ui/backend/directory-structure.md", "reason": "新增壳层模块（如 selection/context-menu 处理）的文件落点约定"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "本任务横跨 store/library/index/ui-viewmodels/app-ui 五层，依赖方向与契约变更按此推演"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "派生工序过滤与库写子命令前先复用 for_each_asset/ChildTaskRunner 既有抽象"}

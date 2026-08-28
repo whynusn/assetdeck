@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/app-ui/backend/index.md", "reason": "全部改动落在壳层（thumbs.rs + appwindow.slint），须沿用既有 GridCtx/Timer 模式"}
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "验收基线：D43 驻留守卫与 --bench 路径不退红；Timer 改动不得触碰 paste 时序"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "三处旧弹层+三处新弹层同构改造前先统一模式再复制，杜绝第六种写法"}
+{"file": ".trellis/spec/domain/backend/index.md", "reason": "TileData 字段扩展（fade）的语义归属核对：表现字段走数据驱动（D26 模式）"}

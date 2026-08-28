@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "验收复核：classify VM 纯函数穷举测试、记忆兼容读、取消零副作用是否可单测"}
+{"file": ".trellis/spec/app-ui/backend/quality-guidelines.md", "reason": "验收复核：UI 进程零解码、导入阶段失败不触发重载（D36②）未退行"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "若走拖放兜底：复核 D16 装配（Win32 具体类型只在 win32_runtime_deps）、trait 边界"}
+{"file": ".trellis/spec/library/backend/quality-guidelines.md", "reason": "复核 explicit 归类走既有 ImportRequest.category 单写者通路，未开第二写入口"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "检查弹窗确认→CLI 清单→管线的数据流方向正确、无反向依赖"}
+{"file": "CONTEXT.md", "reason": "用语核对：归类/包内分类/按文件夹名归类/统一归入/待分类；_Avoid_ 词零出现"}
