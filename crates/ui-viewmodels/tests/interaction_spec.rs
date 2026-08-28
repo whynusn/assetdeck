@@ -1,7 +1,8 @@
 //! 交互传播：过滤面板变更 → VM 查询刷新；双击选择 → OpenAsset 事件。
 
 use domain::{
-    Asset, AssetId, CategoryId, Filter, SortDirection, SortField, SortSpec, Sorter, TagId,
+    Asset, AssetId, AssetKind, CategoryId, Filter, SortDirection, SortField, SortSpec, Sorter,
+    TagId,
 };
 use index::FacetIndex;
 use ui_viewmodels::grid_vm::{LibraryGridVm, VmEvent};
@@ -16,6 +17,8 @@ fn tagged_index() -> FacetIndex {
             category: Some(CategoryId(i % 5)),
             tags: vec![TagId(i % 10)],
             created_at: i as i64,
+            size_bytes: None,
+            kind: AssetKind::Other,
         });
     }
     idx
@@ -84,11 +87,21 @@ fn set_layout_params_rebuilds_rects_and_content_height() {
     // 收窄容器 + 减列：Rect 表整体重算，content_height 与末块底边一致
     vm.set_layout_params(400.0, 2, 8.0);
     let total = vm.total();
-    let last = vm.rect_of(total - 1);
+    // content_height 是所有列中最深的底边，而不是最后一项的底边：masonry 把每项
+    // 放进当时最短的列，末项常常落在浅列，用它算高度会把真正最深那列的尾行裁掉。
+    let deepest = (0..total).fold(0.0f32, |acc, i| {
+        let r = vm.rect_of(i);
+        acc.max(r.y + r.h)
+    });
     assert_eq!(
         vm.content_height(),
-        last.y + last.h,
-        "content_height 必须等于最后一个 rect 的底边"
+        deepest,
+        "content_height 必须覆盖最深列的底边"
+    );
+    let last = vm.rect_of(total - 1);
+    assert!(
+        last.y + last.h <= vm.content_height() + 0.25,
+        "末项底边不得超出内容总高"
     );
     let first = vm.rect_of(0);
     assert!(first.w > 0.0 && first.x >= 0.0 && first.x + first.w <= 400.0 + 0.25);

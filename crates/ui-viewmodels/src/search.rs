@@ -1,0 +1,183 @@
+//! 搜索 Provider：把用户查询编译为 [`domain::Filter`] 的统一检索门面。
+//!
+//! v1 组合：分类/标签名子串命中（[`crate::catalog_loader::LibraryFacets::fuzzy_filter`]）
+//! ∪ 文件名子串（[`domain::Filter::NameContains`]，由 index 内存扫描实现）；
+//! ≥3 字符的全量检索后续走 Store FTS5，同一 Provider 入口扩展。
+
+use std::fmt;
+
+/// 搜索参数错误。当前只有空查询；调用方收到 [`SearchError::EmptyQuery`]
+/// 时回落 `base` 过滤器，视图保持不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchError {
+    /// 查询为空或纯空白（无法编译出有意义的 Filter，回落 base）。
+    EmptyQuery,
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SearchError::EmptyQuery => write!(f, "查询为空或纯空白"),
+        }
+    }
+}
+
+impl std::error::Error for SearchError {}
+
+/// 搜索门面：`search(query, base)` 把用户查询编译为新的 [`domain::Filter`]。
+///
+/// `base` 是调用方当前的基线过滤器（分类/标签视图等）：成功时以返回的
+/// Filter 替换基线；`Err` 时调用方回落 `base`，当前视图不做任何改动。
+pub trait SearchProvider {
+    fn search(&self, query: &str, base: &domain::Filter) -> Result<domain::Filter, SearchError>;
+}
+
+/// 基于 [`crate::catalog_loader::LibraryFacets`] 名称注册表的 v1 实现：
+/// 分类/标签名子串命中 ∪ 文件名 `NameContains`，合并组装为 `AnyOf`。
+pub struct FacetSearchProvider<'a> {
+    pub facets: &'a crate::catalog_loader::LibraryFacets,
+}
+
+impl SearchProvider for FacetSearchProvider<'_> {
+    fn search(&self, query: &str, _base: &domain::Filter) -> Result<domain::Filter, SearchError> {
+        if query.trim().is_empty() {
+            return Err(SearchError::EmptyQuery);
+        }
+        let mut clauses: Vec<domain::Filter> = Vec::new();
+        // 非空查询下 fuzzy_filter 恒返回 Some(AnyOf(..))（可能为空子句集）。
+        if let Some(domain::Filter::AnyOf(hits)) = self.facets.fuzzy_filter(query) {
+            clauses.extend(hits);
+        }
+        // 空/纯空白已在上面 Err，此处 query 非空——NameContains 恒有效（按任务
+        // 约定使用查询原文）。facets 无命中时 AnyOf 仅含 NameContains（调用方据此
+        // 按名称子串检索；两者都无内容的情形在本实现中不会出现，AnyOf 不会恒空）。
+        clauses.push(domain::Filter::NameContains(query.to_string()));
+        Ok(domain::Filter::AnyOf(clauses))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use domain::{CategoryId, Filter, TagId};
+    use store::{AssetMeta, Store};
+
+    use super::{FacetSearchProvider, SearchError, SearchProvider};
+    use crate::catalog_loader::load_real_library;
+
+    /// 用真实 Store 装配微型库（LibraryFacets 字段私有、无公开注入途径，
+    /// 走 load_real_library 公开路径造库；与 tests/facets_spec.rs 同款画法）。
+    fn scaffold(tag: &str) -> PathBuf {
+        let root = PathBuf::from("target").join("tmp").join(tag);
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).expect("建库目录失败");
+        let store = Store::open(&root.join("meta.db")).expect("打开 meta.db 失败");
+        let rows: [(&str, &str, Option<&str>, &[&str]); 2] = [
+            (
+                "a0000000-0000-0000-0000-000000000000",
+                "促销海报.png",
+                Some("促销"),
+                &[],
+            ),
+            (
+                "b0000000-0000-0000-0000-000000000000",
+                "两周年.png",
+                Some("风景"),
+                &["促销"],
+            ),
+        ];
+        for (index, (uuid, file_name, category, tags)) in rows.iter().enumerate() {
+            store
+                .upsert_asset(&AssetMeta {
+                    uuid: uuid.to_string(),
+                    file_name: file_name.to_string(),
+                    rel_path: format!("objects/{uuid}/{file_name}"),
+                    category: category.map(|c| c.to_string()),
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    size_bytes: 1,
+                    created_at: index as i64,
+                    imported_at: index as i64,
+                    phash: None,
+                    width: None,
+                    height: None,
+                })
+                .expect("写资产元数据失败");
+        }
+        root
+    }
+
+    #[test]
+    fn query_hits_category_and_file_name() {
+        let root = scaffold("search-cat-and-name");
+        let (_index, resolver) = load_real_library(&root).expect("装载真实库失败");
+        let provider = FacetSearchProvider {
+            facets: resolver.facets(),
+        };
+
+        let filter = provider
+            .search("促销", &Filter::All)
+            .expect("非空查询应 Ok");
+
+        let category_id = resolver.facets().category_id("促销").expect("应有该分类").0;
+        let promo_tag_id = resolver
+            .facets()
+            .tags()
+            .iter()
+            .find(|e| e.name == "促销")
+            .expect("应有该标签")
+            .id;
+        assert_eq!(
+            filter,
+            Filter::AnyOf(vec![
+                Filter::InCategory(CategoryId(category_id)),
+                Filter::HasTag(TagId(promo_tag_id)),
+                Filter::NameContains("促销".to_string()),
+            ]),
+            "分类名命中 + 标签名命中 + 文件名 NameContains 合并为 AnyOf"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn query_without_facet_hit_keeps_name_contains() {
+        let root = scaffold("search-name-only");
+        let (_index, resolver) = load_real_library(&root).expect("装载真实库失败");
+        let provider = FacetSearchProvider {
+            facets: resolver.facets(),
+        };
+
+        let filter = provider
+            .search("不存在的词", &Filter::All)
+            .expect("非空查询应 Ok");
+        assert_eq!(
+            filter,
+            Filter::AnyOf(vec![Filter::NameContains("不存在的词".to_string())]),
+            "facets 无命中时仅 NameContains"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_or_blank_query_is_err() {
+        let root = scaffold("search-empty");
+        let (_index, resolver) = load_real_library(&root).expect("装载真实库失败");
+        let provider = FacetSearchProvider {
+            facets: resolver.facets(),
+        };
+        assert_eq!(
+            provider.search("", &Filter::All),
+            Err(SearchError::EmptyQuery),
+            "空查询 Err"
+        );
+        assert_eq!(
+            provider.search("   \t\n", &Filter::All),
+            Err(SearchError::EmptyQuery),
+            "纯空白查询 Err"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}

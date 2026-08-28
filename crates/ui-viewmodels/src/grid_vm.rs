@@ -3,10 +3,10 @@
 //! 内存模型（D10）：数字层（位图 + 全量 Rect 表）常驻；缩略图字节只进有界 LRU，
 //! `ensure_window` 显式驱逐窗外条目——「可见窗口外零驻留」不依赖容量巧合。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 
-use domain::{Asset, AssetId, Filter, Sorter};
+use domain::{AssetId, AssetKind, Filter, Sorter};
 use index::FacetIndex;
 use lru::LruCache;
 
@@ -35,13 +35,21 @@ impl ThumbnailProvider for NullProvider {
 /// 窗口两侧过扫描条目数：邻近滚动免重复加载的缓冲带。
 pub const OVERSCAN: usize = 20;
 
+/// 单次可见区间的条目上限：视口极高 + 瓦片极小时的渲染保护阀。
+/// 超过此数的尾部条目本帧不物化，滚动会在下一帧继续补齐。
+pub const MAX_VISIBLE: usize = 512;
+
 /// 默认布局参数（壳层可经 `set_layout_params` 覆盖）。
 const DEFAULT_CONTAINER_WIDTH: f32 = 984.0;
 const DEFAULT_COLUMNS: u32 = 6;
 const DEFAULT_GAP: f32 = 12.0;
 
-/// M5 占位：宽高比由 id 确定性导出（PRD 指定公式）；M7 换媒体元数据查询。
-fn aspect_for(id: AssetId) -> f32 {
+/// 无真实媒体尺寸时的占位宽高比：由 id 确定性导出（PRD 指定公式）。
+///
+/// 真实尺寸经 [`LibraryGridVm::set_aspects`] 注入（来源 meta.db 的 width/height）；
+/// 缺尺寸的条目（未派生缩略图 / 抽帧失败的视频）才回落到这里，
+/// 保证布局始终确定且不出现 0 高瓦片。
+fn fallback_aspect(id: AssetId) -> f32 {
     ((id.0 % 7) + 1) as f32 / ((id.0 % 5) as f32 + 1.0)
 }
 
@@ -52,6 +60,10 @@ pub struct LibraryGridVm {
     ids: Vec<AssetId>,
     /// 全量预计算 rect 表，与 ids 同索引（O(1) 跳转的根基）。
     rects: Vec<Rect>,
+    /// 真实宽高比（w/h），按 AssetId 索引；缺项回落 [`fallback_aspect`]。
+    aspects: HashMap<AssetId, f32>,
+    /// 当前 rect 表中最高瓦片的高度：可见区间回退扫描的上界依据。
+    max_item_height: f32,
     content_height: f32,
     container_width: f32,
     columns: u32,
@@ -71,6 +83,8 @@ impl LibraryGridVm {
             sorter,
             ids: Vec::new(),
             rects: Vec::new(),
+            aspects: HashMap::new(),
+            max_item_height: 0.0,
             content_height: 0.0,
             container_width: DEFAULT_CONTAINER_WIDTH,
             columns: DEFAULT_COLUMNS,
@@ -88,6 +102,14 @@ impl LibraryGridVm {
         self.provider = provider;
     }
 
+    /// 注入真实宽高比表并重算布局（来源：meta.db 的 width/height）。
+    ///
+    /// 缺项条目继续用 [`fallback_aspect`]，因此部分素材尚无尺寸时布局依然完整。
+    pub fn set_aspects(&mut self, aspects: HashMap<AssetId, f32>) {
+        self.aspects = aspects;
+        self.rebuild_rects();
+    }
+
     /// 调整布局参数并重算 Rect 表（容器几何变化时由壳层调用）。
     pub fn set_layout_params(&mut self, container_width: f32, columns: u32, gap: f32) {
         self.container_width = container_width;
@@ -96,15 +118,13 @@ impl LibraryGridVm {
         self.rebuild_rects();
     }
 
-    /// 过滤变更：位图求值 → 排序 → 重建 id 序列与 Rect 表；缓存整体失效（序列已变）。
+    /// 过滤变更：位图求值 → SoA 直排 → 重建 id 序列与 Rect 表；缓存整体失效（序列已变）。
+    ///
+    /// 不物化 Asset（索引是 SoA 行表），排序在索引层按行读键完成（D3 百万级纪律）。
     pub fn set_filter(&mut self, f: &Filter) {
         let bitmap = self.index.evaluate(f);
-        let mut assets: Vec<Asset> = bitmap
-            .iter()
-            .filter_map(|id| self.index.asset(id).cloned())
-            .collect();
-        self.sorter.sort_assets(&mut assets);
-        self.ids = assets.into_iter().map(|a| a.id).collect();
+        let ordered = self.index.sorted_ids(&self.sorter, &bitmap);
+        self.ids = ordered.into_iter().map(AssetId).collect();
         self.rebuild_rects();
         self.cache.clear();
     }
@@ -123,9 +143,78 @@ impl LibraryGridVm {
         self.ids[i]
     }
 
+    /// 序列第 i 项的显示名（真实库里是素材文件名）。
+    ///
+    /// 瓦片角标从前只显示内部 `#id`，对用户没有语义；渲染端需要一个可读名称。
+    /// 索引里查不到该 id（迟到消息/合成库）时返回空串，由壳层回落 `#id`。
+    pub fn name_at(&self, i: usize) -> &str {
+        self.ids
+            .get(i)
+            .and_then(|id| self.index.name(id.0))
+            .unwrap_or("")
+    }
+
+    /// 序列第 i 项的素材类别（卡片渲染按类别切表现；未知回落 Other）。
+    pub fn kind_at(&self, i: usize) -> AssetKind {
+        self.ids
+            .get(i)
+            .map(|id| self.index.kind(id.0))
+            .unwrap_or(AssetKind::Other)
+    }
+
     /// 视口内容总高（最后一个 rect 的底边）。
     pub fn content_height(&self) -> f32 {
         self.content_height
+    }
+
+    /// 视口 y 区间 → 需要渲染的索引区间 `[start, end)`。
+    ///
+    /// 为什么不是「按 content_y 二分求单个首项」：masonry 是多列布局，`rect.y`
+    /// 只单调不减而非严格递增（首行 N 列的 y 全为 0）。对 y 做二分取「最后一个
+    /// `y <= top`」会直接跳到该行最右列，把同行左侧条目整排漏掉——表现就是
+    /// 首屏第一行不可见。这里改为区间求交：凡与 `[top, top + height)` 有交叠的
+    /// rect 全部落在返回区间内。
+    ///
+    /// 复杂度：两次二分 + 一段有界回退（回退项的 y 都落在宽度为
+    /// `max_item_height` 的一条带内，与总量无关）。
+    pub fn visible_range(&self, top: f32, viewport_height: f32) -> (usize, usize) {
+        if self.rects.is_empty() {
+            return (0, 0);
+        }
+        let top = if top.is_finite() { top.max(0.0) } else { 0.0 };
+        let height = if viewport_height.is_finite() && viewport_height > 0.0 {
+            viewport_height
+        } else {
+            0.0
+        };
+
+        // 回退起点：y 单调不减，故 y ≤ top − max_h 的条目其底边必然不到 top。
+        let mut start = self.lower_bound_y(top);
+        while start > 0 && self.rects[start - 1].y + self.max_item_height > top {
+            start -= 1;
+        }
+
+        // 结束点：第一个 y ≥ 视口底边的条目，其后全部不可见。
+        // 高度未知（首帧布局前）时至少给一项，避免 tiles 恒空。
+        let end = self
+            .lower_bound_y(top + height)
+            .max((start + 1).min(self.rects.len()));
+        let end = end.min(start + MAX_VISIBLE);
+        (start, end)
+    }
+
+    /// 第一个 `rect.y >= y` 的下标（rect.y 单调不减，标准 lower_bound）。
+    fn lower_bound_y(&self, y: f32) -> usize {
+        let (mut lo, mut hi) = (0usize, self.rects.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.rects[mid].y < y {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
     }
 
     /// 物化 [first, first+count) ± [`OVERSCAN`] 进 LRU，并驱逐窗外驻留条目。
@@ -185,8 +274,24 @@ impl LibraryGridVm {
     }
 
     fn rebuild_rects(&mut self) {
-        let aspects: Vec<f32> = self.ids.iter().map(|&id| aspect_for(id)).collect();
+        let aspects: Vec<f32> = self
+            .ids
+            .iter()
+            .map(|&id| {
+                self.aspects
+                    .get(&id)
+                    .copied()
+                    .filter(|a| a.is_finite() && *a > 0.0)
+                    .unwrap_or_else(|| fallback_aspect(id))
+            })
+            .collect();
         self.rects = masonry_layout(self.container_width, self.columns, self.gap, &aspects);
-        self.content_height = self.rects.last().map_or(0.0, |r| r.y + r.h);
+        // 内容总高 = 所有列的最低底边。masonry 下最后一项不一定落在最深的列，
+        // 取 `rects.last()` 会漏掉尾部差值，滚动到底时最后一行被裁掉。
+        let (height, max_h) = self.rects.iter().fold((0.0f32, 0.0f32), |(bot, tall), r| {
+            ((r.y + r.h).max(bot), r.h.max(tall))
+        });
+        self.content_height = height;
+        self.max_item_height = max_h;
     }
 }
