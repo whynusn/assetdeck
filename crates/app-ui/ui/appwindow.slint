@@ -1,4 +1,33 @@
-﻿// 素材管理器主窗：哑渲染——只绑定属性与转发回调，业务逻辑全在 ui-viewmodels。
+// 素材管理器主窗：哑渲染——只绑定属性与转发回调，业务逻辑全在 ui-viewmodels。
+//
+// 配色/圆角/图标一律走 theme.slint 的令牌与字形表；输入框、按钮、进度条用内置
+// std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
+// 与自绘层同步翻转（D37），两层观感一体。
+import { Button, LineEdit, ProgressIndicator, ScrollView, Palette } from "std-widgets.slint";
+import { Theme, Icon, Glyph, IconButton, DangerButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
+// 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
+export { Theme } from "theme.slint";
+// 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
+// `Palette.color-scheme` 实时推导的活绑定，Rust 侧拿到句柄后写 color-scheme
+// 即可在运行时整体翻转明暗——这是「浅色主题切不全」问题的正解（D37）。
+export { Palette }
+
+// UI 共享枚举常量：消灭 .slint 里的魔法数字（综合分析报告「三.9」）。
+// 数字值与 app-ui/src/ui_enums.rs 的映射保持一致。
+export global UiEnums {
+    out property <int> target-mode-empty: 0;
+    out property <int> target-mode-ready: 1;
+    out property <int> target-mode-needs-confirmation: 2;
+    out property <int> target-mode-choose: 3;
+    out property <int> notice-tone-success: 0;
+    out property <int> notice-tone-warning: 1;
+    out property <int> notice-tone-error: 2;
+    out property <int> card-kind-image: 0;
+    out property <int> card-kind-video: 1;
+    out property <int> card-kind-text: 2;
+    out property <int> card-kind-other: 3;
+}
+
 export struct TileData {
     x: length,
     y: length,
@@ -7,98 +36,997 @@ export struct TileData {
     asset-id: int,
     label: string,
     color: color,
+    // 浏览用缩略图（离线派生的 <=320px PNG）。缺图时为空 image，露出 color 兜底。
+    thumb: image,
+    // 素材类别（UiEnums.card-kind-*，与 domain::AssetKind 对齐）：卡片按类别切表现。
+    kind: int,
+    // 文本类素材的预览（首行若干字符）；其余类别为空串。
+    preview: string,
+}
+
+export struct SettingRowData {
+    key: string,
+    title: string,
+    detail: string,
+    checked: bool,
+    enabled: bool,
+}
+
+export struct TargetChoiceData {
+    selection-key: string,
+    label: string,
+    status: string,
+    health-color: color,
+    available: bool,
 }
 
 export component AppWindow inherits Window {
     title: "素材管理器";
     preferred-width: 1000px;
     preferred-height: 700px;
-    background: #14171c;
+    background: Theme.bg-app;
 
     // —— VM 绑定面（由壳层写入/读取）——
     in-out property <length> content-height: 1px;
     in-out property <length> content-y: 0px; // 与 Flickable viewport-y 双向绑定，壳层只读
+    out property <length> viewport-height: flick.height;
+    out property <length> viewport-width: flick.width;
     in property <[TileData]> tiles;
     in property <string> total-text: "";
     in property <string> filter-label: "全部";
+    in property <[string]> categories: ["全部"];
+    in property <[int]> category-counts: [];
+    // -1 = 全部，-2 = 检索结果态（不高亮任何分类），>=0 = 具体分类号
+    in property <int> selected-category: -1;
+    in-out property <string> search-text: "";
+    // 当前正在使用的素材（最近一次上框），用于在网格里标出焦点。
+    in property <int> active-asset-id: -1;
+    // 空态文案：由壳层按「库空 / 检索无结果 / 分类为空」分别填。
+    in property <string> empty-title: "";
+    in property <string> empty-hint: "";
+    in property <string> target-label: "未识别目标";
+    in property <color> target-health-color: #777b80;
+    in property <bool> target-pinned: false;
+    in property <int> target-mode: 0;
+    in property <[TargetChoiceData]> target-choices;
+    in property <string> notice-text: "";
+    in property <int> notice-tone: 0;
+    // notice-text 设成 in-out：壳层负责写入提示，视图侧的自动消隐 Timer 与关闭按钮
+    // 负责在数秒后或用户点击时把它清空。成功类提示不该常驻占一整行。
+    callback notice-dismissed();
+    in property <bool> progress-visible: false;
+    in property <float> progress-percent: 0.0;
+    in property <string> progress-text: "";
+    in property <string> clear-button-text: "清空素材库";
+    in property <bool> clear-button-armed: false;
+    // 设置：描述化模型（key/title/detail/checked）+ 面板开合。
+    in property <[SettingRowData]> settings: [];
+    in property <bool> single-click-activate: false;
+    in property <bool> send-after-paste: false;
+    in property <bool> settings-open: false;
+    in property <bool> gpu-rendering: false;
+    // 界面动画开关（设置面板「界面动画」）：弹层展开的过渡动画时长由此钳到 0。
+    in property <bool> animations-enabled: true;
+    // 导入菜单（左下角单入口弹层）开合：与 settings-open 同模式，壳层管理。
+    in property <bool> import-menu-open: false;
+    // 左侧分类侧栏宽度：拖动分隔条实时改，松手经 sidebar-resize-ended 持久化。
+    in-out property <length> sidebar-width: 212px;
+    // 拖动夹取范围（壳层持久化时用同一组数字，改这里需同步 main.rs 常量）。
+    property <length> min-sidebar-width: 150px;
+    property <length> max-sidebar-width: 420px;
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
+    callback viewport-resized();
     callback double-clicked(int);
+    callback tile-clicked(int);
     callback filter-selected(int); // -1 = 全部，其余为分类号
+    callback search-changed(string);
+    callback target-chip-clicked();
+    callback target-choice-selected(string);
+    callback target-pin-toggled();
+    callback settings-toggled();
+    callback setting-toggled(string);
+    callback overlay-dismissed();
+    callback import-requested();
+    callback import-emo-requested();
+    callback import-menu-toggled();
+    callback sidebar-resize-ended(length);
+    callback clear-library-requested();
+    callback export-emo-requested();
+    callback export-progress(int, int);
+    callback export-finished(bool, string);
+    callback poll-targets();
+    callback thumbnails-generated();
+    callback thumbnail-progress(int, int);
+    callback import-progress(int, int);
+    callback import-finished(bool, string);
+    // D38：设置面板底部「打开日志目录」。
+    callback open-logs-requested();
+
+    // 目标条右侧提示：告诉用户「现在能不能上框、下一步该点哪里」，
+    // 而不是仅陈述内部状态名。
+    property <string> target-hint: root.target-mode == UiEnums.target-mode-ready
+        ? "就绪"
+        : root.target-mode == UiEnums.target-mode-needs-confirmation ? "需确认"
+        : root.target-mode == UiEnums.target-mode-choose ? "选择窗口"
+        : "未选择目标";
 
     changed content-y => {
         root.scroll-changed(root.content-y);
     }
 
-    VerticalLayout {
-        // 工具栏：总数 + 过滤面板 v1 最小化（全部 + 分类按钮）
-        Rectangle {
-            height: 44px;
-            background: #1d222b;
+    changed viewport-height => {
+        root.viewport-resized();
+    }
 
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 8px;
-                alignment: start;
+    changed viewport-width => {
+        root.viewport-resized();
+    }
 
-                Text {
-                    text: root.total-text + " · 视图: " + root.filter-label;
-                    vertical-alignment: center;
-                    color: #d8dee9;
-                    font-size: 13px;
-                }
+    // overlay 宿主：填满窗口。内层先放常规布局，再叠绝对定位浮层。
+    Rectangle {
+        // 作为 Window 的根子元素，会被自动拉伸填满窗口，无需再写 width/height:100%。
+        // 关键：绝不能写 height:100%/width:100%——那会把本元素的布局 max 钉成
+        // “当前窗口尺寸”，于是 Slint 反过来用它约束窗口最大可拖尺寸，导致纵向
+        // 拉不动。改用显式的大 max，让窗口在两个方向都能自由拖拽。
+        max-height: 100000px;
+        max-width: 100000px;
 
-                for name[i] in ["全部", "分类0", "分类1", "分类2", "分类3", "分类4"]: Rectangle {
-                    width: 54px;
-                    border-radius: 4px;
-                    background: btn.pressed ? #3b4a61 : #262d38;
+        VerticalLayout {
+            // 顶部工具栏：标题/总数 + 检索器 + 设置入口。
+            // 不写 alignment:start：默认 stretch 下弹性占位才能吃掉剩余宽度，
+            // 把检索器/设置推到最右（alignment:start 会把所有元素压到左半边）。
+            Rectangle {
+                height: 48px;
+                background: Theme.bg-bar;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Glyph.layers;
+                        tint: Theme.accent;
+                        width: 18px;
+                        height: 18px;
+                    }
+
+                    // 顶栏不再重复窗口标题「素材管理器」，改成当前库视图的读数：
+                    // 「共 N 项」为主，当前分类/检索范围为次，一眼看清「现在在看什么」。
+                    Text {
+                        text: root.total-text;
+                        vertical-alignment: center;
+                        color: Theme.text;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
 
                     Text {
-                        text: name;
-                        color: #d8dee9;
+                        text: root.filter-label;
+                        vertical-alignment: center;
+                        color: Theme.text-3;
                         font-size: 11px;
                     }
 
-                    btn := TouchArea {
-                        clicked => {
-                            root.filter-selected(i - 1);
+                    // 弹性占位，把检索器与设置推到最右。
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Glyph.search;
+                        tint: search-input.has-focus ? Theme.accent : Theme.text-3;
+                        width: 15px;
+                        height: 15px;
+                    }
+
+                    // 检索器：对分类名/标签名做模糊匹配，placeholder 直接说明范围。
+                    search-input := LineEdit {
+                        y: (parent.height - self.height) / 2;
+                        width: 260px;
+                        placeholder-text: "搜索名称、分类或标签";
+                        text <=> root.search-text;
+                        edited(value) => {
+                            root.search-changed(value);
+                        }
+                    }
+
+                    settings-anchor := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 30px;
+                        height: 30px;
+
+                        IconButton {
+                            glyph: Glyph.sliders;
+                            tip: "设置：上框触发方式、发送行为、渲染后端";
+                            active: root.settings-open;
+                            clicked => {
+                                root.settings-toggled();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 目标条：当前目标始终可见；点击 chip 展开垂直下拉浮层（不下推布局）。
+            // 左簇=操作件（标签/chip/锁定），右簇=就绪说明（右对齐），整行左右平衡。
+            Rectangle {
+                height: 52px;
+                background: Theme.bg-panel;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+
+                    SectionLabel {
+                        text: "上框到";
+                    }
+
+                    target-chip := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 268px;
+                        height: 32px;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: root.target-mode == UiEnums.target-mode-choose ? Theme.accent
+                            : chip-touch.has-hover ? Theme.line-strong
+                            : Theme.line;
+                        background: chip-touch.pressed ? Theme.bg-raised-press
+                            : chip-touch.has-hover ? Theme.bg-raised-hover
+                            : Theme.bg-raised;
+
+                        animate background, border-color { duration: 120ms; }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 8px;
+                            spacing: 8px;
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: root.target-health-color;
+                            }
+
+                            Text {
+                                text: root.target-label;
+                                horizontal-stretch: 1;
+                                color: Theme.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: root.target-mode == UiEnums.target-mode-choose ? Glyph.chevron-up : Glyph.chevron-down;
+                                tint: Theme.text-3;
+                                width: 14px;
+                                height: 14px;
+                            }
+                        }
+
+                        chip-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.target-chip-clicked();
+                            }
+                        }
+
+                        Tooltip {
+                            text: @markdown("切换上框目标窗口");
+                        }
+                    }
+
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 30px;
+                        height: 30px;
+
+                        IconButton {
+                            glyph: root.target-pinned ? Glyph.lock : Glyph.unlock;
+                            tip: root.target-pinned
+                                ? "已锁定：只上框到这个窗口，不随前台切换"
+                                : "未锁定：自动跟随最近使用的 IM 窗口";
+                            active: root.target-pinned;
+                            // 还没选目标时锁定无意义，禁用以免用户误以为锁了个空目标。
+                            enabled: root.target-mode != UiEnums.target-mode-empty;
+                            clicked => {
+                                root.target-pin-toggled();
+                            }
+                        }
+                    }
+
+                    // 说明文案占满剩余宽度并右对齐：不再挤在 chip 旁边。
+                    Text {
+                        text: root.target-hint;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        horizontal-stretch: 1;
+                        color: Theme.text-3;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            if root.notice-text != "": Rectangle {
+                height: 34px;
+                background: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger-soft
+                    : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn-soft
+                    : Theme.ok-soft;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 8px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        commands: root.notice-tone == UiEnums.notice-tone-error ? Glyph.ban
+                            : root.notice-tone == UiEnums.notice-tone-warning ? Glyph.alert
+                            : Glyph.check;
+                        tint: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger
+                            : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn
+                            : Theme.accent;
+                        width: 14px;
+                        height: 14px;
+                    }
+
+                    Text {
+                        text: root.notice-text;
+                        horizontal-stretch: 1;
+                        color: Theme.text;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    // 关闭提示：成功类提示会自动消隐，这里再给用户一个随时收起的入口，
+                    // 避免一整行长期占用纵向空间。做成轻量的无边框图标，融进色条里。
+                    notice-close := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 22px;
+                        height: 22px;
+                        border-radius: Theme.radius;
+                        background: notice-close-touch.has-hover ? Theme.bg-raised-hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Icon {
+                            commands: Glyph.close;
+                            tint: Theme.text-2;
+                            width: 12px;
+                            height: 12px;
+                        }
+
+                        notice-close-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.notice-dismissed();
+                            }
+                        }
+
+                        Tooltip {
+                            text: @markdown("收起这条提示");
+                        }
+                    }
+                }
+            }
+
+            if root.progress-visible: Rectangle {
+                height: 32px;
+                background: Theme.bg-panel;
+
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+                    alignment: start;
+
+                    ProgressIndicator {
+                        y: (parent.height - self.height) / 2;
+                        width: 200px;
+                        height: 4px;
+                        progress: root.progress-percent;
+                    }
+
+                    Text {
+                        text: root.progress-text;
+                        color: Theme.text-2;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // 主体：左分类侧栏 + 中央瀑布流网格（参考千牛「我的表情」排版）。
+            HorizontalLayout {
+                // 这一行吃掉窗口的全部剩余高度：其余行都是固定高，若此行不显式拉伸，
+                // 顶层 VerticalLayout 的最大高度会被算成各行之和（有限值），
+                // Windows 便据此把窗口最大可拖高度钳在内容高度上，导致纵向拉不动。
+                vertical-stretch: 1;
+                // 交叉轴（垂直）max 会取子项 max 的最小值；子项里若有有限 max，会把
+                // 整窗最大可拖高度钳在内容高度上。显式抬高本行的 max-height，解除该钳制。
+                max-height: 100000px;
+                // 左侧分类侧栏（垂直列表 + 底部素材库维护）。
+                // 宽度可拖（150–420px）：实时值在 sidebar-width，松手持久化。
+                Rectangle {
+                    width: Math.min(root.max-sidebar-width, Math.max(root.min-sidebar-width, root.sidebar-width));
+                    background: Theme.bg-panel;
+
+                    VerticalLayout {
+                        SectionLabel {
+                            x: 14px;
+                            height: 28px;
+                            text: "分类";
+                        }
+
+                        // 分类列表：可滚动。
+                        ScrollView {
+                            vertical-stretch: 1;
+                            viewport-width: self.visible-width;
+                            viewport-height: cat-list.preferred-height;
+
+                            cat-list := VerticalLayout {
+                                padding-bottom: 8px;
+
+                                for name[i] in root.categories: Rectangle {
+                                    height: 36px;
+                                    background: (i - 1) == root.selected-category ? Theme.accent-soft
+                                        : (cat-touch.has-hover ? Theme.bg-raised : transparent);
+
+                                    animate background { duration: 100ms; }
+
+                                    // 选中态左侧强调条。
+                                    Rectangle {
+                                        x: 0;
+                                        width: 3px;
+                                        height: parent.height;
+                                        background: (i - 1) == root.selected-category ? Theme.accent : transparent;
+                                    }
+
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 12px;
+                                        spacing: 6px;
+
+                                        Text {
+                                            text: name;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            color: (i - 1) == root.selected-category ? Theme.text : Theme.text-2;
+                                            font-size: 12px;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: i < root.category-counts.length ? root.category-counts[i] : "";
+                                            vertical-alignment: center;
+                                            color: Theme.text-3;
+                                            font-size: 10px;
+                                        }
+                                    }
+
+                                    cat-touch := TouchArea {
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            root.filter-selected(i - 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.line;
+                        }
+
+                        // 素材库维护区：导入目录 / 导出 / 清空。
+                        VerticalLayout {
+                            padding: 10px;
+                            spacing: 8px;
+
+                            SectionLabel {
+                                height: 18px;
+                                text: "素材库";
+                            }
+
+                            // 导入单入口：一个按钮弹出菜单，二选一「文件夹 / .emo 素材包」。
+                            // 两类来源走不同原生对话框（FOS_PICKFOLDERS 里 .emo 文件不可见，
+                            // 文件选择器又选不了目录），菜单选中后仍走同一条子进程导入管线
+                            //（D11/D24 包注册表按扩展名分发）。
+                            import-anchor := Rectangle {
+                                height: 30px;
+
+                                Button {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "导入素材…";
+                                    primary: true;
+                                    clicked => {
+                                        root.import-menu-toggled();
+                                    }
+                                }
+                            }
+
+                            Button {
+                                text: "导出为 .emo…";
+                                clicked => {
+                                    root.export-emo-requested();
+                                }
+                            }
+
+                            // armed：壳层把文案改成确认提示时，按钮转为实心红。
+                            DangerButton {
+                                text: root.clear-button-text;
+                                armed: root.clear-button-armed;
+                                clicked => {
+                                    root.clear-library-requested();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 拖宽分隔条：按住左右拖调整分类侧栏宽度，松手发 sidebar-resize-ended。
+                Rectangle {
+                    width: 8px;
+
+                    divider-line := Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        width: divider-touch.pressed || divider-touch.has-hover ? 2px : 1px;
+                        height: parent.height;
+                        background: divider-touch.pressed ? Theme.accent
+                            : divider-touch.has-hover ? Theme.line-strong
+                            : Theme.line;
+
+                        animate width, background { duration: 100ms; }
+                    }
+
+                    divider-touch := TouchArea {
+                        mouse-cursor: MouseCursor.col-resize;
+                        property <length> press-x: 0px;
+                        property <length> start-width: 0px;
+
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                press-x = self.mouse-x;
+                                start-width = root.sidebar-width;
+                            }
+                            if (event.kind == PointerEventKind.up) {
+                                root.sidebar-resize-ended(root.sidebar-width);
+                            }
+                        }
+
+                        moved => {
+                            root.sidebar-width = Math.min(root.max-sidebar-width,
+                                Math.max(root.min-sidebar-width,
+                                    start-width + self.mouse-x - press-x));
+                        }
+                    }
+
+                    Tooltip {
+                        text: @markdown("拖动调整分类栏宽度");
+                    }
+                }
+
+                // 中央虚拟化网格：Flickable + 绝对定位瓦片。
+                flick := Flickable {
+                    horizontal-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: Math.max(root.content-height, self.height);
+                    viewport-y <=> root.content-y;
+
+                    Rectangle {
+                        width: flick.viewport-width;
+                        height: flick.viewport-height;
+
+                        // 按类别切卡片表现（ImageCard / TextCard / VideoCard 合体）：
+                        // - image/video：缩略图铺满（video 额外画右上角徽标）；
+                        // - text：中央图标 + 首行预览，不依赖缩略图产物；
+                        // - other：中央图标，占位色块可辨识。
+                        for tile in root.tiles: Rectangle {
+                            x: tile.x;
+                            y: tile.y;
+                            width: tile.w;
+                            height: tile.h;
+                            background: tile.color;
+                            border-radius: Theme.radius-lg;
+                            clip: true;
+
+                            // 图像/视频：缩略图铺满（视频抽帧也走同一产物）。
+                            if tile.kind == UiEnums.card-kind-image || tile.kind == UiEnums.card-kind-video: Image {
+                                width: 100%;
+                                height: 100%;
+                                source: tile.thumb;
+                                image-fit: cover;
+                            }
+
+                            // 文本：中央图标 + 首行预览（文本素材从此可辨识，不再只是色块）。
+                            if tile.kind == UiEnums.card-kind-text: VerticalLayout {
+                                width: 100%;
+                                height: 100%;
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                padding-top: 10px;
+                                padding-bottom: 10px;
+                                alignment: center;
+                                spacing: 6px;
+
+                                Icon {
+                                    commands: Glyph.file-text;
+                                    tint: Theme.card-icon;
+                                    width: 28px;
+                                    height: 28px;
+                                }
+
+                                Text {
+                                    text: tile.preview;
+                                    horizontal-alignment: center;
+                                    color: Theme.text-2;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // 其他（归档/未知）：中央图标占位，仍可点选上框（Files 兜底）。
+                            if tile.kind == UiEnums.card-kind-other: Rectangle {
+                                width: 100%;
+                                height: 100%;
+
+                                Icon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.file;
+                                    tint: Theme.card-icon;
+                                    width: 28px;
+                                    height: 28px;
+                                }
+                            }
+
+                            // 右上角类型徽标：小胶囊 + 类别图标，图片/视频/文本/文件四类
+                            // 统一示意。旧版是全宽透明文字横条——遮缩略图、图片类缺失，
+                            // 且胶囊宽度没钉死会撑满整卡（本条即那次回归的修复）。
+                            // 图形直接按 kind 从 Glyph 表取（字符串名传不进 Path，
+                            // kind 与图形本就一一对应，无须经 Rust 再转一道）。
+                            Rectangle {
+                                width: 22px;
+                                height: 22px;
+                                x: parent.width - self.width - 6px;
+                                y: 6px;
+                                border-radius: 7px;
+                                background: Theme.badge-bg;
+
+                                Icon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    commands: tile.kind == UiEnums.card-kind-image ? Glyph.image
+                                        : tile.kind == UiEnums.card-kind-video ? Glyph.film
+                                        : tile.kind == UiEnums.card-kind-text ? Glyph.file-text
+                                        : Glyph.file;
+                                    tint: Theme.badge-text;
+                                    width: 13px;
+                                    height: 13px;
+                                }
+                            }
+
+                            // 名称条：贴底整条，hover 时压深底色让长名字更好读。
+                            if tile.label != "": Rectangle {
+                                y: parent.height - self.height;
+                                width: 100%;
+                                height: 20px;
+                                background: tile-touch.has-hover ? Theme.label-bar-bg-hover : Theme.label-bar-bg;
+
+                                Text {
+                                    x: 6px;
+                                    width: parent.width - 12px;
+                                    text: tile.label;
+                                    color: Theme.label-bar-text;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+
+                            // 边框覆盖层：hover 描一圈淡边，最近上框的那张描 accent。
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: transparent;
+                                border-radius: Theme.radius-lg;
+                                border-width: tile.asset-id == root.active-asset-id ? 2px
+                                    : tile-touch.has-hover ? 1px
+                                    : 0px;
+                                border-color: tile.asset-id == root.active-asset-id
+                                    ? Theme.accent
+                                    : Theme.line-strong;
+                            }
+
+                            tile-touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.tile-clicked(tile.asset-id);
+                                }
+                                double-clicked => {
+                                    root.double-clicked(tile.asset-id);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 虚拟化网格：Flickable + 绝对定位瓦片；滚动位置经 content-y 双向绑定回流壳层
-        flick := Flickable {
-            viewport-width: self.width;
-            viewport-height: Math.max(root.content-height, self.height);
-            viewport-y <=> root.content-y;
+        // —— 浮层区（绝对定位，浮于瀑布流之上，不占垂直布局流）——
 
-            Rectangle {
-                width: flick.viewport-width;
-                height: flick.viewport-height;
+        // 空态：网格没有瓦片时，锚在网格区域中央说明「为什么空、下一步做什么」。
+        if root.tiles.length == 0 && root.empty-title != "": Rectangle {
+            x: flick.absolute-position.x;
+            y: flick.absolute-position.y;
+            width: flick.width;
+            height: flick.height;
 
-                for tile in root.tiles: Rectangle {
-                    x: tile.x;
-                    y: tile.y;
-                    width: tile.w;
-                    height: tile.h;
-                    background: tile.color;
-                    border-radius: 6px;
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
 
-                    Text {
-                        text: tile.label;
-                        color: #ffffff;
-                        font-size: 10px;
-                        x: 5px;
-                        y: 3px;
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    commands: Glyph.empty-box;
+                    tint: Theme.line-strong;
+                    width: 44px;
+                    height: 44px;
+                }
+
+                Text {
+                    text: root.empty-title;
+                    horizontal-alignment: center;
+                    color: Theme.text-2;
+                    font-size: 13px;
+                }
+
+                Text {
+                    text: root.empty-hint;
+                    horizontal-alignment: center;
+                    color: Theme.text-3;
+                    font-size: 11px;
+                }
+            }
+        }
+
+        // 点外部收起：仅在有浮层打开时铺满窗口拦截点击。
+        if root.settings-open || root.import-menu-open
+            || root.target-mode == UiEnums.target-mode-choose: TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.overlay-dismissed();
+            }
+        }
+
+        // IM 目标垂直下拉：锚定在目标 chip 下方。
+        // 展开动画：元素挂载后 init 置 shown，opacity/y 从初始态过渡到位
+        //（框架 animate，非手绘）。关闭端是 if 销毁、Slint 即时移除，无出场过渡；
+        // 动画时长受「界面动画」设置钳制，关了就 0ms 直达。
+        if root.target-mode == UiEnums.target-mode-choose: Rectangle {
+            property <bool> shown: !root.animations-enabled;
+            init => {
+                shown = true;
+            }
+
+            opacity: shown ? 1.0 : 0.0;
+            x: target-chip.absolute-position.x;
+            y: target-chip.absolute-position.y + target-chip.height + 6px + (shown ? 0px : -6px);
+            width: 300px;
+            height: choices-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            choices-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                if root.target-choices.length == 0: Rectangle {
+                    height: 56px;
+
+                    VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: center;
+                        spacing: 4px;
+
+                        Text {
+                            text: "没有检测到运行中的 IM 窗口";
+                            color: Theme.text-2;
+                            font-size: 12px;
+                        }
+
+                        Text {
+                            text: "先打开并登录一个聊天窗口，再回来选择";
+                            color: Theme.text-3;
+                            font-size: 10px;
+                        }
+                    }
+                }
+
+                for choice in root.target-choices: Rectangle {
+                    height: 48px;
+                    border-radius: Theme.radius;
+                    border-width: 1px;
+                    border-color: choice-touch.has-hover && choice.available ? Theme.accent : Theme.line;
+                    background: choice-touch.pressed ? Theme.bg-raised-press
+                        : choice-touch.has-hover ? Theme.bg-raised-hover
+                        : Theme.bg-raised;
+                    opacity: choice.available ? 1.0 : 0.6;
+
+                    animate background, border-color { duration: 100ms; }
+
+                    VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 3px;
+
+                        HorizontalLayout {
+                            spacing: 7px;
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: choice.health-color;
+                            }
+
+                            Text {
+                                text: choice.label;
+                                horizontal-stretch: 1;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+
+                        Text {
+                            text: choice.status;
+                            color: Theme.text-3;
+                            font-size: 10px;
+                            overflow: elide;
+                        }
                     }
 
-                    TouchArea {
-                        double-clicked => {
-                            root.double-clicked(tile.asset-id);
+                    choice-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.target-choice-selected(choice.selection-key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 导入菜单：左下角「导入素材…」上方弹出（向上避免越过窗口底缘）。
+        if root.import-menu-open: Rectangle {
+            property <bool> shown: !root.animations-enabled;
+            init => {
+                shown = true;
+            }
+
+            opacity: shown ? 1.0 : 0.0;
+            x: import-anchor.absolute-position.x;
+            y: import-anchor.absolute-position.y - self.height - 8px + (shown ? 0px : 6px);
+            width: 244px;
+            height: import-menu-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            import-menu-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                MenuItem {
+                    glyph: Glyph.folder;
+                    text: "导入文件夹…";
+                    detail: "图片 / 视频 / 文本等素材文件";
+                    clicked => {
+                        root.import-requested();
+                    }
+                }
+
+                MenuItem {
+                    glyph: Glyph.package;
+                    text: "导入 .emo 素材包…";
+                    detail: "兼容千牛导出的素材包格式";
+                    clicked => {
+                        root.import-emo-requested();
+                    }
+                }
+            }
+        }
+
+        // 设置面板：右对齐锚在设置按钮下方。
+        if root.settings-open: Rectangle {
+            property <bool> shown: !root.animations-enabled;
+            init => {
+                shown = true;
+            }
+
+            opacity: shown ? 1.0 : 0.0;
+            x: Math.max(12px, settings-anchor.absolute-position.x + settings-anchor.width - self.width);
+            y: settings-anchor.absolute-position.y + settings-anchor.height + 6px + (shown ? 0px : -6px);
+            width: 316px;
+            height: settings-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            settings-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 14px;
+
+                SectionLabel {
+                    height: 14px;
+                    text: "设置";
+                }
+
+                // 通用渲染：行数据全部来自壳层的 SettingRowData 模型，
+                // 新增设置项只改 Rust 侧描述（SettingSpec），不再手写 slint。
+                for setting in root.settings: SettingRow {
+                    title: setting.title;
+                    detail: setting.detail;
+                    checked: setting.checked;
+                    enabled: setting.enabled;
+                    toggled => {
+                        root.setting-toggled(setting.key);
+                    }
+                }
+
+                // D38：一键打开日志目录（全部子进程日志同目录，导出=拷贝该目录）。
+                log-folder-touch := TouchArea {
+                    height: 30px;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => { root.open-logs-requested(); }
+                    Rectangle {
+                        background: log-folder-touch.pressed ? Theme.bg-raised-press
+                            : log-folder-touch.has-hover ? Theme.bg-raised-hover
+                            : Theme.bg-raised;
+                        border-radius: Theme.radius;
+                        Text {
+                            text: "打开日志目录";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: Theme.text-2;
+                            font-size: 12px;
                         }
                     }
                 }

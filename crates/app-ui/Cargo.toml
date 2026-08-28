@@ -9,13 +9,26 @@ name = "asset-manager"
 path = "src/main.rs"
 
 [dependencies]
+# D38 诊断日志。
+logging = { path = "../logging" }
 ui-viewmodels = { path = "../ui-viewmodels" }
+# 平台装配：Win32 具体实现只在本二进制入口被 new 出来并注入 VM 运行时
+# （spec/app-ui/backend/directory-structure.md「M8 装配边界」）。
+platform = { path = "../platform" }
+# D41 壳层缩略图缓存的 LRU（与 ui-viewmodels 同一 crate）。
+lru = "0.12"
 slint = { version = "1", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
     "renderer-femtovg",
     "renderer-software",
+    # 软件渲染器默认不描边 Path（draw_path 为空实现），矢量图标必须靠这个 feature。
+    "software-renderer-path",
+    # 允许用 BackendSelector 的 winit 窗口属性钩子，把窗口钉成不透明（见 main.rs
+    # 的后端选择处）。软件渲染的局部重绘会在窗口透明时露出桌面，钉不透明后
+    # DWM 不再按像素 alpha 合成，残留像素也不会再穿透成「透明」。
+    "unstable-winit-030",
 ] }
 
 [build-dependencies]

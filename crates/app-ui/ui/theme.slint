@@ -1,0 +1,397 @@
+// 设计令牌：颜色/圆角集中一处，避免各处硬编码色值漂移。
+//
+// 取值刻意贴合内置 fluent 暗色（背景 #1C1C1C、次级面 #2C2C2C、强调 #60CDFF、
+// 描边约 8% 白），这样自绘控件与 std-widgets 的 LineEdit/ProgressIndicator 放在
+// 一起不会出现两套色系。build.rs 已把样式钉在 `fluent-dark`，不跟随系统亮暗。
+//
+// 运行时主题：全部颜色为 in-out property，壳层启动时按 ThemeProvider
+// （ui-viewmodels::theme）注入暗/浅两套令牌。std-widgets 的内部配色走另一条
+// 通道：壳层写内置 Palette.color-scheme 整体翻转（D37），两层同明暗。
+export global Theme {
+    // 背景层级：窗口 < 面板 < 条 < 抬起面（浮层/按钮）
+    in-out property <color> bg-app: #1c1c1c;
+    in-out property <color> bg-panel: #202020;
+    in-out property <color> bg-bar: #252525;
+    in-out property <color> bg-raised: #2f2f2f;
+    in-out property <color> bg-raised-hover: #383838;
+    in-out property <color> bg-raised-press: #292929;
+    in-out property <color> bg-input: #1a1a1a;
+
+    // 描边
+    in-out property <color> line: #383838;
+    in-out property <color> line-strong: #4a4a4a;
+
+    // 文本三级：主/次/弱
+    in-out property <color> text: #f4f4f4;
+    in-out property <color> text-2: #c9c9c9;
+    in-out property <color> text-3: #8a8a8a;
+
+    // 语义色：强调=fluent 暗色强调蓝，其上文字用黑（同 fluent accent-foreground）
+    in-out property <color> accent: #60cdff;
+    in-out property <color> accent-hover: #7ad7ff;
+    in-out property <color> accent-press: #4bb2e0;
+    in-out property <color> accent-ink: #06131a;
+    in-out property <color> accent-soft: #1f3a47;
+    in-out property <color> danger: #e0666f;
+    in-out property <color> danger-soft: #3a2427;
+    in-out property <color> danger-press: #472a2e;
+    in-out property <color> warn: #e3b457;
+    in-out property <color> warn-soft: #3a3320;
+    in-out property <color> ok-soft: #1f3a30;
+
+    // 浮层：比抬起面再亮一档，并配描边拉开与内容的层次
+    in-out property <color> bg-overlay: #2c2c2c;
+    in-out property <color> scrim: #00000066;
+
+    // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值
+    in-out property <color> label-bar-bg: #00000080;
+    in-out property <color> label-bar-bg-hover: #000000cc;
+    in-out property <color> label-bar-text: #ffffff;
+    in-out property <color> badge-bg: #00000099;
+    in-out property <color> badge-text: #ffffff;
+    in-out property <color> card-icon: #00000066;
+
+    // 几何
+    in-out property <length> radius: 4px;
+    in-out property <length> radius-lg: 8px;
+}
+
+// 图标：统一 24 单位视图盒的描边图形（lucide 风格几何），只吃 commands + 尺寸。
+export component Icon inherits Path {
+    in property <color> tint: Theme.text-2;
+    in property <length> weight: 1.7px;
+    fill: transparent;
+    stroke: root.tint;
+    stroke-width: root.weight;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    width: 16px;
+    height: 16px;
+}
+
+// 图标字形表：集中放 path commands，调用点只引名字，避免同一图形多处抄写。
+export global Glyph {
+    out property <string> search: "M18 11a7 7 0 1 1-14 0a7 7 0 1 1 14 0M20 20l-4.6-4.6";
+    out property <string> close: "M6 6L18 18M18 6L6 18";
+    out property <string> chevron-down: "M6 10L12 16L18 10";
+    out property <string> chevron-up: "M6 15L12 9L18 15";
+    out property <string> sliders: "M3 8H21M3 16H21M9 5.5a2.5 2.5 0 1 1 0 5a2.5 2.5 0 1 1 0-5M15 13.5a2.5 2.5 0 1 1 0 5a2.5 2.5 0 1 1 0-5";
+    out property <string> folder: "M3 7.5a2 2 0 0 1 2-2h4l2.2 2.4H19a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z";
+    out property <string> import: "M12 3.5V14M7.5 10L12 14.5L16.5 10M4 20H20";
+    out property <string> export: "M12 15.5V5M7.5 9.5L12 5L16.5 9.5M4 20H20";
+    out property <string> trash: "M4 7H20M9.5 7V4.2H14.5V7M6.5 7L7.6 20H16.4L17.5 7M10 11V16.5M14 11V16.5";
+    out property <string> lock: "M7.5 10.5V8a4.5 4.5 0 0 1 9 0v2.5M5.5 10.5H18.5V20H5.5Z";
+    out property <string> unlock: "M7.5 10.5V8a4.5 4.5 0 0 1 8.6-1.8M5.5 10.5H18.5V20H5.5Z";
+    out property <string> check: "M5 12.5L9.5 17L19 6.5";
+    out property <string> paste: "M4 12H15.5M11 7.5L15.5 12L11 16.5M20 4.5V19.5";
+    out property <string> image: "M4.5 5H19.5V19H4.5ZM4.5 15.5L9.5 10.5L13 14L15.8 11.2L19.5 15M14.8 8.6a1.3 1.3 0 1 0 0.02 0";
+    out property <string> info: "M12 4a8 8 0 1 1 0 16a8 8 0 1 1 0-16M12 10.5V16.5M12 7.6h0.02";
+    out property <string> alert: "M12 4L21 19.5H3ZM12 9.5V14M12 16.6h0.02";
+    out property <string> target: "M12 4a8 8 0 1 1 0 16a8 8 0 1 1 0-16M12 8.5a3.5 3.5 0 1 1 0 7a3.5 3.5 0 1 1 0-7";
+    out property <string> empty-box: "M3.5 8L12 4L20.5 8V16L12 20L3.5 16ZM3.5 8L12 12M20.5 8L12 12M12 12V20";
+    out property <string> layers: "M12 3.5L3.5 8L12 12.5L20.5 8ZM3.5 12.5L12 17L20.5 12.5M3.5 16.5L12 21L20.5 16.5";
+    out property <string> ban: "M12 4a8 8 0 1 1 0 16a8 8 0 1 1 0-16M6.5 17.5L17.5 6.5";
+    // 浏览目录：文件夹 + 放大镜，和纯 folder 区分开，避免两个按钮同形。
+    out property <string> folder-search: "M3 7.5a2 2 0 0 1 2-2h4l2.2 2.4H19a2 2 0 0 1 2 2v2.4M3 9.9V18a2 2 0 0 0 2 2h6.6M17 13.4a2.6 2.6 0 1 1 0 5.2a2.6 2.6 0 1 1 0-5.2M18.9 17.9L21 20";
+    // 卡片类型图标：图片 / 视频 / 文本文件 / 通用文件（右上角徽标 + text/other 卡片中央图形）
+    out property <string> file-text: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5M9 12H15.5M9 15.5H15.5M9 19H12.5";
+    out property <string> film: "M4.5 4.5H19.5V19.5H4.5ZM7 4.5V19.5M17 4.5V19.5M7 9.5H4.5M7 14.5H4.5M19.5 9.5H17M19.5 14.5H17";
+    out property <string> file: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5";
+    // 素材包（lucide package 几何）：导入菜单里的 .emo 包入口。
+    out property <string> package: "M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4zM12 22V12M3.29 7L12 12L20.71 7M7.5 4.2L16.5 9.2";
+}
+
+// 图标按钮：无文字的方形按钮，语义交给 Tooltip，界面上不再堆说明文本。
+//
+// 全受控：`active` 由外部属性驱动，内部不改任何状态，避免 std-widgets 里
+// Switch/CheckBox「先自翻 checked 再发回调」把外部单向绑定打断的问题。
+export component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> tip;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <length> icon-size: 16px;
+    callback clicked();
+
+    width: 30px;
+    height: 30px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: !root.enabled ? Theme.line
+        : root.active ? Theme.accent
+        : touch.has-hover ? Theme.line-strong
+        : Theme.line;
+    background: !root.enabled ? transparent
+        : touch.pressed ? Theme.bg-raised-press
+        : root.active ? Theme.accent-soft
+        : touch.has-hover ? Theme.bg-raised-hover
+        : Theme.bg-raised;
+
+    animate background, border-color { duration: 120ms; }
+
+    Icon {
+        width: root.icon-size;
+        height: root.icon-size;
+        commands: root.glyph;
+        tint: !root.enabled ? Theme.text-3 : root.active ? Theme.accent : Theme.text-2;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Tooltip {
+        // Tooltip.text 是 styled-text，字符串需显式转换。
+        text: @markdown("\{root.tip}");
+    }
+}
+
+// 危险操作按钮：与普通 Button 拉开视觉层级（描边红 → 待确认时填充红）。
+export component DangerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> armed: false;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: root.armed ? Theme.danger : (touch.has-hover ? Theme.danger : Theme.line);
+    background: root.armed
+        ? (touch.pressed ? Theme.danger-press : Theme.danger-soft)
+        : (touch.pressed ? Theme.danger-press : touch.has-hover ? Theme.danger-soft : transparent);
+
+    animate background, border-color { duration: 120ms; }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 6px;
+
+        Icon {
+            y: (parent.height - self.height) / 2;
+            commands: Glyph.trash;
+            tint: Theme.danger;
+            width: 14px;
+            height: 14px;
+        }
+
+        Text {
+            text: root.text;
+            color: Theme.danger;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// 分区小标题：给侧栏/面板分组，字号压到 10px 并调淡，不与内容抢注意力。
+export component SectionLabel inherits Text {
+    color: Theme.text-3;
+    font-size: 10px;
+    font-weight: 600;
+    vertical-alignment: center;
+}
+
+// 通用文本按钮（次要操作）：支持前置图标、悬停/按压反馈、可选 Tooltip。
+export component FlatButton inherits Rectangle {
+    in property <string> text;
+    in property <string> glyph: "";
+    in property <string> tip: "";
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 28px;
+    border-radius: Theme.radius;
+    background: !root.enabled ? Theme.bg-raised : touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
+    animate background { duration: 120ms; }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 5px;
+
+        if root.glyph != "": Icon {
+            y: (parent.height - self.height) / 2;
+            commands: root.glyph;
+            tint: root.enabled ? Theme.text-2 : Theme.text-3;
+            width: 13px;
+            height: 13px;
+        }
+
+        Text {
+            text: root.text;
+            color: root.enabled ? Theme.text-2 : Theme.text-3;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if root.tip != "": Tooltip {
+        // Tooltip.text 是 styled-text，字符串需显式转换。
+        text: @markdown("\{root.tip}");
+    }
+}
+
+// 受控开关：状态完全由外部 `checked` 决定，自身只发 `toggled`。
+//
+// 刻意不用 std-widgets 的 `Switch`：它的内部 TouchArea 会先自行翻转 `checked`
+// 再发回调，这一次写入会顶掉 `checked: root.xxx` 这条单向绑定，之后壳层回填的
+// 设置值就再也反映不到界面上。本组件把状态权完全留给壳层，避免这条歧义。
+export component Toggle inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: !root.enabled ? Theme.line
+        : root.checked ? Theme.accent
+        : touch.has-hover ? Theme.line-strong
+        : Theme.line;
+    background: !root.enabled ? Theme.bg-raised
+        : root.checked
+            ? (touch.pressed ? Theme.accent-press : Theme.accent)
+            : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised);
+
+    animate background, border-color { duration: 140ms; }
+
+    knob := Rectangle {
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        y: (parent.height - self.height) / 2;
+        x: root.checked ? parent.width - self.width - 4px : 4px;
+        background: !root.enabled ? Theme.text-3 : root.checked ? Theme.accent-ink : Theme.text-2;
+
+        animate x, background { duration: 140ms; easing: ease-out; }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// 菜单行：弹层里的单条动作（图标 + 标题 + 次要说明），hover/按压反馈与
+// IconButton 同一色系；受控无状态，点击只转发 clicked。
+export component MenuItem inherits Rectangle {
+    in property <string> glyph;
+    in property <string> text;
+    in property <string> detail: "";
+    callback clicked();
+
+    height: 46px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.accent : Theme.line;
+    background: touch.pressed ? Theme.bg-raised-press
+        : touch.has-hover ? Theme.bg-raised-hover
+        : Theme.bg-raised;
+
+    animate background, border-color { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 9px;
+
+        Icon {
+            y: (parent.height - self.height) / 2;
+            commands: root.glyph;
+            tint: touch.has-hover ? Theme.accent : Theme.text-2;
+            width: 15px;
+            height: 15px;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.text;
+                color: Theme.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+
+            if root.detail != "": Text {
+                text: root.detail;
+                color: Theme.text-3;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// 设置行：左侧「标题 + 当前状态说明」，右侧受控开关。说明文字负责讲清开关的
+// 当前语义，界面上因此不需要额外的帮助文案。
+export component SettingRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    spacing: 12px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 3px;
+        alignment: center;
+
+        Text {
+            text: root.title;
+            color: root.enabled ? Theme.text : Theme.text-3;
+            font-size: 12px;
+        }
+
+        Text {
+            text: root.detail;
+            color: Theme.text-3;
+            font-size: 10px;
+            wrap: word-wrap;
+        }
+    }
+
+    Toggle {
+        y: (parent.height - self.height) / 2;
+        checked: root.checked;
+        enabled: root.enabled;
+        toggled => {
+            root.toggled();
+        }
+    }
+}
