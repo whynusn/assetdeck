@@ -52,14 +52,14 @@ fn multi_mode_any_click_sequence_emits_zero_open_asset() {
         AssetId(3),
         Modifiers {
             ctrl: true,
-            ..Default::default()
+            shift: false,
         },
     );
     vm.single_click(
         AssetId(7),
         Modifiers {
+            ctrl: false,
             shift: true,
-            ..Default::default()
         },
     );
     vm.select_all_visible();
@@ -114,7 +114,7 @@ fn normal_ctrl_click_toggles_without_open() {
         AssetId(5),
         Modifiers {
             ctrl: true,
-            ..Default::default()
+            shift: false,
         },
     );
     assert!(vm.is_selected(AssetId(5)));
@@ -124,7 +124,7 @@ fn normal_ctrl_click_toggles_without_open() {
         AssetId(5),
         Modifiers {
             ctrl: true,
-            ..Default::default()
+            shift: false,
         },
     );
     assert!(!vm.is_selected(AssetId(5)));
@@ -146,8 +146,8 @@ fn shift_range_follows_view_order_and_anchor_survives() {
     vm.single_click(
         AssetId(6),
         Modifiers {
+            ctrl: false,
             shift: true,
-            ..Default::default()
         },
     );
     assert_eq!(vm.selection_ids(), vec![AssetId(6)]);
@@ -157,8 +157,8 @@ fn shift_range_follows_view_order_and_anchor_survives() {
     vm.single_click(
         AssetId(7),
         Modifiers {
+            ctrl: false,
             shift: true,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -169,8 +169,8 @@ fn shift_range_follows_view_order_and_anchor_survives() {
     vm.single_click(
         AssetId(1),
         Modifiers {
+            ctrl: false,
             shift: true,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -188,7 +188,7 @@ fn ctrl_shift_click_extends_range_union() {
         AssetId(1),
         Modifiers {
             ctrl: true,
-            ..Default::default()
+            shift: false,
         },
     );
     // Ctrl+Shift = 从锚点(8)取范围并入既有选区（1 保留）。
@@ -197,7 +197,6 @@ fn ctrl_shift_click_extends_range_union() {
         Modifiers {
             ctrl: true,
             shift: true,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -299,7 +298,7 @@ fn filter_change_clears_stale_selection() {
         AssetId(3),
         Modifiers {
             ctrl: true,
-            ..Default::default()
+            shift: false,
         },
     );
     vm.enter_multi();
