@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     统一发布打包流水线：一条命令产出便携版 + 安装版两种分发物。
 
@@ -9,7 +9,7 @@
       portable（便携版）
         1. cargo build --release：主程序(app-ui→asset-manager)、worker(decode-worker)、
            sample-library、derive-thumbs
-        2. 重建 dist/：拷贝 4 个 exe + 示例库 samples/library -> dist/library
+        2. 重建 dist/：拷贝 4 个 exe + 现场生成示例库 samples/inbox -> dist/library
         3. 校验必需文件齐全后打成 artifacts/素材管理器-便携版-<ver>.zip
 
       installer（安装版，依赖 portable 产出的 dist/）
@@ -99,15 +99,15 @@ function Step-Portable {
         Copy-Item -Path $src -Destination $Dist -Force
     }
 
-    $sampleLibrary = Join-Path $RepoRoot "samples\library"
-    if (Test-Path $sampleLibrary) {
-        $distLibrary = Join-Path $Dist "library"
-        New-Item -ItemType Directory -Force -Path $distLibrary | Out-Null
-        Copy-Item -Path (Join-Path $sampleLibrary "*") -Destination $distLibrary -Recurse -Force
-    }
+    # 示例库是生成物、不进 git：每次打包现场用 sample-library 从 samples/inbox
+    # 生成到 dist/library（开箱即有带缩略图的演示库）。旧写法依赖作者机器上
+    # 残留的 samples/library 目录，CI 上必然缺失而失败。
+    $sampleExe = Join-Path $RepoRoot "target\release\sample-library.exe"
+    & $sampleExe (Join-Path $RepoRoot "samples\inbox") (Join-Path $Dist "library")
+    Assert-LastExitCode "生成示例库"
     # 校验：示例库元数据必须随包（安装后开箱即有预览）
     if (-not (Test-Path (Join-Path $Dist "library\meta.db"))) {
-        throw "dist/library 缺少 meta.db，示例库未随包"
+        throw "dist/library 缺少 meta.db，示例库生成失败"
     }
 
     Write-Host "==> [portable] 打 zip"
