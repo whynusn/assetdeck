@@ -140,12 +140,17 @@ fn cmd_measure_rss(args: &[String]) -> i32 {
 
     // browse 模式传 --bench；子进程 hold 取父窗口一半，保证在父采样窗内自然退出
     let mut command = Command::new(&margs.exe);
-    if margs.mode == "browse" {
+    let idle = margs.mode == "idle";
+    if !idle {
         command
             .arg("--bench")
             .arg(&margs.library)
             .arg("--bench-hold-ms")
             .arg((margs.hold_ms / 2).max(2_000).to_string());
+    } else {
+        // 首拉预设回退哨兵：禁用应用内「GL 失败自愈重启」，防孤儿换进程污染采样；
+        // 首拉即退由下方软件档重测接管（与 rss_spec 同一策略）。
+        command.env("ASSETDECK_RENDER_FALLBACK", "1");
     }
     let mut child = match command
         .stdout(Stdio::inherit())
@@ -160,7 +165,32 @@ fn cmd_measure_rss(args: &[String]) -> i32 {
     };
     let pid = child.id();
 
-    let sampled = sample_median(pid, POLL_MS, WARMUP, margs.hold_ms);
+    let mut sampled = sample_median(pid, POLL_MS, WARMUP, margs.hold_ms);
+    if idle {
+        if let Err(first) = &sampled {
+            // 首拉即退（典型：无 GL 环境下 GPU 档事件循环起不来，见 rss_spec 同款
+            // 处理）。以软件渲染档重测一次——测的就是「这台机器上应用实际跑起来
+            // 的形态」（D10 对最坏渲染路径守门）；重测再失败才判红。
+            eprintln!("idle 首拉采样中止({first})，以软件渲染档重测");
+            let _ = child.kill();
+            let _ = child.wait();
+            let retry = match Command::new(&margs.exe)
+                .env("SLINT_BACKEND", "winit-software")
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("测量失败=红: 软件渲染档重测拉起失败: {e}");
+                    return 2;
+                }
+            };
+            let pid = retry.id();
+            sampled = sample_median(pid, POLL_MS, WARMUP, margs.hold_ms);
+            child = retry;
+        }
+    }
     let report = match sampled {
         Ok(r) => r,
         Err(e @ SamplerError::ApiFailed(_)) | Err(e @ SamplerError::ProcessGone) => {
