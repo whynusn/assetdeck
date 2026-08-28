@@ -49,6 +49,10 @@ pub enum Filter {
     /// 文件名子串匹配（大小写不敏感）。v1 由 index 内存扫描实现；
     /// ≥3 字符的查全量检索走 Store FTS5（SearchProvider 统一入口）。
     NameContains(String),
+    /// D52 混合路由：FTS5 命中经 uuid→行号二分映射出的 id 白名单（瞬时构造，
+    /// 不携带位图外物——D4 候选集抽象纪律）。求值 = 与活集求交：FTS 行不随
+    /// 软删移除（D46），传入已删/未知 id 被静默剔除。
+    NameIn(Vec<u32>),
     /// D46 回收站视图：求值结果 = deleted 位图（与活集互斥，D47 语义下
     /// 浏览/计数/搜索全走活集，只有显式切到此过滤器才见回收站行）。
     Trash,
@@ -259,5 +263,48 @@ mod tests {
         let json = serde_json::to_string(&f).unwrap();
         let back: Filter = serde_json::from_str(&json).unwrap();
         assert_eq!(back, f);
+    }
+}
+
+/// D52 共享的文本折叠工具：needle 一次折叠，haystack 流式比对（零逐行分配）。
+///
+/// 折叠语义 = `char::to_lowercase`（Unicode 表）：ASCII 快慢无所谓——正确性
+/// 先行；中文无大小写，折叠恒等。双侧同一函数保证 İ/i̇ 这类展开对称。
+pub mod text {
+    /// 大小写折叠子串匹配：haystack 逐字符折叠流过定长环形窗口。
+    /// `ring` 由调用方分配一次、跨行复用（百万行扫描的关键：零逐行分配）。
+    pub fn contains_case_fold(haystack: &str, needle: &[char], ring: &mut Vec<char>) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        ring.clear();
+        ring.resize(needle.len(), ' ');
+        let mut fill = 0usize;
+        let mut head = 0usize;
+        for ch in haystack.chars().flat_map(char::to_lowercase) {
+            ring[head] = ch;
+            head = (head + 1) % ring.len();
+            if fill < ring.len() {
+                fill += 1;
+            }
+            if fill == ring.len() {
+                let mut matched = true;
+                for (offset, expected) in needle.iter().enumerate() {
+                    if ring[(head + offset) % ring.len()] != *expected {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// needle 折叠为 char 序列（每次查询一次的分配，与行数无关）。
+    pub fn fold_lower(text: &str) -> Vec<char> {
+        text.trim().chars().flat_map(char::to_lowercase).collect()
     }
 }

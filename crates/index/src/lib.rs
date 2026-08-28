@@ -226,13 +226,17 @@ impl FacetIndex {
     /// v1 实现为内存线性扫描（百万级每键一次可接受；≥3 字符查全量走 Store FTS5）；
     /// 索引层只回答集合，不参与搜索策略编排（策略在 SearchProvider）。
     pub fn search_names(&self, needle: &str) -> RoaringBitmap {
-        let needle = needle.trim().to_lowercase();
+        let folded = domain::text::fold_lower(needle);
         let mut hits = RoaringBitmap::new();
-        if needle.is_empty() {
+        if folded.is_empty() {
             return hits;
         }
+        // 环形窗口一次分配、跨行复用：百万行扫描零逐行分配（D10 内存纪律）。
+        let mut ring = Vec::with_capacity(folded.len());
         for (index, name) in self.names.iter().enumerate() {
-            if self.all.contains(index as u32) && name.to_lowercase().contains(&needle) {
+            if self.all.contains(index as u32)
+                && domain::text::contains_case_fold(name, &folded, &mut ring)
+            {
                 hits.insert(index as u32);
             }
         }
@@ -251,6 +255,9 @@ impl FacetIndex {
             Filter::InCategory(cat) => self.by_category.get(&cat.0).cloned().unwrap_or_default(),
             Filter::HasTag(tag) => self.by_tag.get(&tag.0).cloned().unwrap_or_default(),
             Filter::NameContains(needle) => self.search_names(needle),
+            // D52：FTS 命中白名单。与活集求交——FTS 行不随软删移除（D46），
+            // 已删/未知 id 在此静默剔除（守卫：name_search_spec）。
+            Filter::NameIn(ids) => ids.iter().copied().collect::<RoaringBitmap>() & &self.all,
             // D46 回收站视图：deleted 位图即结果（占号不显形的行在这里显形）。
             Filter::Trash => self.deleted.clone(),
             Filter::Not(inner) => &self.all - &self.evaluate(inner),

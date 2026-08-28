@@ -18,7 +18,7 @@ pub use catalog_loader::{
 };
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent};
 pub use layout::{masonry_layout, Rect};
-pub use search::{FacetSearchProvider, SearchError, SearchProvider};
+pub use search::{FtsNameSource, HybridSearchProvider, SearchError, SearchProvider, SearchScope};
 pub use settings::{
     settings_path, AppSettings, SettingKind, SettingSpec, SettingView, SETTING_SPECS,
     SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,

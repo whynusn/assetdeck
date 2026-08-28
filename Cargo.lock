@@ -2434,6 +2434,8 @@ dependencies = [
  "domain",
  "proptest",
  "roaring",
+ "store",
+ "ui-viewmodels",
 ]
 
 [[package]]

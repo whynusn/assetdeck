@@ -19,10 +19,9 @@ use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::{
     AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, DarkThemeProvider,
-    FacetIndex, FacetSearchProvider, Filter, LightThemeProvider, RealAssetResolver, SearchProvider,
-    SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot,
-    TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
-    ThemeTokens,
+    FacetIndex, Filter, LightThemeProvider, RealAssetResolver, SearchProvider, SortDirection,
+    SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot, TargetHealth,
+    TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider, ThemeTokens,
 };
 
 use task_runner::ChildTask;
@@ -2014,14 +2013,20 @@ fn main() {
         app.on_search_changed(move |query| {
             let ui = ui.unwrap();
             let query = query.to_string();
+            // D52：真实库走混合路由（≥3 字符 FTS→NameIn，短查询内存路）；
+            // 演示库无 FTS 源 = 纯内存路。范围档 v1 恒 All（下拉在阶段 4 接线）。
             let filter = if query.trim().is_empty() {
                 current_filter.borrow().clone()
             } else {
                 let base = current_filter.borrow().clone();
+                let scope = ui_viewmodels::SearchScope::All;
                 match resolver.borrow().as_ref() {
-                    Some(r) => FacetSearchProvider { facets: r.facets() }
-                        .search(&query, &base)
-                        .unwrap_or(base),
+                    Some(r) => ui_viewmodels::HybridSearchProvider {
+                        facets: r.facets(),
+                        fts: Some(r),
+                    }
+                    .search(&query, scope, &base)
+                    .unwrap_or(base),
                     None => base,
                 }
             };

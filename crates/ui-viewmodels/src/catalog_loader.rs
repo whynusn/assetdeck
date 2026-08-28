@@ -104,22 +104,56 @@ impl LibraryFacets {
     /// 空/纯空白查询返回 `None`（调用方回落当前分类视图）；有查询但无命中
     /// 返回 `Some(AnyOf(vec![]))`（空集，瀑布流清空）。
     pub fn fuzzy_filter(&self, query: &str) -> Option<Filter> {
-        let needle = query.trim();
-        if needle.is_empty() {
+        if query.trim().is_empty() {
             return None;
         }
-        let mut clauses = Vec::new();
-        for entry in &self.categories {
-            if entry.name.contains(needle) {
-                clauses.push(Filter::InCategory(CategoryId(entry.id)));
-            }
-        }
-        for entry in &self.tags {
-            if entry.name.contains(needle) {
-                clauses.push(Filter::HasTag(TagId(entry.id)));
-            }
-        }
+        let mut clauses: Vec<Filter> = self
+            .category_matches(query)
+            .into_iter()
+            .map(Filter::InCategory)
+            .collect();
+        clauses.extend(self.tag_matches(query).into_iter().map(Filter::HasTag));
         Some(Filter::AnyOf(clauses))
+    }
+
+    /// 分类名折叠命中（D51：大小写统一——ASCII 与 Unicode 同 domain::text 语义）。
+    pub fn category_matches(&self, query: &str) -> Vec<CategoryId> {
+        let needle = domain::text::fold_lower(query);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut ring = Vec::with_capacity(needle.len());
+        self.categories
+            .iter()
+            .filter(|entry| domain::text::contains_case_fold(&entry.name, &needle, &mut ring))
+            .map(|entry| CategoryId(entry.id))
+            .collect()
+    }
+
+    /// 标签名折叠命中（同上）。
+    pub fn tag_matches(&self, query: &str) -> Vec<TagId> {
+        let needle = domain::text::fold_lower(query);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut ring = Vec::with_capacity(needle.len());
+        self.tags
+            .iter()
+            .filter(|entry| domain::text::contains_case_fold(&entry.name, &needle, &mut ring))
+            .map(|entry| TagId(entry.id))
+            .collect()
+    }
+}
+
+/// D52：FTS 名检索接缝的实现落点——resolver 同持 store 与升序 uuids，
+/// 映射（含回收站彻底删除窗口期的未知 uuid 容错）内聚在此。
+impl crate::search::FtsNameSource for RealAssetResolver {
+    fn name_ids(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<u32>, crate::search::SearchError> {
+        RealAssetResolver::name_ids(self, query, limit)
     }
 }
 
@@ -189,6 +223,36 @@ impl RealAssetResolver {
 
     /// FTS5 全文检索直通（store 侧已 JOIN 过滤 `deleted=0`，回收站行不泄漏）。
     /// 检索 UI 的两条路之一：内存名扫描走 `FacetIndex::NameContains`，
+    /// 升序 uuid 表的只读视图（binary_search 前提，守卫测试锁定升序不变量）。
+    pub fn uuids(&self) -> &[String] {
+        &self.uuids
+    }
+
+    /// uuid → 行号（D52 零常驻映射：持引用二分，无克隆）。
+    pub fn uuid_rank(&self, uuid: &str) -> Option<u32> {
+        self.uuids
+            .binary_search_by(|probe| probe.as_str().cmp(uuid))
+            .ok()
+            .map(|index| index as u32)
+    }
+
+    /// FTS 名检索 → 行号升序 id 集（D52 混合路由的数据源）。
+    /// 未知 uuid（回收站后彻底删除期间等窗口）跳过；库错误包装为
+    /// FtsUnavailable，由 Provider 降级内存路。
+    pub fn name_ids(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<u32>, crate::search::SearchError> {
+        let hits = self
+            .store_search(query, limit)
+            .map_err(|_| crate::search::SearchError::FtsUnavailable)?;
+        Ok(hits
+            .iter()
+            .filter_map(|hit| self.uuid_rank(&hit.uuid))
+            .collect())
+    }
+
     /// 全文/标签语义走这里，结果以 uuid 二分回 `uuids` 行号（D52）。
     pub fn store_search(&self, query: &str, limit: usize) -> Result<Vec<store::SearchHit>> {
         Ok(self.store.search(query, limit)?)
