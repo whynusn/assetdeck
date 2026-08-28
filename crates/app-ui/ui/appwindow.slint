@@ -225,6 +225,14 @@ export component AppWindow inherits Window {
     callback import-requested();
     // D49 主导入：文件对话框多选（素材 + .emo 混选）。
     callback import-files-requested();
+
+    // —— D51 搜索范围下拉 ——
+    // scope: 0=全部 1=文件名 2=分类 3=标签（UiEnums 收口，D32 纪律）。
+    in property <int> search-scope: 0;
+    in property <bool> scope-menu-open: false;
+    in property <bool> scope-menu-shown: false; // 两段式动效翻转位（同 classify）
+    callback scope-menu-toggled();
+    callback scope-selected(int);
     // OS 拖入文件（IDropTarget 兜底，platform::win32::dragdrop 注册）：
     // 路径列表进同一归类弹窗；不支持类型由 VM 过滤（R4）。
     callback files-dropped([string]);
@@ -391,6 +399,48 @@ export component AppWindow inherits Window {
                         tint: search-input.has-focus ? Theme.accent : Theme.text-3;
                         width: 15px;
                         height: 15px;
+                    }
+
+                    // D51 范围 chip：点击弹四选一菜单（壳层缓存查询，切档即重跑）。
+                    scope-anchor := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: scope-chip.preferred-width + 24px;
+                        height: 26px;
+
+                        scope-chip := Rectangle {
+                            x: (parent.width - self.preferred-width) / 2;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: root.scope-menu-open ? Theme.accent : Theme.line;
+                            background: root.scope-menu-open ? Theme.accent-soft : Theme.bg-input;
+                            preferred-width: scope-text.preferred-width + 26px;
+                            height: parent.height;
+
+                            chev := Icon {
+                                x: self.preferred-width - 14px;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                commands: Glyph.chevron-down;
+                                tint: Theme.text-3;
+                            }
+                            scope-text := Text {
+                                x: 8px;
+                                text: root.search-scope == 1 ? "文件名"
+                                    : root.search-scope == 2 ? "分类"
+                                    : root.search-scope == 3 ? "标签"
+                                    : "全部";
+                                color: root.scope-menu-open ? Theme.accent : Theme.text-2;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                clicked => { root.scope-menu-toggled(); }
+                            }
+                        }
+                        Tooltip {
+                            text: @markdown("搜索范围：全部=名称+分类+标签；其余档位只搜对应名称");
+                        }
                     }
 
                     // 检索器：对分类名/标签名做模糊匹配，placeholder 直接说明范围。
@@ -1082,7 +1132,7 @@ export component AppWindow inherits Window {
             || root.target-mode == UiEnums.target-mode-choose
             || root.context-menu-open || root.move-menu-open
             || root.rename-open || root.properties-open
-            || root.classify-open: TouchArea {
+            || root.scope-menu-open || root.classify-open: TouchArea {
             width: 100%;
             height: 100%;
             clicked => {
@@ -1250,6 +1300,57 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.import-emo-requested();
                     }
+                }
+            }
+        }
+
+        // D51 范围菜单：锚在搜索框前缀 chip 下方；两段式动效（open 挂载 /
+        // shown 翻转由壳层下一帧置位，出场先收 shown 播完再收 open）。
+        if root.scope-menu-open: Rectangle {
+            property <bool> shown: root.scope-menu-shown;
+
+            opacity: shown ? 1.0 : 0.0;
+            x: scope-anchor.absolute-position.x;
+            y: scope-anchor.absolute-position.y + scope-anchor.height + 6px + (shown ? 0px : -6px);
+            width: 168px;
+            height: scope-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            scope-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                MenuItem {
+                    glyph: Glyph.search;
+                    text: "全部";
+                    detail: "名称 + 分类 + 标签";
+                    clicked => { root.scope-selected(0); }
+                }
+                MenuItem {
+                    glyph: Glyph.file;
+                    text: "文件名";
+                    detail: "只搜素材文件名";
+                    clicked => { root.scope-selected(1); }
+                }
+                MenuItem {
+                    glyph: Glyph.layers;
+                    text: "分类";
+                    detail: "只搜分类名";
+                    clicked => { root.scope-selected(2); }
+                }
+                MenuItem {
+                    glyph: Glyph.check;
+                    text: "标签";
+                    detail: "只搜标签名";
+                    clicked => { root.scope-selected(3); }
                 }
             }
         }

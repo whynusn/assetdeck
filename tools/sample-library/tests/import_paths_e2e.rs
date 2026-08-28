@@ -26,8 +26,8 @@ fn temp_root(tag: &str) -> PathBuf {
     path
 }
 
-fn write_png(path: &Path) {
-    let img = image::RgbImage::from_fn(8, 8, |_x, _y| image::Rgb([180, 180, 180]));
+fn write_png(path: &Path, gray: u8) {
+    let img = image::RgbImage::from_fn(32, 32, |_x, _y| image::Rgb([gray, gray, gray]));
     DynamicImage::ImageRgb8(img)
         .save(path)
         .expect("写测试图失败");
@@ -43,7 +43,7 @@ fn make_qianniu_container(root: &Path) -> PathBuf {
         r#"[{"originalFile":"a.jpg","groupName":"表情组"}]"#,
     )
     .unwrap();
-    write_png(&group.join("a.jpg"));
+    write_png(&group.join("a.jpg"), 180);
     root.join("容器")
 }
 
@@ -92,7 +92,7 @@ fn categories(lib: &Path) -> Vec<String> {
 fn mixed_sources_package_rules_and_loose_override() {
     let root = temp_root("mixed");
     let qn = make_qianniu_container(&root);
-    write_png(&root.join("loose.png"));
+    write_png(&root.join("loose.png"), 90);
     let lib = root.join("library");
 
     run_import_cli(
@@ -162,7 +162,7 @@ fn legacy_positional_form_still_imports() {
     let root = temp_root("legacy");
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    write_png(&src.join("solo.png"));
+    write_png(&src.join("solo.png"), 60);
     let lib = root.join("library");
 
     let output = Command::new(env!("CARGO_BIN_EXE_sample-library"))

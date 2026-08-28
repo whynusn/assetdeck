@@ -22,11 +22,11 @@
 
 ## 阶段 4 — 壳层：范围下拉 UI
 
-- [ ] 4.1 appwindow.slint：搜索框前缀下拉（四档；UiEnums 收口 `search-scope` int，D32 纪律；开合浮层用两段式动效——新弹层出生即正确，不等 motion）。
-- [ ] 4.2 main.rs：`current_query`/`current_scope` Cell 缓存；切档用缓存查询立即重跑（复用 on_search_changed 内核抽函数）；filter_label 文案带范围（「搜索「X」· 仅文件名」）。
-- [ ] 4.3 回收站覆盖：确认四档 × 两路在删除后视图即时不含回收站素材（集成测试：真库 fixture 删一张 → 四档查询均不含）。
+- [x] 4.1 appwindow.slint：搜索框前缀下拉（四档；UiEnums 收口 `search-scope` int，D32 纪律；开合浮层用两段式动效——新弹层出生即正确，不等 motion）。
+- [x] 4.2 main.rs：`current_query`/`current_scope` Cell 缓存；切档用缓存查询立即重跑（复用 on_search_changed 内核抽函数）；filter_label 文案带范围（「搜索「X」· 仅文件名」）。
+- [x] 4.3 回收站覆盖：确认四档 × 两路在删除后视图即时不含回收站素材（集成测试：真库 fixture 删一张 → 四档查询均不含）。
 
 ## 阶段 5 — bench + 收口
 
-- [ ] 5.1 bench-harness 查询延迟场景（10 万行：FTS 路 vs 内存路 p50/p95），结果追加 `research/latency-ledger.md` 新节。
-- [ ] 5.2 三道门全绿；D52 落点/边界（ASCII 折叠差异、trigram 下限）回写 DECISIONS.md + spec（store database-guidelines 增「软删条目 FTS 行在、查询侧必须 JOIN 过滤」；index guidelines 增 NameIn 语义与无分配匹配纪律）。
+- [ ] 5.1 bench-harness（暂缓：并发会话在途 WIP 占用 bench-harness，待收口后补 latency-ledger 新节） 查询延迟场景（10 万行：FTS 路 vs 内存路 p50/p95），结果追加 `research/latency-ledger.md` 新节。
+- [x] 5.2 三道门全绿；D52 落点/边界（ASCII 折叠差异、trigram 下限）回写 DECISIONS.md + spec（store database-guidelines 增「软删条目 FTS 行在、查询侧必须 JOIN 过滤」；index guidelines 增 NameIn 语义与无分配匹配纪律）。

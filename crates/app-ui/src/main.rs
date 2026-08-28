@@ -2002,24 +2002,25 @@ fn main() {
         });
     }
 
-    // 检索：统一走 SearchProvider 门面（分类/标签名 ∪ 文件名；空查询回落当前过滤）。
-    {
+    // 检索（D51/D52）：统一走 HybridSearchProvider；查询与范围档在壳层缓存，
+    // 切档用缓存查询立即重跑（不要求重输）。
+    let apply_search = {
         let ui = app.as_weak();
         let vm = vm.clone();
         let resolver = real_resolver.clone();
         let current_filter = current_filter.clone();
         let filter_label = filter_label.clone();
         let grid = grid.clone();
-        app.on_search_changed(move |query| {
-            let ui = ui.unwrap();
-            let query = query.to_string();
-            // D52：真实库走混合路由（≥3 字符 FTS→NameIn，短查询内存路）；
-            // 演示库无 FTS 源 = 纯内存路。范围档 v1 恒 All（下拉在阶段 4 接线）。
+        Rc::new(move |query_text: &str, scope_code: i32| {
+            let Some(ui) = ui.upgrade() else { return };
+            let scope = ui_enums::search_scope(scope_code);
+            let query = query_text.to_string();
+            // 真实库走混合路由（≥3 字符 FTS→NameIn，短查询内存路）；
+            // 演示库无 FTS 源 = 纯内存路。
             let filter = if query.trim().is_empty() {
                 current_filter.borrow().clone()
             } else {
                 let base = current_filter.borrow().clone();
-                let scope = ui_viewmodels::SearchScope::All;
                 match resolver.borrow().as_ref() {
                     Some(r) => ui_viewmodels::HybridSearchProvider {
                         facets: r.facets(),
@@ -2030,7 +2031,7 @@ fn main() {
                     None => base,
                 }
             };
-            // 检索态清掉侧栏分类高亮（-2），避免与「全部/某分类」的选中状态冲突；
+            // 检索态清掉侧栏分类高亮（-2），避免与「全部/某分类」的选中状态冲突。
             if query.trim().is_empty() {
                 ui.set_selected_category(match &filter {
                     Filter::InCategory(id) => id.0 as i32,
@@ -2040,7 +2041,13 @@ fn main() {
                 ui.set_filter_label(filter_label.borrow().clone());
             } else {
                 ui.set_selected_category(-2);
-                ui.set_filter_label(format!("搜索「{}」", query.trim()).into());
+                let suffix = match scope {
+                    ui_viewmodels::SearchScope::FileName => " · 仅文件名",
+                    ui_viewmodels::SearchScope::Category => " · 仅分类",
+                    ui_viewmodels::SearchScope::Tag => " · 仅标签",
+                    _ => "",
+                };
+                ui.set_filter_label(format!("搜索「{}」{suffix}", query.trim()).into());
             }
             {
                 let mut guard = vm.borrow_mut();
@@ -2049,6 +2056,72 @@ fn main() {
             ui.set_content_y(0.0);
             sync_counts(&ui, vm.borrow().total(), resolver.borrow().is_some());
             grid.sync();
+        })
+    };
+    let current_query = Rc::new(RefCell::new(String::new()));
+    let current_scope = Rc::new(Cell::new(ui_enums::SCOPE_ALL));
+    {
+        let apply_search = apply_search.clone();
+        let current_query = current_query.clone();
+        let current_scope = current_scope.clone();
+        app.on_search_changed(move |query| {
+            *current_query.borrow_mut() = query.to_string();
+            apply_search(query.as_str(), current_scope.get());
+        });
+    }
+    {
+        let apply_search = apply_search.clone();
+        let current_query = current_query.clone();
+        let current_scope = current_scope.clone();
+        let ui = app.as_weak();
+        app.on_scope_selected(move |scope| {
+            current_scope.set(scope);
+            if let Some(ui) = ui.upgrade() {
+                ui.set_search_scope(scope);
+                ui.set_scope_menu_open(false);
+            }
+            apply_search(current_query.borrow().as_str(), scope);
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let settings = settings.clone();
+        app.on_scope_menu_toggled(move || {
+            let ui = ui.unwrap();
+            let opening = !ui.get_scope_menu_open();
+            ui.set_scope_menu_open(opening);
+            if opening {
+                // 入场动效下一帧翻转（D53 结论；与归类弹窗同一模式）。
+                let weak = ui.as_weak();
+                CLASSIFY_ANIM_TIMER.with(|slot| {
+                    slot.borrow().start(
+                        slint::TimerMode::SingleShot,
+                        std::time::Duration::from_millis(16),
+                        move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_scope_menu_shown(true);
+                            }
+                        },
+                    );
+                });
+            } else {
+                // 出场两段式：先收 shown，播完再卸载。
+                ui.set_scope_menu_shown(false);
+                let animated = settings.borrow().ui_animations;
+                let weak = ui.as_weak();
+                CLASSIFY_ANIM_TIMER.with(|slot| {
+                    slot.borrow().start(
+                        slint::TimerMode::SingleShot,
+                        std::time::Duration::from_millis(if animated { 170 } else { 0 }),
+                        move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_scope_menu_open(false);
+                            }
+                        },
+                    );
+                });
+            }
+            let _ = current_scope;
         });
     }
 
@@ -2133,6 +2206,9 @@ fn main() {
             let ui = ui.unwrap();
             ui.set_settings_open(false);
             ui.set_import_menu_open(false);
+            // D51 范围菜单两段式收起（点外部 = 取消开合）。
+            ui.set_scope_menu_shown(false);
+            ui.set_scope_menu_open(false);
             // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
             import_flow.close();
             ui.set_context_menu_open(false);

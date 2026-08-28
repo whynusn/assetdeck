@@ -48,6 +48,22 @@ pub fn menu_action(id: i32) -> Option<MenuAction> {
     }
 }
 
+/// D51 搜索范围档位 → UiEnums.scope-*（全部/文件名/分类/标签）。
+pub const SCOPE_ALL: i32 = 0;
+pub const SCOPE_FILE_NAME: i32 = 1;
+pub const SCOPE_CATEGORY: i32 = 2;
+pub const SCOPE_TAG: i32 = 3;
+
+/// 档位码 → 混合路由枚举（未知码回落 All，UiEnums 收口纪律）。
+pub fn search_scope(code: i32) -> ui_viewmodels::SearchScope {
+    match code {
+        SCOPE_FILE_NAME => ui_viewmodels::SearchScope::FileName,
+        SCOPE_CATEGORY => ui_viewmodels::SearchScope::Category,
+        SCOPE_TAG => ui_viewmodels::SearchScope::Tag,
+        _ => ui_viewmodels::SearchScope::All,
+    }
+}
+
 /// 底部操作条形态 → UiEnums.bar-*（隐藏 / 多选 / 回收站）。
 pub const BAR_HIDDEN: i32 = 0;
 pub const BAR_MULTI: i32 = 1;

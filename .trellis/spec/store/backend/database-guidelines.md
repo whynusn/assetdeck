@@ -28,6 +28,9 @@
   混进搜索结果。测试锁定：`search_excludes_deleted`。
 - 占号不显形：墓碑行保留 rowid 槽位，uuid→行号二分（ui-viewmodels 的 D52 契约）不得
   因行回收而错位；行回收只在整库重建/清库时发生。
+- **D52 混合路由契约**：`for_each_asset*`（含 `for_each_asset_active`）必须保持
+  `ORDER BY uuid`——ui-viewmodels 装载后的 `uuids` 向量据此天然升序，FTS 命中的
+  uuid→行号映射全靠二分（守卫测试锁定升序不变量）。改排序 = 破坏二分前提。
 
 ## Query Patterns
 

@@ -563,6 +563,8 @@ if (click_count % 2) == 1 {
 
 **内容**：搜索框前缀下拉（全部 / 文件名 / 分类 / 标签）。范围语义 = 本次查询跑哪些过滤器——收窄范围兼得省资源与结果可预期。修复现状不一致：分类/标签匹配区分大小写、文件名不区分——统一为全部大小写不敏感。备注搜索等 notes 字段落地后再议。
 
+**落地（2026-08-28，批1-search）**：LibraryFacets 拆出 `category_matches`/`tag_matches`（scope 互斥子句集的数据源）；大小写统一 = 共享 `domain::text` 折叠工具（needle 一次折叠 + haystack 环形窗口流式比对，双侧同 `char::to_lowercase`，İ 展开对称，中文恒等）；搜索框前缀 chip 下拉四档（UiEnums 收口 int，D32 纪律），壳层缓存 current_query/current_scope，切档即时重跑；顶栏后缀带范围（「搜索「X」· 仅文件名」）。守卫：真库 fixture 软删后四档 × 两路查询均不含已删行。
+
 ### D52 搜索混合路由：FTS5 本批接线（2026-08-28，修订 D30 排期）
 
 **根因数据**：现状每次按键对全库文件名逐个 `to_lowercase().contains()`（index/src/lib.rs:136，每名每次按键分配一个新字符串）：老设备 10 万条约 10–30ms/键、逼近百万级 100ms+/键不可用；低配机用户真实存在（D40–D45 全部来自低配机实测日志）。
@@ -572,6 +574,8 @@ if (click_count % 2) == 1 {
 **限制归属**：≥3 字符是 SQLite FTS5 **trigram 分词器层**的固有机制（3 字窗口倒排索引，短查询无索引键），不可去除——换分词器（unicode61）会毁掉中文子串搜索（中文无分词边界）。混合路由将其对用户隐藏。
 
 **连带**：①结果 uuid→行号映射须内存安全（D10），实现时定方案；②内存扫描侧治理每键字符串分配；③trigram 默认 ASCII 折叠，与内存扫描 Unicode 小写的语义差异记为边界（中文+ASCII 文件名无感知）。
+
+**落地（2026-08-28）**：①映射 = `RealAssetResolver::uuid_rank`（升序 uuids 二分，零克隆；升序不变量有守卫测试，`for_each_asset*` 的 `ORDER BY uuid` 是契约前提）；②内存路改 `domain::text::contains_case_fold` 环形窗口无分配滑窗（百万行预算测试不退红）；③混合路由 = `HybridSearchProvider`：≥3 字符 + FTS 源 → `Filter::NameIn(行号白名单)`（D4 纯声明，求值与活集求交——FTS 行不随软删移除），FTS 失败降级内存路不断视图，短查询/无库恒内存路；oracle 一致性测试锁定 NameIn == NameContains（同库同查询，trigram 下限用例显式覆盖）。bench 查询延迟分位数场景暂缓：bench-harness 有并发会话在途 WIP（未提交、暂不编译），待其收口后补 `research/latency-ledger.md` 新节。
 
 ### D53 动画修复包（2026-08-28）
 

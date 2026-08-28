@@ -315,3 +315,40 @@ fn oracle_name_in_equals_memory_scan() {
     }
     let _ = fs::remove_dir_all(&root);
 }
+
+// ----- 4.3 回收站覆盖：软删后四档查询均不含已删行 -----
+
+#[test]
+fn deleted_rows_excluded_across_scopes() {
+    let root = scaffold("hybrid-trash-scope", &demo_rows());
+    {
+        // 软删行 0（促销海报.png，分类=风景照——分类/名两路都能命中它）。
+        let store = Store::open(&root.join("meta.db")).unwrap();
+        store
+            .soft_delete_assets(&["a0000000-0000-0000-0000-000000000000"])
+            .unwrap();
+    }
+    let (index, resolver) = load(&root);
+    let provider = HybridSearchProvider {
+        facets: resolver.facets(),
+        fts: Some(&resolver),
+    };
+    let scopes = [
+        ("全部", SearchScope::All),
+        ("文件名", SearchScope::FileName),
+        ("分类", SearchScope::Category),
+        ("标签", SearchScope::Tag),
+    ];
+    for (label, scope) in scopes {
+        for query in ["促销海", "风景照"] {
+            if let Ok(filter) = provider.search(query, scope, &Filter::All) {
+                let hit = index.evaluate(&filter);
+                assert!(
+                    !hit.contains(0),
+                    "范围 {label} 查询 {query:?} 不得含已删行（deleted=0 JOIN / deleted 位图）"
+                );
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+}
