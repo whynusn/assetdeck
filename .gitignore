@@ -10,13 +10,14 @@ Cargo.lock.bak
 /mem-reports/
 /crates/ui-viewmodels/target/
 
-# 本地调试/会话临时产物（decode-worker 日志会在测试时再生成）
+# 本地调试/会话临时产物
+# （decode-worker 日志已由 logging 平台缺省目录 + WorkerPool::with_priority_and_log_dir
+#   + pool_spec 钉 temp 三层修复，不再落源码树，无需 ignore）
 /work/
 /.dsh-inspect/
 /.v2c/
 /samples/debug/
 /samples/library/
-/crates/worker/decode-worker-*.log
 /cargo-check*.log
 /cargo-test*.log
 

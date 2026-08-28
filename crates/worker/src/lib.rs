@@ -56,6 +56,8 @@ struct PoolState {
 struct PoolInner {
     exe: PathBuf,
     priority: PoolPriority,
+    /// 显式注入的 worker 日志目录（DSH_LOG_DIR）；None = 依赖环境继承。
+    log_dir: Option<PathBuf>,
     state: Mutex<PoolState>,
     shutdown: AtomicBool,
 }
@@ -117,6 +119,19 @@ impl WorkerPool {
 
     /// 显式档位构造（D37）：前台导入走 ForegroundBelowNormal。
     pub fn with_priority(exe: &Path, size: usize, priority: PoolPriority) -> Self {
+        Self::with_priority_and_log_dir(exe, size, priority, None)
+    }
+
+    /// 显式注入日志目录的构造：每个 worker（含替补拉起）spawn 时都带上
+    /// DSH_LOG_DIR，不依赖环境继承——测试/独立宿主可把日志钉到指定目录
+    /// （logging 的目录约定：DSH_LOG_DIR > fallback > 平台标准目录，永不 cwd）。
+    /// 传 None 与 [`WorkerPool::with_priority`] 等价。
+    pub fn with_priority_and_log_dir(
+        exe: &Path,
+        size: usize,
+        priority: PoolPriority,
+        log_dir: Option<PathBuf>,
+    ) -> Self {
         let cpus = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -126,7 +141,7 @@ impl WorkerPool {
         let mut readers: Vec<(usize, ChildStdout)> = Vec::new();
         let mut degraded = false;
         for idx in 0..size {
-            match spawn_worker(exe, priority) {
+            match spawn_worker(exe, priority, log_dir.as_deref()) {
                 Ok((slot, stdout)) => {
                     slots.push(Some(slot));
                     readers.push((idx, stdout));
@@ -142,6 +157,7 @@ impl WorkerPool {
         let inner = Arc::new(PoolInner {
             exe: exe.to_path_buf(),
             priority,
+            log_dir,
             state: Mutex::new(PoolState {
                 slots,
                 pending: HashMap::new(),
@@ -247,11 +263,20 @@ pub fn query_priority_class(pid: u32) -> Option<u32> {
 }
 
 /// 拉起单个 worker 子进程并配置好 writer 线程，返回槽位与待接管的 stdout。
-fn spawn_worker(exe: &Path, priority: PoolPriority) -> std::io::Result<(WorkerSlot, ChildStdout)> {
+fn spawn_worker(
+    exe: &Path,
+    priority: PoolPriority,
+    log_dir: Option<&Path>,
+) -> std::io::Result<(WorkerSlot, ChildStdout)> {
     let mut child = Command::new(exe);
     // 前台档通过旗标告知子进程别自压 IO/内存优先级（decode-worker 入口解析）。
     if matches!(priority, PoolPriority::ForegroundBelowNormal) {
         child.arg("--foreground");
+    }
+    // 显式注入优先于环境继承：宿主对 worker 日志落点负全责，测试据此钉死
+    // 临时目录，源码树不出现任何日志文件。
+    if let Some(dir) = log_dir {
+        child.env("DSH_LOG_DIR", dir);
     }
     let mut child = child
         .stdin(Stdio::piped())
@@ -358,7 +383,7 @@ fn supervise_death(inner: &Arc<PoolInner>, idx: usize) {
         return;
     }
     st.restarts += 1;
-    match spawn_worker(&inner.exe, inner.priority) {
+    match spawn_worker(&inner.exe, inner.priority, inner.log_dir.as_deref()) {
         Ok((slot, stdout)) => {
             st.slots[idx] = Some(slot);
             // 持锁期间拉 reader 线程安全：新线程先读管道，与宿主持锁无线程等待环。

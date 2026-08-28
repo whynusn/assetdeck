@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,26 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, TerminateProcess, IDLE_PRIORITY_CLASS, PROCESS_TERMINATE,
 };
 
-use worker::{query_priority_class, Envelope, JobRequest, JobResult, WorkerPool};
+use worker::{query_priority_class, Envelope, JobRequest, JobResult, PoolPriority, WorkerPool};
+
+/// 把 worker 日志钉进本进程专属的临时目录（DSH_LOG_DIR 显式注入，不靠环境
+/// 继承）：测试对源码树零日志污染，且目录随进程隔离、跑完可整体清理。
+fn with_test_pool(size: usize) -> WorkerPool {
+    static TEST_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = TEST_LOG_DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("dsh_worker_test_logs_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    });
+    let exe = std::env::var("CARGO_BIN_EXE_decode-worker")
+        .expect("CARGO_BIN_EXE_decode-worker 未设置：请在 cargo 测试环境运行");
+    WorkerPool::with_priority_and_log_dir(
+        Path::new(&exe),
+        size,
+        PoolPriority::BackgroundIdle,
+        Some(dir.clone()),
+    )
+}
 
 /// 时间预算类断言统一给宽裕上界（CI 抖动安全），best-effort：实际目标亚秒。
 const BUDGET: Duration = Duration::from_secs(10);
@@ -140,7 +160,7 @@ fn pool_size_capped_at_cpu_count() {
     let cpus = thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let pool = WorkerPool::with_size(999);
+    let pool = with_test_pool(999);
     assert_eq!(
         pool.worker_pids().len(),
         cpus,
@@ -150,7 +170,7 @@ fn pool_size_capped_at_cpu_count() {
 
 #[test]
 fn idle_priority_set_on_worker_process() {
-    let pool = WorkerPool::with_size(2);
+    let pool = with_test_pool(2);
     let pids = pool.worker_pids();
     assert_eq!(pids.len(), 2);
     for pid in pids {
@@ -184,7 +204,7 @@ fn wait_idle_class(pid: u32) -> Option<u32> {
 
 #[test]
 fn worker_crash_supervisor_respawns_within_budget() {
-    let pool = WorkerPool::with_size(2);
+    let pool = with_test_pool(2);
     let old_pids = pool.worker_pids();
     assert_eq!(old_pids.len(), 2);
 
@@ -224,7 +244,7 @@ fn worker_crash_supervisor_respawns_within_budget() {
 #[test]
 fn poison_asset_fails_job_not_pool() {
     let dir = tempfile::tempdir().unwrap();
-    let pool = WorkerPool::with_size(2);
+    let pool = with_test_pool(2);
 
     // 坏资产一：不存在的路径 → 该 job Failed。
     let missing = dir.path().join("no_such_file.png");
@@ -292,7 +312,7 @@ fn poison_asset_fails_job_not_pool() {
 #[test]
 fn thumbnail_job_with_paste_dest_writes_both_outputs() {
     let dir = tempfile::tempdir().unwrap();
-    let pool = WorkerPool::with_size(2);
+    let pool = with_test_pool(2);
 
     // 源图 256x256：缩略图上限 64 -> 等比 64x64；paste 上限 4096 -> 原尺寸透传。
     let src = make_png(dir.path(), "big.jpg", 256);
@@ -337,7 +357,7 @@ fn thumbnail_job_with_paste_dest_writes_both_outputs() {
 #[test]
 fn misnamed_png_with_jpg_extension_decodes_by_content() {
     let dir = tempfile::tempdir().unwrap();
-    let pool = WorkerPool::with_size(1);
+    let pool = with_test_pool(1);
 
     let src = make_png(dir.path(), "伪装.jpg", 48);
     let dest = dir.path().join("thumbs/cd/uuid.png");
@@ -363,7 +383,7 @@ fn misnamed_png_with_jpg_extension_decodes_by_content() {
 /// 门 2 补充断言：重启预算耗尽后进入 degraded，后续 submit 直接 Failed。
 #[test]
 fn restart_budget_exhaustion_degrades_pool() {
-    let pool = WorkerPool::with_size(1);
+    let pool = with_test_pool(1);
     let mut current = pool.worker_pids()[0];
 
     // 重启上限 3：前三次 kill 都应得到替补。
