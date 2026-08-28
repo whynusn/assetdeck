@@ -467,6 +467,14 @@ if (click_count % 2) == 1 {
 
 **落点**：crates/app-ui/src/thumbs.rs（ThumbCache + GridCtx + build_rows）、app-ui/main.rs（8 处调用点统一走 grid.sync()）、run_bench（D43 守卫）。
 
+### D39 补充：日志缺省目录与粘贴 trace 收编约定（2026-08-28）
+
+**缺省目录（永不回落 cwd）**：`init_from_env` 的目录解析固定为 `DSH_LOG_DIR` > 调用方 `fallback_dir` > 平台标准目录 `%LOCALAPPDATA%\asset-manager\logs`（`USERPROFILE\AppData\Local` → 系统临时目录逐级兜底），任何分支都不是当前工作目录——cargo test 的 cwd 是包根、任意宿主直跑的 cwd 不可控，实测 decode-worker 日志曾落进 crates/worker/ 源码树。桌面主进程不变（init 用 exe 同目录 logs/ 的便携约定）。`WorkerPool` 新增 `with_priority_and_log_dir`：每个 worker（含替补拉起）spawn 时显式注入 `DSH_LOG_DIR`，不依赖环境继承；worker 集成测试经 `with_test_pool` 钉死进程专属临时目录，源码树零日志污染。顺带：log 0.4.33 起默认 features 为空，crates/logging 显式声明 `features=["std"]`（`set_boxed_logger` 门在 std 后，单独 `-p logging` 构建时没有其它成员帮忙开特性）。
+
+**粘贴 trace 收编**：三处 env 门控 eprintln（PASTE_PIPELINE_TRACE / PASTE_LATENCY_TRACE / PASTE_EVENT_TRACE）收编为 log facade，统一 `paste_trace` target 域——`paste_trace::pipeline`（注入前快照，Debug）与 `paste_trace::platform::events`（WinEvent 抽干明细 buffered/live hit/miss，Trace）。settle 处的 PASTE_LATENCY_TRACE 与既有 debug 行同点同数据，直接删除。默认 Info 下 log 宏退化为一次原子读（零格式化开销）；开关统一走 D39 的 verbose_diagnostics / DSH_LOG_LEVEL，真机 GUI 无控制台时 eprintln 本就不可见，收编后低配机日志才真正可回溯（grep `paste_trace` 即得完整上框故事）。
+
+**落点**：crates/logging（platform_default_dir + log/std）、crates/worker（with_priority_and_log_dir + pool_spec）、crates/pipeline、crates/platform。
+
 ### 延迟决策（已记录，不做）
 
 - objects 二级分片（objects/{uuid[0:2]}/{uuid}/raw.ext）：方向正确（thumbs 已分片），但改布局会让既有库的 rel_path/paste.png 定位漂移，需迁移脚本；v1 在百万级以内先保持现状，随内存/目录监控数据再定 v1.1 迁移时机。
