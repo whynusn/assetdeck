@@ -1595,68 +1595,6 @@ fn normalize_library_root_value(value: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-mod library_root_args_spec {
-    use super::parse_library_root;
-
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
-
-    // 用正斜杠书写测试路径：本模块验证的是参数拼接/清洗逻辑本身，
-    // 不涉及分隔符语义；同时避开转义歧义。
-
-    #[test]
-    fn separated_value_with_spaces_stays_intact() {
-        assert_eq!(
-            parse_library_root(&args(&[
-                "--library-root",
-                "C:/Users/Administrator/Documents/Default Project/library",
-            ]))
-            .as_deref(),
-            Some("C:/Users/Administrator/Documents/Default Project/library"),
-        );
-    }
-
-    #[test]
-    fn space_split_argv_is_rejoined_until_next_flag() {
-        // 壳层丢引号的真实形态：路径被按空格拆散，「Project」漂移到下一个 argv，
-        // 旧实现截断成「C:/Users/Administrator/Documents/Default」这样的残根。
-        assert_eq!(
-            parse_library_root(&args(&[
-                "--library-root",
-                "C:/Users/Administrator/Documents/Default",
-                "Project/library",
-            ]))
-            .as_deref(),
-            Some("C:/Users/Administrator/Documents/Default Project/library"),
-        );
-    }
-
-    #[test]
-    fn equals_form_is_taken_verbatim() {
-        assert_eq!(
-            parse_library_root(&args(&["--library-root=D:/lib With Space"])).as_deref(),
-            Some("D:/lib With Space"),
-        );
-    }
-
-    #[test]
-    fn stray_manual_quotes_are_trimmed() {
-        assert_eq!(
-            parse_library_root(&args(&["--library-root", "\"E:/my lib\""])).as_deref(),
-            Some("E:/my lib"),
-        );
-    }
-
-    #[test]
-    fn missing_or_valueless_flags_fall_back_to_none() {
-        assert_eq!(parse_library_root(&args(&[])), None);
-        assert_eq!(parse_library_root(&args(&["--library-root"])), None);
-        assert_eq!(parse_library_root(&args(&["--other", "x"])), None);
-    }
-}
-
 fn default_library_root() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()
@@ -1801,4 +1739,66 @@ fn run_bench(args: &BenchArgs) -> i32 {
     println!("{line}");
     let _ = std::io::stdout().flush();
     0
+}
+
+#[cfg(test)]
+mod library_root_args_spec {
+    use super::parse_library_root;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    // 用正斜杠书写测试路径：本模块验证的是参数拼接/清洗逻辑本身，
+    // 不涉及分隔符语义；同时避开转义歧义。
+
+    #[test]
+    fn separated_value_with_spaces_stays_intact() {
+        assert_eq!(
+            parse_library_root(&args(&[
+                "--library-root",
+                "C:/Users/Administrator/Documents/Default Project/library",
+            ]))
+            .as_deref(),
+            Some("C:/Users/Administrator/Documents/Default Project/library"),
+        );
+    }
+
+    #[test]
+    fn space_split_argv_is_rejoined_until_next_flag() {
+        // 壳层丢引号的真实形态：路径被按空格拆散，「Project」漂移到下一个 argv，
+        // 旧实现截断成「C:/Users/Administrator/Documents/Default」这样的残根。
+        assert_eq!(
+            parse_library_root(&args(&[
+                "--library-root",
+                "C:/Users/Administrator/Documents/Default",
+                "Project/library",
+            ]))
+            .as_deref(),
+            Some("C:/Users/Administrator/Documents/Default Project/library"),
+        );
+    }
+
+    #[test]
+    fn equals_form_is_taken_verbatim() {
+        assert_eq!(
+            parse_library_root(&args(&["--library-root=D:/lib With Space"])).as_deref(),
+            Some("D:/lib With Space"),
+        );
+    }
+
+    #[test]
+    fn stray_manual_quotes_are_trimmed() {
+        assert_eq!(
+            parse_library_root(&args(&["--library-root", "\"E:/my lib\""])).as_deref(),
+            Some("E:/my lib"),
+        );
+    }
+
+    #[test]
+    fn missing_or_valueless_flags_fall_back_to_none() {
+        assert_eq!(parse_library_root(&args(&[])), None);
+        assert_eq!(parse_library_root(&args(&["--library-root"])), None);
+        assert_eq!(parse_library_root(&args(&["--other", "x"])), None);
+    }
 }

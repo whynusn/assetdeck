@@ -329,7 +329,7 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
 
     let done = summary.done.fetch_add(1, Ordering::Relaxed) + 1;
     // 逐件与收尾保证进度可见；中间按步长节流避免数万行管道噪音。
-    if done == usize::MAX || done % summary.step == 0 {
+    if done == usize::MAX || done.is_multiple_of(summary.step) {
         println!(
             "PROGRESS\t{done}\t{}",
             summary.done.load(Ordering::Relaxed).max(done)

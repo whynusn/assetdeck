@@ -441,7 +441,7 @@ impl Library {
     }
 
     fn phash_index(&self) -> Option<&Mutex<PHashIndex>> {
-        (&*self.phash_index).as_ref()
+        (*self.phash_index).as_ref()
     }
 
     pub fn store(&self) -> &Store {
@@ -480,11 +480,9 @@ impl Library {
         let deadline = Instant::now() + timeout;
         let mut g = lock.lock().unwrap();
         loop {
-            match g.states.get(&ticket.id) {
-                Some(state @ (CopyState::Done | CopyState::Failed(_))) => {
-                    return Some(state.clone())
-                }
-                _ => {}
+            if let Some(state @ (CopyState::Done | CopyState::Failed(_))) = g.states.get(&ticket.id)
+            {
+                return Some(state.clone());
             }
             let now = Instant::now();
             if now >= deadline {
@@ -821,7 +819,7 @@ fn worker_loop(
 /// 失败回滚时从内存索引精确摘除该素材的 hash（防御重复导入撞上幽灵条目）。
 fn purge_session_hash(phash_index: &std::sync::Arc<Option<Mutex<PHashIndex>>>, hv: Option<u64>) {
     if let Some(hv) = hv {
-        let opt: Option<&Mutex<PHashIndex>> = (&**phash_index).as_ref();
+        let opt: Option<&Mutex<PHashIndex>> = (**phash_index).as_ref();
         if let Some(mutex) = opt {
             mutex.lock().unwrap().remove_hash(hv);
         }

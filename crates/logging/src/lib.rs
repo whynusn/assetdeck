@@ -132,7 +132,7 @@ pub fn init(opts: InitOptions) -> Option<PathBuf> {
             }
             let _ = log::set_boxed_logger(Box::new(LogBridge(inner.clone())));
             log::set_max_level(opts.level.to_filter());
-            let _ = log::logger().flush();
+            log::logger().flush();
             Some(path)
         }
         Err(e) => {
