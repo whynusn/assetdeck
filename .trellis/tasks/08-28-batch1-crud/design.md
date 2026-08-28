@@ -50,6 +50,15 @@
 
 Slint 1.17 `TouchArea`：`PointerEvent` 在 `moved`/`pressed`/`released` 回调里有 `modifiers`（`KeyboardModifiers` ctrl/shift），但 `clicked`/`double-clicked` 信号**不带事件**。方案：瓦片改用 `pointer-event(event)` 回调自行判定按压+修饰（自记 pressed 位置，release 判定点击），或保留 clicked 并在 Rust 侧记「最后按键态」（Slint `key-pressed` 全局不可靠）。**实施第一步 = 30 分钟 spike 验证 `PointerEvent.modifiers` 在 release 携带 Ctrl/Shift**；不可行则降级：Ctrl/Shift 多选改由多选模式内的连续点选 + 操作条「全选」覆盖（R7 的「等效可达路径」），并在 DECISIONS 回写边界。右键：`pointer-event` 的 `kind == PointerEventKind.right_down`（Slint 支持）或 Spike 一并验证。
 
+**Spike S1 结论（2026-08-28，slint 1.17.1 源码查证，i-slint-core `items/input_items.rs` TouchArea::input_event）：可行，按 R7 修饰键做。**
+- `PointerEvent { button, kind, modifiers, touch_finger_id }` 内建结构（i-slint-common `builtin_structs.rs:54`），`modifiers: KeyboardModifiers { alt, control, shift, meta }`（同文件 :40）。
+- TouchArea 的 `Down`/`Up`/`Move`/`Cancel` 四种 `PointerEventKind` 分发时，`modifiers` 一律取窗口全局按键态 `context().modifiers.get()`——**release 事件携带当时的 Ctrl/Shift，不依赖按下瞬间**，与原生资源管理器语义一致。
+- 右键区分靠 `button == PointerEventButton.Right` + `kind == Down`（即 `right_down` 语义）；`Pressed{button}` 原样透传，`clicked` 信号只在 Left release 且落在界内时触发（右键不会误触发既有 clicked）。
+- 实现取案：瓦片保留 `clicked`（无修饰上框现状不变），新增 `pointer-event` 回调处理修饰点击与右键；「release 判定点击」自记 pressed 位置仅用于框选拖拽（批 1 不做）。
+- 已知边界：`Cancel` 事件 `button` 恒为 `Other`，不得当作点击。
+
+**Spike S2 结论：成立。** app-ui `Cargo.toml` 依赖 = {logging, ui-viewmodels, platform, lru, slint}；`tests/deps_guard.rs::ui_cargo_toml_dependency_whitelist_is_exact` 白名单精确锁死，`library` 不在列。库写操作必须走 `sample-library.exe --cmd …` 子进程（阶段 2.3 已交付），与 §3.2 定案一致。
+
 ### 3.2 装配
 
 - 删除/恢复/彻底删除 = 子进程命令（仿 D33 `ChildTaskRunner` 管线）还是直接 UI 侧函数调用？数据量小（UPDATE + rename 目录），但**进程纪律**（D11）只管解码重活，纯 fs/DB 操作允许 UI 直调（`sample-library` 已是库写方，避免双写进程——**定案：库写操作全部收进一个「库写子命令」**，UI 通过 `ChildTaskRunner` 起 `sample-library.exe --cmd trash|restore|purge|rename|move-category|empty-trash`，与导入管线同模式，单写者不变）。rename/set_category 也走此路（毫秒级子进程，进度行协议复用）。

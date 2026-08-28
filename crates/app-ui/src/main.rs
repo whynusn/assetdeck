@@ -344,17 +344,32 @@ fn main() {
     let settings = Rc::new(RefCell::new(AppSettings::load(&settings_path)));
     let settings_path = Rc::new(settings_path);
 
-    // 渲染后端选择（细节注释见旧实现）：SLINT_BACKEND > gpu_rendering > 软件渲染。
-    if std::env::var_os("SLINT_BACKEND").is_none() {
-        let backend = if settings.borrow().gpu_rendering {
-            "winit-femtovg"
+    // 渲染后端选择：ASSETDECK_FORCE_SOFTWARE > SLINT_BACKEND > gpu_rendering > 软件渲染。
+    // 关键：BackendSelector 的 backend 与 renderer 必须分开传——"winit-femtovg" 这种
+    // 连写名字不会按连字符拆分（select() 只做整名匹配），实测会静默回落默认渲染器，
+    // 导致「GPU 关闭档」从来就没真正切到软件渲染。必须 backend_name("winit") +
+    // renderer_name("software"/"femtovg") 才真正生效。
+    let force_software = std::env::var_os("ASSETDECK_FORCE_SOFTWARE").is_some();
+    let gpu = settings.borrow().gpu_rendering;
+    if force_software || std::env::var_os("SLINT_BACKEND").is_none() {
+        let renderer = if force_software || !gpu {
+            "software"
         } else {
-            "winit-software"
+            "femtovg"
         };
-        let _ = slint::BackendSelector::new()
-            .backend_name(backend.into())
+        logging::info!(
+            "渲染档: winit/{renderer}（SLINT_BACKEND={:?} gpu_rendering={gpu} 强制软件={force_software}）",
+            std::env::var_os("SLINT_BACKEND").map(|v| v.to_string_lossy().into_owned()),
+        );
+        match slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name(renderer.into())
             .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
-            .select();
+            .select()
+        {
+            Ok(()) => logging::info!("渲染档选定: winit/{renderer}"),
+            Err(e) => logging::warn!("渲染档选择失败({e})，回落 Slint 默认渲染器"),
+        }
     }
 
     let app = AppWindow::new().expect("AppWindow 创建失败");

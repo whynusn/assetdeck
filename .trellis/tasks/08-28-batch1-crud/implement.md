@@ -5,8 +5,8 @@
 
 ## 阶段 0 — Spike（先做，结论回写本文件）
 
-- [ ] S1 Slint 1.17 `PointerEvent.modifiers` 在 `pointer-event` 回调（release/press）能否拿到 Ctrl/Shift；`PointerEventKind.right_down`（或等价）能否区分右键。**产出**：把结论写进 design §3.1（可行→按 R7 修饰键做；不可行→走降级路径并记录边界）。失败成本：一个最小 .slint 样本 + 运行。
-- [ ] S2 确认 app-ui `deps_guard` 白名单不含 `library` crate → 库写操作必须走子进程（`sample-library.exe --cmd …`），与 D33 子进程模式对齐。
+- [x] S1 Slint 1.17 `PointerEvent.modifiers` 在 `pointer-event` 回调（release/press）能否拿到 Ctrl/Shift；`PointerEventKind.right_down`（或等价）能否区分右键。**产出**：把结论写进 design §3.1（可行→按 R7 修饰键做；不可行→走降级路径并记录边界）。失败成本：一个最小 .slint 样本 + 运行。→ **可行（源码查证 1.17.1，结论+边界见 design §3.1 S1）**
+- [x] S2 确认 app-ui `deps_guard` 白名单不含 `library` crate → 库写操作必须走子进程（`sample-library.exe --cmd …`），与 D33 子进程模式对齐。→ **成立，见 design §3.1 S2**
 
 ## 阶段 1 — store：schema v4 + tombstone（包：store）
 

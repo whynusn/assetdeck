@@ -11,12 +11,15 @@ use index::FacetIndex;
 use lru::LruCache;
 
 use crate::layout::{masonry_layout, Rect};
+use crate::selection::{ContextMenuSpec, MenuItem, Modifiers, Selection};
 
 /// VM → UI 事件。双击素材的语义止步于 OpenAsset；auto-send 属粘贴管线（M6）且默认关。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VmEvent {
     OpenAsset(AssetId),
     SelectionChanged(AssetId),
+    /// 右键菜单请求（D48）：携带命中瓦片 id，内容由 `context_menu(id)` 取。
+    ContextMenuRequested(AssetId),
 }
 
 /// 缩略图字节提供者。M5 用确定性 stub 验证缓存策略；M7 接 worker 进程池异步取图。
@@ -71,6 +74,9 @@ pub struct LibraryGridVm {
     cache: LruCache<AssetId, Vec<u8>>,
     provider: Box<dyn ThumbnailProvider>,
     events: VecDeque<VmEvent>,
+    /// D47 选区状态机（集合 + 锚点 + 多选模式）。视图序直接借 `ids`：
+    /// `self.selection.f(.., &self.ids)` 是互不相交字段借用，无冲突。
+    selection: Selection,
 }
 
 impl LibraryGridVm {
@@ -92,6 +98,7 @@ impl LibraryGridVm {
             cache: LruCache::new(capacity),
             provider: Box::new(NullProvider),
             events: VecDeque::new(),
+            selection: Selection::default(),
         };
         vm.set_filter(&Filter::All);
         vm
@@ -125,6 +132,8 @@ impl LibraryGridVm {
         let bitmap = self.index.evaluate(f);
         let ordered = self.index.sorted_ids(&self.sorter, &bitmap);
         self.ids = ordered.into_iter().map(AssetId).collect();
+        // 掉出视图的选中项失效（操作条/子命令不得对隐形素材动手），模式保留。
+        self.selection.prune_to_view(&self.ids);
         self.rebuild_rects();
         self.cache.clear();
     }
@@ -260,12 +269,117 @@ impl LibraryGridVm {
     }
 
     /// 双击：选中并发出打开事件。id 不在当前视图时忽略（迟到/乱序消息容错）。
+    ///
+    /// 红线 A（D47）：多选模式期间双击**完全无操作**——模式存在的意义就是
+    /// 屏蔽上框链路；事件队列不产生任何痕迹。
     pub fn double_click(&mut self, id: AssetId) {
+        if self.selection.is_multi() {
+            return;
+        }
         if !self.ids.contains(&id) {
             return;
         }
         self.events.push_back(VmEvent::SelectionChanged(id));
         self.events.push_back(VmEvent::OpenAsset(id));
+    }
+
+    /// 单击（含修饰键）入口：壳层从 `pointer-event` 的 Up 事件映射
+    /// [`Modifiers`] 后调用。选区变化时发 SelectionChanged。
+    ///
+    /// 语义表见 `selection::Selection::on_click`；关键红线：
+    /// - 带任何修饰键的点击**绝不**发 OpenAsset（上框只属于无修饰双击）；
+    /// - 常态无修饰单击无操作（与改造前行为逐字一致）。
+    pub fn single_click(&mut self, id: AssetId, mods: Modifiers) {
+        if self.selection.on_click(id, mods, &self.ids) {
+            self.events.push_back(VmEvent::SelectionChanged(id));
+        }
+    }
+
+    /// 右键命中瓦片：只记「菜单请求」事件，内容由壳层 `context_menu` 取。
+    /// id 不在视图时忽略（与 double_click 同一容错）。
+    pub fn right_click(&mut self, id: AssetId) {
+        if !self.ids.contains(&id) {
+            return;
+        }
+        self.events.push_back(VmEvent::ContextMenuRequested(id));
+    }
+
+    /// 进入多选模式（顶栏「选择」按钮，R8）。
+    pub fn enter_multi(&mut self) {
+        self.selection.enter_multi();
+    }
+
+    /// 退出多选模式 = 清空选区恢复常态（R9；Esc / 操作条「取消」同路）。
+    pub fn exit_multi(&mut self) {
+        self.selection.exit_multi();
+    }
+
+    pub fn multi_mode(&self) -> bool {
+        self.selection.is_multi()
+    }
+
+    pub fn is_selected(&self, id: AssetId) -> bool {
+        self.selection.contains(id)
+    }
+
+    /// 操作条「已选 N 张」数据源。
+    pub fn selected_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    /// 选区内容按视图序输出（子命令派发与菜单目标都从这里取）。
+    pub fn selection_ids(&self) -> Vec<AssetId> {
+        self.selection.ids_in_view(&self.ids)
+    }
+
+    /// Ctrl+A / 操作条「全选」：选中当前视图全部条目（R7）。
+    pub fn select_all_visible(&mut self) {
+        let changed = if self.ids.is_empty() {
+            false
+        } else {
+            let before = self.selection.len();
+            for &id in &self.ids {
+                if !self.selection.contains(id) {
+                    // 经状态机逐枚加入会挪锚点；全选后锚点落在最后一枚即可。
+                    self.selection.on_click(
+                        id,
+                        Modifiers {
+                            ctrl: true,
+                            shift: false,
+                        },
+                        &self.ids,
+                    );
+                }
+            }
+            before != self.selection.len()
+        };
+        if changed {
+            // 批量变化用最后一枚作事件载体（壳层只拿它做重绘信号）。
+            if let Some(&last) = self.ids.last() {
+                self.events.push_back(VmEvent::SelectionChanged(last));
+            }
+        }
+    }
+
+    /// 右键菜单数据（D48/R10/R11）：五项固定，目标集 = 命中瓦片在选区内
+    /// 则整份选区，否则收窄到命中瓦片本身。
+    pub fn context_menu(&self, hit: AssetId) -> ContextMenuSpec {
+        let targets = if self.selection.contains(hit) {
+            self.selection.ids_in_view(&self.ids)
+        } else {
+            vec![hit]
+        };
+        ContextMenuSpec {
+            targets,
+            items: crate::selection::MENU_ITEMS
+                .iter()
+                .map(|(action, label)| MenuItem {
+                    action: *action,
+                    label,
+                    enabled: true,
+                })
+                .collect(),
+        }
     }
 
     /// 取走全部待处理事件（取走即清空）。

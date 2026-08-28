@@ -4,6 +4,7 @@ pub mod catalog_loader;
 pub mod grid_vm;
 pub mod layout;
 pub mod search;
+pub mod selection;
 pub mod settings;
 pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
