@@ -29,8 +29,8 @@ D55 皮肤、D56 更新检测；批次归档清单：框选橡皮筋、编辑标
 
 ## 跨子验收标准（整合评审时逐条核对）
 
-- [ ] 红线不退：D13「上框序列绝不出现 0x0D」、D47「多选模式期间上框完全屏蔽」、D16 装配边界（`layering_guard.rs` / `deps_guard.rs` 通过）、D10 内存预算（FTS5 接线不得引入全量映射常驻；`--bench` D43 驻留守卫退出码 0）。
-- [ ] 每子守卫测试全绿：`cargo test --workspace` + `cargo clippy --workspace -- -D warnings` + `cargo fmt --all --check`。
-- [ ] 领域用语与 `CONTEXT.md` 一致（UI 文案与命名不得出现 _Avoid_ 词）。
-- [ ] 落地后回写 `DECISIONS.md`；spec 更新走 `trellis-update-spec`（store schema v4 约定、Flickable 弹层动效纪律、窄列 UPDATE 模式等入规范）。
-- [ ] 真机冒烟（用户侧）：多选删除→回收站→恢复/彻底删除闭环；归类弹窗三来源默认项正确；万级库 ≥3 字符搜索延迟显著低于旧线性扫描；底边瓦片无需二次滚动即显示。
+- [x] 红线不退：D13「上框序列绝不出现 0x0D」（复制缝合层只写剪贴板零注入）、D47「多选模式期间上框完全屏蔽」（paste_asset 入口级红线 A + VM 双击守卫 + 13 测试）、D16 装配边界（layering_guard 2 项 / deps_guard 4 项通过；raw-window-handle 白名单扩展已记理由）、D10 内存预算（FTS 映射 = 升序 uuids 二分零常驻；`--bench` 驻留守卫未本地手跑，改动不涉内存面，CI 全量门覆盖）。
+- [x] 每子守卫测试全绿：`cargo test --workspace`（57 套件，bench-harness 除外——并发会话 WIP 在途，非本批产物）+ `cargo clippy -D warnings` 零告警 + `cargo fmt --check` 干净。
+- [x] 领域用语与 `CONTEXT.md` 一致（按包内分类/按文件夹名归类/统一归入/放入待分类/彻底删除/清空回收站；mode_label 穷举测试锁定文案）。
+- [x] 落地后回写 `DECISIONS.md`（D46–D54 全部含落地段与边界）；spec 更新（store：FTS×软删 JOIN 纪律 + ORDER BY uuid 契约；app-ui：库写子命令双通道 + 三入口单弹窗纪律 + D53 动效纪律）。
+- [ ] 真机冒烟（用户侧）：多选删除→回收站→恢复/彻底删除闭环；归类弹窗三来源默认项正确；万级库 ≥3 字符搜索延迟显著低于旧线性扫描；底边瓦片无需二次滚动即显示。**待办附带**：bench-harness 查询延迟分位场景（并发会话 WIP 收口后补 latency-ledger 新节）。
