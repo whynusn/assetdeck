@@ -37,4 +37,4 @@ crates/app-ui/
 - main.rs 创建 `TargetRoutingRuntime`，以 `BUILTIN_PROFILES` 和当前 `None` 用户 profile 初始化。
 - 目标条属性、选择回调、固定切换与 750ms `Timer` 都在 main.rs 桥接，状态决策在 VM。
 - `.slint` 只声明 TargetChoiceData、属性与回调，不写匹配或状态机逻辑。
-- 当前 `TargetRoutingRuntime` 在 ui-viewmodels 内直接持有 Win32 实现，属于平台装配边界违规；后续应把具体平台类型迁入本二进制入口。
+- Win32 具体类型只在本入口 `win32_runtime_deps()` 里 `new`（DECISIONS D16，另一处是 `tools/real-im-verify`），以 trait 对象注入 `TargetRoutingRuntime`；ui-viewmodels 内不允许出现 `platform::win32`/`Win32`/`cfg(windows)`（`tests/layering_guard.rs` 守卫）。
