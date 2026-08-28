@@ -33,8 +33,13 @@ def write_json(path: Path, data: dict) -> bool:
     can never make a task silently vanish from `task.py list`.
 
     Returns True on success, False on error.
+
+    The payload always ends with a trailing newline (POSIX text-file
+    convention, same as active_task._write_json and the jsonl seeds):
+    without it every task.json lands in git with the "No newline at end
+    of file" marker and trips the repo's EOF-newline CI guard.
     """
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     try:
         fd, tmp = tempfile.mkstemp(
             dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
