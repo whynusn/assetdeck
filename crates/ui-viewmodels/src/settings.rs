@@ -56,6 +56,30 @@ pub struct AppSettings {
     /// 临时开启后 Debug/Trace（上框/轮询等高频事件）全部落盘，排查完再关。
     #[serde(default)]
     pub verbose_diagnostics: bool,
+    /// D50 R8「导入时询问归类」：true（默认）= 每次导入弹归类弹窗；
+    /// false = 按下方三组记忆直接套用，不再询问。设置面板可重新打开。
+    #[serde(default = "default_ask_classify")]
+    pub ask_classify_on_import: bool,
+    /// 记住的包组（.emo/千牛结构目录）方式：per_source | unified | inbox；
+    /// 空串 = 未记忆。统一归入时连分类名一并记（下同）。
+    #[serde(default)]
+    pub remember_package_mode: String,
+    #[serde(default)]
+    pub remember_package_category: String,
+    /// 记住的文件夹组方式。
+    #[serde(default)]
+    pub remember_folder_mode: String,
+    #[serde(default)]
+    pub remember_folder_category: String,
+    /// 记住的散文件组方式。
+    #[serde(default)]
+    pub remember_loose_mode: String,
+    #[serde(default)]
+    pub remember_loose_category: String,
+}
+
+fn default_ask_classify() -> bool {
+    true
 }
 
 fn default_fast_import() -> bool {
@@ -127,6 +151,13 @@ impl Default for AppSettings {
             sidebar_width: default_sidebar_width(),
             fast_import_mode: default_fast_import(),
             verbose_diagnostics: false,
+            ask_classify_on_import: default_ask_classify(),
+            remember_package_mode: String::new(),
+            remember_package_category: String::new(),
+            remember_folder_mode: String::new(),
+            remember_folder_category: String::new(),
+            remember_loose_mode: String::new(),
+            remember_loose_category: String::new(),
         }
     }
 }
@@ -170,6 +201,7 @@ impl AppSettings {
             "ui_animations" => self.ui_animations,
             "fast_import_mode" => self.fast_import_mode,
             "verbose_diagnostics" => self.verbose_diagnostics,
+            "ask_classify_on_import" => self.ask_classify_on_import,
             _ => false,
         }
     }
@@ -184,6 +216,7 @@ impl AppSettings {
             "ui_animations" => Some(&mut self.ui_animations),
             "fast_import_mode" => Some(&mut self.fast_import_mode),
             "verbose_diagnostics" => Some(&mut self.verbose_diagnostics),
+            "ask_classify_on_import" => Some(&mut self.ask_classify_on_import),
             _ => None,
         }
     }
@@ -210,6 +243,9 @@ impl AppSettings {
             }
             "verbose_diagnostics" => {
                 "关闭（默认）：只记录导入/上框/焦点切换等重要事件；临时开启后连高频细节一起落盘，方便排查。"
+            }
+            "ask_classify_on_import" => {
+                "开启（默认）：每次导入前弹归类弹窗；关闭后按上次勾选「记住我的选择」的方式直接导入，不再询问。"
             }
             _ => "",
         }
@@ -252,6 +288,11 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
         SettingKind::Toggle,
     ),
     SettingSpec::new("gpu_rendering", "GPU 渲染", SettingKind::Toggle),
+    SettingSpec::new(
+        "ask_classify_on_import",
+        "导入时询问归类",
+        SettingKind::Toggle,
+    ),
     SettingSpec::new("light_theme", "浅色主题", SettingKind::Toggle),
     SettingSpec::new("ui_animations", "界面动画", SettingKind::Toggle),
     SettingSpec::new("fast_import_mode", "前台高速导入", SettingKind::Toggle),
@@ -297,6 +338,13 @@ mod tests {
             sidebar_width: 300.0,
             fast_import_mode: true,
             verbose_diagnostics: false,
+            ask_classify_on_import: true,
+            remember_package_mode: String::new(),
+            remember_package_category: String::new(),
+            remember_folder_mode: String::new(),
+            remember_folder_category: String::new(),
+            remember_loose_mode: String::new(),
+            remember_loose_category: String::new(),
         };
         let views = settings.describe();
 
@@ -313,6 +361,7 @@ mod tests {
                 "ui_animations" => settings.ui_animations,
                 "fast_import_mode" => settings.fast_import_mode,
                 "verbose_diagnostics" => settings.verbose_diagnostics,
+                "ask_classify_on_import" => settings.ask_classify_on_import,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(

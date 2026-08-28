@@ -15,9 +15,9 @@
 
 ## 阶段 2 — 归类弹窗 VM（ui-viewmodels，纯函数）
 
-- [ ] 2.1 红灯 `classify_spec`：来源三分 × 选项表穷举（D50 表逐条：默认项、选项集、N 标注）；混选分组行数；`plan_groups` 对未知扩展名过滤=Unsupported 跳过语义一致。
-- [ ] 2.2 实现 `classify.rs`（SourceKind/ClassifyMode/SourceGroup/plan_groups）；记忆结构 `RememberedClassify` + settings 字段 + SETTING_SPECS 新行「导入时询问归类」（describe/toggle 走 D28 机制，含旧 TOML 缺字段兼容读）。
-- [ ] 2.3 红灯：记忆命中 → 不弹窗直接套方式；「统一归入」记忆含分类名；恢复询问 toggle 生效。
+- [x] 2.1 红灯 `classify_spec`：来源三分 × 选项表穷举（D50 表逐条：默认项、选项集、N 标注）；混选分组行数；`plan_groups` 对未知扩展名过滤=Unsupported 跳过语义一致。
+- [x] 2.2 实现 `classify.rs`（SourceKind/ClassifyMode/SourceGroup/plan_groups）；记忆结构 `RememberedClassify` + settings 字段 + SETTING_SPECS 新行「导入时询问归类」（describe/toggle 走 D28 机制，含旧 TOML 缺字段兼容读）。
+- [x] 2.3 红灯：记忆命中 → 不弹窗直接套方式；「统一归入」记忆含分类名；恢复询问 toggle 生效。
 
 ## 阶段 3 — 弹窗 UI + 三入口接线（app-ui）
 

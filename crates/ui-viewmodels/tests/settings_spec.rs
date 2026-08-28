@@ -38,6 +38,13 @@ fn save_then_load_roundtrips() {
         sidebar_width: 300.0,
         fast_import_mode: false,
         verbose_diagnostics: true,
+        ask_classify_on_import: false,
+        remember_package_mode: "per_source".into(),
+        remember_package_category: "表情".into(),
+        remember_folder_mode: String::new(),
+        remember_folder_category: String::new(),
+        remember_loose_mode: "unified".into(),
+        remember_loose_category: "相册".into(),
     };
     s.save(&path).expect("写设置失败");
     let loaded = AppSettings::load(&path);
