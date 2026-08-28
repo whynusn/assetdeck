@@ -1,0 +1,11 @@
+[package]
+name = "sample-library"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+library = { path = "../../crates/library" }
+logging = { path = "../../crates/logging" }
+media = { path = "../../crates/media" }
+serde_json = "1"

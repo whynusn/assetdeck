@@ -1,0 +1,9 @@
+[package]
+name = "real-im-verify"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+platform = { path = "../../crates/platform" }
+ui-viewmodels = { path = "../../crates/ui-viewmodels" }

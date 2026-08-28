@@ -1,0 +1,12 @@
+[package]
+name = "derive-thumbs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# 解码只发生在 worker 子进程：本工具只做编排与 IO，绝不依赖 image（D11）。
+[dependencies]
+logging = { path = "../../crates/logging" }
+media = { path = "../../crates/media" }
+store = { path = "../../crates/store" }
+worker = { path = "../../crates/worker" }
