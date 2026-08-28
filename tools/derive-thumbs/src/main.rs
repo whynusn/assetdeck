@@ -53,7 +53,10 @@ struct Args {
 fn main() {
     // D38：日志初始化；stdout 是 PROGRESS/NOTICE 协议通道，日志只进文件。
     logging::init_from_env("derive-thumbs", None, logging::Level::Info);
-    logging::info!("derive-thumbs 启动：{:?}", std::env::args().collect::<Vec<_>>());
+    logging::info!(
+        "derive-thumbs 启动：{:?}",
+        std::env::args().collect::<Vec<_>>()
+    );
     if let Err(error) = run() {
         logging::error!("derive-thumbs 失败: {error}");
         eprintln!("derive-thumbs 失败: {error}");
@@ -241,8 +244,7 @@ fn flush_dims(store: &Store, batch: &mut Vec<(String, u32, u32)>, sized: &mut us
     if batch.is_empty() {
         return;
     }
-    let refs: Vec<(&str, u32, u32)> =
-        batch.iter().map(|(u, w, h)| (u.as_str(), *w, *h)).collect();
+    let refs: Vec<(&str, u32, u32)> = batch.iter().map(|(u, w, h)| (u.as_str(), *w, *h)).collect();
     match store.set_dimensions_batch(&refs) {
         Ok(n) => *sized += n,
         Err(e) => eprintln!("warn: 批量回写尺寸失败 {e}（{} 行未落）", refs.len()),

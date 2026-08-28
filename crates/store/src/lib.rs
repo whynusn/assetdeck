@@ -132,19 +132,25 @@ pub struct Store {
 
 impl Store {
     fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        let mut store = Self { conn: Mutex::new(conn) };
+        let mut store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init()?;
         Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let mut store = Self { conn: Mutex::new(conn) };
+        let mut store = Self {
+            conn: Mutex::new(conn),
+        };
         store.init()?;
         Ok(store)
     }
@@ -281,7 +287,8 @@ impl Store {
         };
         drop(rows);
         drop(stmt);
-        let mut tag_stmt = conn.prepare("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
+        let mut tag_stmt =
+            conn.prepare("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
         let tag_rows = tag_stmt.query_map(params![asset.uuid], |row| row.get::<_, String>(0))?;
         for tag in tag_rows {
             asset.tags.push(tag?);
@@ -386,7 +393,8 @@ impl Store {
         let conn = self.lock();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let outcome: Result<usize> = (|| {
-            let mut stmt = conn.prepare_cached("UPDATE assets SET width = ?2, height = ?3 WHERE uuid = ?1")?;
+            let mut stmt =
+                conn.prepare_cached("UPDATE assets SET width = ?2, height = ?3 WHERE uuid = ?1")?;
             let mut total = 0usize;
             for (uuid, width, height) in dims {
                 total += stmt.execute(params![uuid, width, height])?;
@@ -451,7 +459,8 @@ impl Store {
             "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
              FROM assets ORDER BY uuid",
         )?;
-        let mut tag_stmt = conn.prepare_cached("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
+        let mut tag_stmt =
+            conn.prepare_cached("SELECT tag FROM tags WHERE asset_uuid = ?1 ORDER BY tag")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let mut meta = AssetMeta {

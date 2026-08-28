@@ -87,7 +87,13 @@ fn handle(req: &JobRequest) -> JobResult {
             max_edge,
             paste_dest,
             paste_max_edge,
-        } => match make_thumbnail(source, dest, *max_edge, paste_dest.as_deref(), *paste_max_edge) {
+        } => match make_thumbnail(
+            source,
+            dest,
+            *max_edge,
+            paste_dest.as_deref(),
+            *paste_max_edge,
+        ) {
             Ok(done) => JobResult::Ok {
                 job_id: *job_id,
                 payload: done.dest,
@@ -135,10 +141,9 @@ fn make_thumbnail(
         match decode_with_image_crate(source, dest, max_edge, paste_dest, paste_max_edge) {
             Ok(thumb) => return Ok(thumb),
             Err(image_error) => {
-                return decode_with_shell(source, dest, max_edge, paste_dest)
-                    .map_err(|shell_error| {
-                        format!("{image_error}；Shell 回退亦失败: {shell_error}")
-                    })
+                return decode_with_shell(source, dest, max_edge, paste_dest).map_err(
+                    |shell_error| format!("{image_error}；Shell 回退亦失败: {shell_error}"),
+                )
             }
         }
     }
@@ -158,7 +163,11 @@ fn decode_with_image_crate(
     let img = image::ImageReader::open(source)
         .and_then(|reader| reader.with_guessed_format())
         .map_err(|e| format!("读取失败 {source:?}: {e}"))
-        .and_then(|reader| reader.decode().map_err(|e| format!("解码失败 {source:?}: {e}")))?;
+        .and_then(|reader| {
+            reader
+                .decode()
+                .map_err(|e| format!("解码失败 {source:?}: {e}"))
+        })?;
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
         return Err(format!("零尺寸图像 {source:?}"));

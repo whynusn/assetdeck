@@ -114,11 +114,17 @@ impl PackageRegistry {
     }
 
     pub fn reader_for(&self, path: &Path) -> Option<&dyn AssetPackageReader> {
-        self.readers.iter().find(|reader| reader.can_read(path)).map(|r| r.as_ref())
+        self.readers
+            .iter()
+            .find(|reader| reader.can_read(path))
+            .map(|r| r.as_ref())
     }
 
     pub fn writer_for(&self, path: &Path) -> Option<&dyn AssetPackageWriter> {
-        self.writers.iter().find(|writer| writer.can_write(path)).map(|w| w.as_ref())
+        self.writers
+            .iter()
+            .find(|writer| writer.can_write(path))
+            .map(|w| w.as_ref())
     }
 }
 
@@ -202,7 +208,13 @@ fn collect_files_inner(
 
         // 普通目录：分类 = 父目录名（ParentDirectoryRule）；根目录下直接文件无分类。
         let category = chain
-            .resolve(&path, &CategoryContext { explicit: None, group: None })
+            .resolve(
+                &path,
+                &CategoryContext {
+                    explicit: None,
+                    group: None,
+                },
+            )
             .filter(|_| path.parent().map(|parent| parent != root).unwrap_or(false))
             .filter(|name| allowed.map(|set| set.contains(name)).unwrap_or(true));
         out.push(ImportedAsset {
@@ -253,7 +265,13 @@ fn collect_emotion_config_dir(
             .and_then(|v| v.as_str())
             .filter(|name| allowed.map(|set| set.contains(*name)).unwrap_or(true));
         let category = chain
-            .resolve(&path, &CategoryContext { explicit: None, group })
+            .resolve(
+                &path,
+                &CategoryContext {
+                    explicit: None,
+                    group,
+                },
+            )
             .filter(|name| allowed.map(|set| set.contains(name)).unwrap_or(true));
         out.push(ImportedAsset {
             source: path,
@@ -414,8 +432,7 @@ fn export_qianniu(
         let total = library
             .store()
             .all_assets_count()
-            .map_err(|e| e.to_string())?
-            as usize;
+            .map_err(|e| e.to_string())? as usize;
         let mut categories: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         let mut done = 0usize;
@@ -586,7 +603,10 @@ mod tests {
         // 普通目录：不挂 qianniu 标签。
         assert!(package.assets.iter().all(|a| a.tags.is_empty()));
         // 分类 = 父目录名（ParentDirectoryRule），并受 config.json 白名单约束。
-        assert!(package.assets.iter().all(|a| a.category.as_deref() == Some("cat")));
+        assert!(package
+            .assets
+            .iter()
+            .all(|a| a.category.as_deref() == Some("cat")));
         fs::remove_dir_all(root).unwrap();
     }
 

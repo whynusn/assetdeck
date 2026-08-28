@@ -32,21 +32,99 @@ pub struct MediaType {
 /// 注册表。顺序即本文件维护顺序；查表按扩展名精确匹配，未知扩展 ⇒ 不适用。
 pub static MEDIA_TYPES: &[MediaType] = &[
     // —— 图片：全部可导入、可缩略、可派生 paste.png（D20：PNG 原图同样派生封顶）——
-    MediaType { key: "png", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
-    MediaType { key: "jpg", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
-    MediaType { key: "jpeg", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
-    MediaType { key: "gif", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
-    MediaType { key: "webp", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
-    MediaType { key: "bmp", kind: AssetKind::Image, importable: true, thumbnailable: true, paste_derivable: true },
+    MediaType {
+        key: "png",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
+    MediaType {
+        key: "jpg",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
+    MediaType {
+        key: "jpeg",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
+    MediaType {
+        key: "gif",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
+    MediaType {
+        key: "webp",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
+    MediaType {
+        key: "bmp",
+        kind: AssetKind::Image,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: true,
+    },
     // —— 视频：可导入、可缩略（worker 抽帧）；不上框派生（HDROP 交文件引用，D18）——
-    MediaType { key: "mp4", kind: AssetKind::Video, importable: true, thumbnailable: true, paste_derivable: false },
-    MediaType { key: "mov", kind: AssetKind::Video, importable: true, thumbnailable: true, paste_derivable: false },
-    MediaType { key: "mkv", kind: AssetKind::Video, importable: true, thumbnailable: true, paste_derivable: false },
-    MediaType { key: "avi", kind: AssetKind::Video, importable: true, thumbnailable: true, paste_derivable: false },
-    MediaType { key: "webm", kind: AssetKind::Video, importable: true, thumbnailable: true, paste_derivable: false },
+    MediaType {
+        key: "mp4",
+        kind: AssetKind::Video,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: false,
+    },
+    MediaType {
+        key: "mov",
+        kind: AssetKind::Video,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: false,
+    },
+    MediaType {
+        key: "mkv",
+        kind: AssetKind::Video,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: false,
+    },
+    MediaType {
+        key: "avi",
+        kind: AssetKind::Video,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: false,
+    },
+    MediaType {
+        key: "webm",
+        kind: AssetKind::Video,
+        importable: true,
+        thumbnailable: true,
+        paste_derivable: false,
+    },
     // —— 文本：可导入、无缩略图（走文字卡片）、不派生 ——
-    MediaType { key: "txt", kind: AssetKind::Text, importable: true, thumbnailable: false, paste_derivable: false },
-    MediaType { key: "md", kind: AssetKind::Text, importable: true, thumbnailable: false, paste_derivable: false },
+    MediaType {
+        key: "txt",
+        kind: AssetKind::Text,
+        importable: true,
+        thumbnailable: false,
+        paste_derivable: false,
+    },
+    MediaType {
+        key: "md",
+        kind: AssetKind::Text,
+        importable: true,
+        thumbnailable: false,
+        paste_derivable: false,
+    },
 ];
 
 /// 按扩展名查注册表。ext 传小写、无点的扩展名；未知扩展返回 None。
@@ -77,7 +155,9 @@ pub fn is_thumbnailable(ext: &str) -> bool {
 
 /// 该扩展名是否需要旁挂「上框用」paste.png（D20）。
 pub fn is_paste_derivable(ext: &str) -> bool {
-    by_extension(ext).map(|t| t.paste_derivable).unwrap_or(false)
+    by_extension(ext)
+        .map(|t| t.paste_derivable)
+        .unwrap_or(false)
 }
 
 /// 全量可见列表（测试 / 诊断用）。

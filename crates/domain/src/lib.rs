@@ -88,7 +88,9 @@ impl Sorter {
         assets.sort_by(|a, b| {
             for key in &self.keys {
                 let ord = match key.field {
-                    SortField::CreatedAt => apply_dir(key.direction, a.created_at.cmp(&b.created_at)),
+                    SortField::CreatedAt => {
+                        apply_dir(key.direction, a.created_at.cmp(&b.created_at))
+                    }
                     SortField::Name => apply_dir(key.direction, a.name.cmp(&b.name)),
                     SortField::Size => sort_size(a.size_bytes, b.size_bytes, key.direction),
                     SortField::Kind => apply_dir(key.direction, a.kind.cmp(&b.kind)),
@@ -156,8 +158,14 @@ mod tests {
         ];
         let sorter = Sorter {
             keys: vec![
-                SortSpec { field: SortField::CreatedAt, direction: SortDirection::Desc },
-                SortSpec { field: SortField::Name, direction: SortDirection::Asc },
+                SortSpec {
+                    field: SortField::CreatedAt,
+                    direction: SortDirection::Desc,
+                },
+                SortSpec {
+                    field: SortField::Name,
+                    direction: SortDirection::Asc,
+                },
             ],
         };
         sorter.sort_assets(&mut items);
@@ -167,22 +175,24 @@ mod tests {
 
     #[test]
     fn sorter_by_size_puts_unknown_last_in_both_directions() {
-        let mut items = vec![
-            asset(1, "a", 0),
-            asset(2, "b", 0),
-            asset(3, "c", 0),
-        ];
+        let mut items = vec![asset(1, "a", 0), asset(2, "b", 0), asset(3, "c", 0)];
         items[0].size_bytes = Some(500);
         items[1].size_bytes = Some(1000);
         // items[2] 尺寸未知
         let asc = Sorter {
-            keys: vec![SortSpec { field: SortField::Size, direction: SortDirection::Asc }],
+            keys: vec![SortSpec {
+                field: SortField::Size,
+                direction: SortDirection::Asc,
+            }],
         };
         asc.sort_assets(&mut items);
         let ids: Vec<u32> = items.iter().map(|a| a.id.0).collect();
         assert_eq!(ids, vec![1, 2, 3]); // 未知恒在最后
         let desc = Sorter {
-            keys: vec![SortSpec { field: SortField::Size, direction: SortDirection::Desc }],
+            keys: vec![SortSpec {
+                field: SortField::Size,
+                direction: SortDirection::Desc,
+            }],
         };
         desc.sort_assets(&mut items);
         let ids: Vec<u32> = items.iter().map(|a| a.id.0).collect();
@@ -191,19 +201,32 @@ mod tests {
 
     #[test]
     fn sorter_by_kind_orders_image_video_text_other() {
-        let mut items = vec![asset(1, "x", 0), asset(2, "y", 0), asset(3, "z", 0), asset(4, "w", 0)];
+        let mut items = vec![
+            asset(1, "x", 0),
+            asset(2, "y", 0),
+            asset(3, "z", 0),
+            asset(4, "w", 0),
+        ];
         items[0].kind = AssetKind::Text;
         items[1].kind = AssetKind::Video;
         items[2].kind = AssetKind::Image;
         items[3].kind = AssetKind::Other;
         let sorter = Sorter {
-            keys: vec![SortSpec { field: SortField::Kind, direction: SortDirection::Asc }],
+            keys: vec![SortSpec {
+                field: SortField::Kind,
+                direction: SortDirection::Asc,
+            }],
         };
         sorter.sort_assets(&mut items);
         let kinds: Vec<AssetKind> = items.iter().map(|a| a.kind).collect();
         assert_eq!(
             kinds,
-            vec![AssetKind::Image, AssetKind::Video, AssetKind::Text, AssetKind::Other]
+            vec![
+                AssetKind::Image,
+                AssetKind::Video,
+                AssetKind::Text,
+                AssetKind::Other
+            ]
         );
     }
 
@@ -216,7 +239,10 @@ mod tests {
                 Filter::Not(Box::new(Filter::HasTag(TagId(2)))),
             ]),
             sorter: Sorter {
-                keys: vec![SortSpec { field: SortField::Name, direction: SortDirection::Asc }],
+                keys: vec![SortSpec {
+                    field: SortField::Name,
+                    direction: SortDirection::Asc,
+                }],
             },
         };
         let json = serde_json::to_string(&folder).unwrap();

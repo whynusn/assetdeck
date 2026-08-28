@@ -140,11 +140,15 @@ pub struct ImportTicket {
 #[derive(Debug, Clone)]
 pub enum EnqueueOutcome {
     Ticket(ImportTicket),
-    Duplicate { existing_uuid: String },
+    Duplicate {
+        existing_uuid: String,
+    },
     /// 声明为图片却无法解码（扩展名伪装 / 文件损坏 / 格式不支持）：
     /// 不产生任何入库数据，调用方按「单文件失败」上报后继续导入后续素材。
     /// 历史行为是整批导入直接失败——一个坏图拖垮上万条素材，不可接受。
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
     Backpressure,
 }
 
@@ -169,10 +173,15 @@ struct CopyJob {
 /// 元数据写线程的批量操作。导入数万条时逐行 autocommit 在 Windows 上每行
 /// 一次 fsync（实测 ~4ms/行），攒批共享一次事务提交是恢复秒级入库的关键。
 enum DbOp {
-    Upsert { ticket: u64, meta: store::AssetMeta },
+    Upsert {
+        ticket: u64,
+        meta: store::AssetMeta,
+    },
     /// 删除残留行（拷贝失败回滚）。排进同一队列保证与潜在 Upsert 的先后序，
     /// 避免「先删后插」复活幽灵行。
-    Tombstone { uuid: String },
+    Tombstone {
+        uuid: String,
+    },
 }
 
 struct Shared {
@@ -216,7 +225,9 @@ pub struct LibraryConfig {
 impl LibraryConfig {
     /// 前台高速导入默认值：面向一次性数万条的目标场景。
     pub fn fast() -> Self {
-        let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2);
         LibraryConfig {
             capacity: 64,
             copy_workers: cores.clamp(2, 8),
@@ -288,7 +299,12 @@ impl Library {
         // 与历史版本完全一致的默认形态：容量 16、单拷贝线程；内存索引开启。
         Self::build(
             root,
-            LibraryConfig { capacity: 16, copy_workers: 1, meta_batch: 128, memory_phash_index: true },
+            LibraryConfig {
+                capacity: 16,
+                copy_workers: 1,
+                meta_batch: 128,
+                memory_phash_index: true,
+            },
             Box::new(NullDispatcher),
         )
     }
@@ -296,7 +312,12 @@ impl Library {
     pub fn open_with_capacity(root: &Path, capacity: usize) -> Result<Self> {
         Self::open_full(
             root,
-            LibraryConfig { capacity, copy_workers: 1, meta_batch: 128, memory_phash_index: true },
+            LibraryConfig {
+                capacity,
+                copy_workers: 1,
+                meta_batch: 128,
+                memory_phash_index: true,
+            },
             Box::new(NullDispatcher),
         )
     }
@@ -308,14 +329,23 @@ impl Library {
     ) -> Result<Self> {
         Self::open_full(
             root,
-            LibraryConfig { capacity, copy_workers: 1, meta_batch: 128, memory_phash_index: true },
+            LibraryConfig {
+                capacity,
+                copy_workers: 1,
+                meta_batch: 128,
+                memory_phash_index: true,
+            },
             dispatcher,
         )
     }
 
     /// 双速导入装配口（D37）：CLI --mode fast|background 走这里。
     pub fn open_with_mode(mode: ImportMode, root: &Path) -> Result<Self> {
-        Self::open_full(root, LibraryConfig::for_mode(mode), Box::new(NullDispatcher))
+        Self::open_full(
+            root,
+            LibraryConfig::for_mode(mode),
+            Box::new(NullDispatcher),
+        )
     }
 
     pub fn open_full(
@@ -326,7 +356,11 @@ impl Library {
         Self::build(root, config, dispatcher)
     }
 
-    fn build(root: &Path, config: LibraryConfig, dispatcher: Box<dyn MediaDispatcher>) -> Result<Self> {
+    fn build(
+        root: &Path,
+        config: LibraryConfig,
+        dispatcher: Box<dyn MediaDispatcher>,
+    ) -> Result<Self> {
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("thumbs"))?;
         let store = Store::open(&root.join("meta.db"))?;
@@ -334,7 +368,10 @@ impl Library {
         // 启动即装载全库 pHash 到内存（百万条约 8MB，进程生命周期内一次成本）。
         let phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>> =
             std::sync::Arc::new(if config.memory_phash_index {
-                let mut index = PHashIndex { hashes: Vec::new(), session_uuids: HashMap::new() };
+                let mut index = PHashIndex {
+                    hashes: Vec::new(),
+                    session_uuids: HashMap::new(),
+                };
                 for (_uuid, bytes) in store.all_phashes()? {
                     if bytes.len() == 8 {
                         let v = u64::from_be_bytes(bytes.as_slice().try_into().expect("8 字节"));
@@ -370,7 +407,12 @@ impl Library {
             let worker_db_queue = Arc::clone(&db_queue);
             let worker_phash_index = std::sync::Arc::clone(&phash_index);
             thread::spawn(move || {
-                worker_loop(worker_root, worker_shared, worker_db_queue, worker_phash_index)
+                worker_loop(
+                    worker_root,
+                    worker_shared,
+                    worker_db_queue,
+                    worker_phash_index,
+                )
             });
         }
 
@@ -378,11 +420,13 @@ impl Library {
         {
             let db_queue = Arc::clone(&db_queue);
             let writer_shared = Arc::clone(&shared);
-            let batch = if config.meta_batch == 0 { usize::MAX } else { config.meta_batch };
+            let batch = if config.meta_batch == 0 {
+                usize::MAX
+            } else {
+                config.meta_batch
+            };
             let db_root = root.to_path_buf();
-            std::thread::spawn(move || {
-                meta_writer_loop(db_root, db_queue, writer_shared, batch)
-            });
+            std::thread::spawn(move || meta_writer_loop(db_root, db_queue, writer_shared, batch));
         }
 
         Ok(Self {
@@ -739,7 +783,13 @@ fn worker_loop(
                 // 等写线程对这张票的提交确认（meta_ready），或看到写线程把票
                 // 判成 Failed（如落库毒行）——两种情况都由本线程收尾并减 active。
                 // Arc 克隆仅引用计数，跨循环迭代不产生所有权问题。
-                finish_after_copy_ok(root.as_path(), shared.clone(), db_queue.clone(), std::sync::Arc::clone(&phash_index), job);
+                finish_after_copy_ok(
+                    root.as_path(),
+                    shared.clone(),
+                    db_queue.clone(),
+                    std::sync::Arc::clone(&phash_index),
+                    job,
+                );
             }
             Err(e) => {
                 // 拷贝失败：文件/目录清理在本线程，删除行走 tombstone 队列，
@@ -750,13 +800,16 @@ fn worker_loop(
                 let (q_lock, q_cv) = &*db_queue;
                 {
                     let mut q = q_lock.lock().unwrap();
-                    q.push_back(DbOp::Tombstone { uuid: job.uuid.clone() });
+                    q.push_back(DbOp::Tombstone {
+                        uuid: job.uuid.clone(),
+                    });
                     drop(q);
                     q_cv.notify_all();
                 }
                 let (lock, cv) = &*shared;
                 let mut g = lock.lock().unwrap();
-                g.states.insert(job.ticket_id, CopyState::Failed(format!("{e}")));
+                g.states
+                    .insert(job.ticket_id, CopyState::Failed(format!("{e}")));
                 g.active -= 1;
                 drop(g);
                 cv.notify_all();
@@ -766,10 +819,7 @@ fn worker_loop(
 }
 
 /// 失败回滚时从内存索引精确摘除该素材的 hash（防御重复导入撞上幽灵条目）。
-fn purge_session_hash(
-    phash_index: &std::sync::Arc<Option<Mutex<PHashIndex>>>,
-    hv: Option<u64>,
-) {
+fn purge_session_hash(phash_index: &std::sync::Arc<Option<Mutex<PHashIndex>>>, hv: Option<u64>) {
     if let Some(hv) = hv {
         let opt: Option<&Mutex<PHashIndex>> = (&**phash_index).as_ref();
         if let Some(mutex) = opt {
@@ -802,7 +852,9 @@ fn finish_after_copy_ok(
             let (q_lock, q_cv) = &*db_queue;
             {
                 let mut q = q_lock.lock().unwrap();
-                q.push_back(DbOp::Tombstone { uuid: job.uuid.clone() });
+                q.push_back(DbOp::Tombstone {
+                    uuid: job.uuid.clone(),
+                });
                 drop(q);
                 q_cv.notify_all();
             }
@@ -831,7 +883,9 @@ fn finish_after_copy_ok(
             let (q_lock, q_cv) = &*db_queue;
             {
                 let mut q = q_lock.lock().unwrap();
-                q.push_back(DbOp::Tombstone { uuid: job.uuid.clone() });
+                q.push_back(DbOp::Tombstone {
+                    uuid: job.uuid.clone(),
+                });
                 drop(q);
                 q_cv.notify_all();
             }
@@ -942,10 +996,8 @@ fn flush_upsert_batch(
                     Err(e) => {
                         let (lock, cv) = &**shared;
                         let mut g = lock.lock().unwrap();
-                        g.states.insert(
-                            *t,
-                            CopyState::Failed(format!("元数据落库失败：{e}")),
-                        );
+                        g.states
+                            .insert(*t, CopyState::Failed(format!("元数据落库失败：{e}")));
                         drop(g);
                         cv.notify_all();
                     }
@@ -1022,7 +1074,10 @@ mod tests {
                 let state = library
                     .wait_terminal(&ticket, std::time::Duration::from_secs(30))
                     .expect("极小图导入应在 30s 内到达终态");
-                assert!(matches!(state, CopyState::Done), "极小图应成功完成：{state:?}");
+                assert!(
+                    matches!(state, CopyState::Done),
+                    "极小图应成功完成：{state:?}"
+                );
                 let meta = library.store().get_asset(&ticket.uuid).unwrap();
                 assert!(meta.is_some(), "极小图也应入库");
             }

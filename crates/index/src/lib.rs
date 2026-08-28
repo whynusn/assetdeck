@@ -96,7 +96,11 @@ impl FacetIndex {
         let row = id as usize;
         Some(Asset {
             id: AssetId(id),
-            name: self.names.get(row).map(|s| s.to_string()).unwrap_or_default(),
+            name: self
+                .names
+                .get(row)
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             category: self.categories.get(row).copied().flatten().map(CategoryId),
             tags: Vec::new(),
             created_at: self.created_at.get(row).copied().unwrap_or(0),
@@ -118,7 +122,10 @@ impl FacetIndex {
         if !self.all.contains(id) {
             return AssetKind::Other;
         }
-        self.kinds.get(id as usize).copied().unwrap_or(AssetKind::Other)
+        self.kinds
+            .get(id as usize)
+            .copied()
+            .unwrap_or(AssetKind::Other)
     }
 
     /// 文件名子串匹配（大小写不敏感）命中的 id 集合。

@@ -78,7 +78,9 @@ fn default_sidebar_width() -> f32 {
 impl AppSettings {
     /// 非开关字段的读回净化：夹取拖宽范围，防手改 settings.toml 塞进荒谬值。
     pub fn sanitized(mut self) -> Self {
-        self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        self.sidebar_width = self
+            .sidebar_width
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         self
     }
 }

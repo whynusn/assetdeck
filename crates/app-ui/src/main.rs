@@ -23,8 +23,8 @@ use ui_viewmodels::{
     ThemeTokens,
 };
 
-use thumbs::{GridCtx, ThumbCache, ThumbSource, THUMB_CACHE_CAPACITY};
 use task_runner::ChildTask;
+use thumbs::{GridCtx, ThumbCache, ThumbSource, THUMB_CACHE_CAPACITY};
 
 thread_local! {
     /// 成功提示的自动消隐计时器。Slint 的 Timer 非 Send，只能在 UI 线程持有；
@@ -44,8 +44,6 @@ const MIN_COLUMNS: u32 = 2;
 const MAX_COLUMNS: u32 = 12;
 
 const BUILTIN_PROFILES: &str = include_str!("../../../profiles/profiles.builtin.toml");
-
-
 
 fn demo_index() -> FacetIndex {
     let mut idx = FacetIndex::new();
@@ -71,12 +69,6 @@ fn recent_first_sorter() -> Sorter {
         }],
     }
 }
-
-
-
-
-
-
 
 /// 容器宽度 → 列数：贴在 [`TARGET_COLUMN_WIDTH`] 并夹在合理区间内。
 fn columns_for(container_width: f32) -> u32 {
@@ -800,9 +792,7 @@ fn main() {
             let Some(ui) = ui.upgrade() else { return };
             match logging::logs_dir() {
                 Some(dir) => {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(&dir)
-                        .spawn();
+                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
                     logging::info!("打开日志目录 {}", dir.display());
                 }
                 None => show_notice(
@@ -853,7 +843,14 @@ fn main() {
                 } else {
                     logging::Level::Info
                 });
-                logging::info!("诊断日志等级已切换 -> {}", if s.verbose_diagnostics { "trace" } else { "info" });
+                logging::info!(
+                    "诊断日志等级已切换 -> {}",
+                    if s.verbose_diagnostics {
+                        "trace"
+                    } else {
+                        "info"
+                    }
+                );
             }
             sync_settings(&ui, &s);
         });
@@ -1434,12 +1431,15 @@ fn spawn_import_pipeline(
     // NOTICE 行 = 整体成功但个别素材失败（伪装扩展名/损坏图），弹警示避免
     // 「部分失败被当成全成」的静默丢素材。
     let weak_notice = weak.clone();
-    let mut phase1_task = ChildTask::new(helper, vec![
-        source,
-        root_thread.clone(),
-        "--mode".into(),
-        mode_arg.into(),
-    ]);
+    let mut phase1_task = ChildTask::new(
+        helper,
+        vec![
+            source,
+            root_thread.clone(),
+            "--mode".into(),
+            mode_arg.into(),
+        ],
+    );
     if let Some(dir) = logs_dir_arg.clone() {
         phase1_task = phase1_task
             .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
@@ -1501,7 +1501,8 @@ fn spawn_import_pipeline(
                             &ui,
                             TargetNoticeTone::Warning,
                             "素材已导入，但未找到缩略图工具（derive-thumbs/decode-worker），
- 缩略图暂缺；请使用完整安装包运行".to_string(),
+ 缩略图暂缺；请使用完整安装包运行"
+                                .to_string(),
                         );
                     }
                 });
@@ -1527,33 +1528,33 @@ fn spawn_import_pipeline(
             }
             let _ = phase2_task
                 .with_progress(move |done, total| {
-                let weak = weak_derived_progress.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.invoke_thumbnail_progress(done as i32, total as i32);
-                    }
-                });
-            })
-            .with_finished(move |success, message| {
-                // 缩略图成败都不改变「导入已完成」的事实：都触发一次库重载；
-                // 但失败原因要浮出来——旧实现 `_success, _message` 直接吞掉，
-                // 「N 个素材缩略图派生失败」对用户完全不可见。
-                importing_phase2.store(false, Ordering::SeqCst);
-                let weak = weak_derived_finished.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.invoke_thumbnails_generated();
-                        if !success && !message.trim().is_empty() {
-                            show_notice(
-                                &ui,
-                                TargetNoticeTone::Warning,
-                                format!("缩略图派生未全部成功：{}", message.trim()),
-                            );
+                    let weak = weak_derived_progress.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_thumbnail_progress(done as i32, total as i32);
                         }
-                    }
-                });
-            })
-            .run_in_background();
+                    });
+                })
+                .with_finished(move |success, message| {
+                    // 缩略图成败都不改变「导入已完成」的事实：都触发一次库重载；
+                    // 但失败原因要浮出来——旧实现 `_success, _message` 直接吞掉，
+                    // 「N 个素材缩略图派生失败」对用户完全不可见。
+                    importing_phase2.store(false, Ordering::SeqCst);
+                    let weak = weak_derived_finished.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_thumbnails_generated();
+                            if !success && !message.trim().is_empty() {
+                                show_notice(
+                                    &ui,
+                                    TargetNoticeTone::Warning,
+                                    format!("缩略图派生未全部成功：{}", message.trim()),
+                                );
+                            }
+                        }
+                    });
+                })
+                .run_in_background();
         })
         .run_in_background();
 }

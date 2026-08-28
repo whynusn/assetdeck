@@ -147,7 +147,11 @@ pub fn init(opts: InitOptions) -> Option<PathBuf> {
 /// 缺省目录**永不**是当前工作目录：cargo test 的 cwd 是包根、任意宿主直跑的
 /// cwd 不可控，把日志写进 cwd 会污染源码树（实测 decode-worker 日志曾落进
 /// crates/worker/）。见 platform_default_dir。
-pub fn init_from_env(name: &str, fallback_dir: Option<PathBuf>, fallback_level: Level) -> Option<PathBuf> {
+pub fn init_from_env(
+    name: &str,
+    fallback_dir: Option<PathBuf>,
+    fallback_level: Level,
+) -> Option<PathBuf> {
     let level = std::env::var("DSH_LOG_LEVEL")
         .ok()
         .and_then(|s| Level::parse(&s))
@@ -233,10 +237,7 @@ fn open_log_file(opts: &InitOptions) -> std::io::Result<(File, PathBuf)> {
     let path = opts
         .dir
         .join(format!("{}-{}-{}.log", opts.name, pid, millis));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let file = OpenOptions::new().create(true).append(true).open(&path)?;
     prune_old_files(&opts.dir, &opts.name, KEEP_FILES_PER_NAME);
     Ok((file, path))
 }
@@ -340,7 +341,10 @@ mod tests {
     #[test]
     fn platform_default_dir_is_absolute_and_never_cwd() {
         let dir = platform_default_dir();
-        assert!(dir.is_absolute(), "缺省日志目录必须是绝对路径，实际 {dir:?}");
+        assert!(
+            dir.is_absolute(),
+            "缺省日志目录必须是绝对路径，实际 {dir:?}"
+        );
         // 三层兜底都不得把 cwd 相对段（如 "."）或空段混进路径。
         for component in dir.components() {
             if let std::path::Component::CurDir = component {
@@ -351,7 +355,14 @@ mod tests {
 
     #[test]
     fn level_parse_roundtrip() {
-        for lvl in [Level::Off, Level::Error, Level::Warn, Level::Info, Level::Debug, Level::Trace] {
+        for lvl in [
+            Level::Off,
+            Level::Error,
+            Level::Warn,
+            Level::Info,
+            Level::Debug,
+            Level::Trace,
+        ] {
             assert_eq!(Level::parse(lvl.as_str()), Some(lvl));
             assert_eq!(Level::parse(&lvl.as_str().to_uppercase()), Some(lvl));
         }
@@ -395,10 +406,7 @@ mod tests {
             let _ = filetime_shim(&p.path(), t);
         }
         prune_old_files(&dir, "probe", 8);
-        let left = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .count();
+        let left = std::fs::read_dir(&dir).unwrap().flatten().count();
         assert!(left <= 8, "应裁剪到 ≤8，实际 {left}");
         let _ = fs::remove_dir_all(&dir);
     }

@@ -45,7 +45,8 @@ struct MockSink(Log);
 
 impl ClipboardSink for MockSink {
     fn write(&mut self, payload: &ClipboardPayload<'_>) -> Result<()> {
-        self.0.push(Op::WriteClipboard(payload.clone().into_owned()));
+        self.0
+            .push(Op::WriteClipboard(payload.clone().into_owned()));
         Ok(())
     }
 }

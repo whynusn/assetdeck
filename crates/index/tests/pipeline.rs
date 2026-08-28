@@ -10,7 +10,13 @@ const TAG_RED: TagId = TagId(10);
 const TAG_BLUE: TagId = TagId(11);
 const TAG_PROMO: TagId = TagId(12);
 
-fn asset_of(id: u32, name: &str, category: Option<CategoryId>, tags: Vec<TagId>, created_at: i64) -> Asset {
+fn asset_of(
+    id: u32,
+    name: &str,
+    category: Option<CategoryId>,
+    tags: Vec<TagId>,
+    created_at: i64,
+) -> Asset {
     Asset {
         id: AssetId(id),
         name: name.into(),
@@ -92,7 +98,13 @@ fn negated_filter_excludes_ids() {
 fn name_contains_filter_matches_case_insensitive_substring() {
     let mut index = idx();
     // 补一个真实文件名字样的行，验证子串 + 大小写不敏感。
-    index.insert(&asset_of(9, "暑期促销图-1.PNG", Some(CAT_PHOTO), vec![], 900));
+    index.insert(&asset_of(
+        9,
+        "暑期促销图-1.PNG",
+        Some(CAT_PHOTO),
+        vec![],
+        900,
+    ));
     let hits = index.evaluate(&Filter::NameContains("促销".to_string()));
     assert_eq!(ids(&hits), vec![9]);
     let hits_upper = index.evaluate(&Filter::NameContains("PNG".to_string()));
@@ -108,8 +120,14 @@ fn sorted_ids_orders_by_multiple_keys_without_materializing_assets() {
     let index = idx();
     let sorter = Sorter {
         keys: vec![
-            SortSpec { field: SortField::CreatedAt, direction: SortDirection::Desc },
-            SortSpec { field: SortField::Name, direction: SortDirection::Asc },
+            SortSpec {
+                field: SortField::CreatedAt,
+                direction: SortDirection::Desc,
+            },
+            SortSpec {
+                field: SortField::Name,
+                direction: SortDirection::Asc,
+            },
         ],
     };
     let base = index.evaluate(&Filter::All);

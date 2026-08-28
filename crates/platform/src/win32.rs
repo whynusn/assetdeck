@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HWND as WinHWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-    CoTaskMemFree,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
@@ -58,8 +57,8 @@ use crate::{
     ClipboardPayload, ClipboardSink, EventWait, FileDialogs, FocusAnchor, FocusOutcome, FocusPlan,
     FocusStep, FocusWatcher, ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector,
     PlatformError, ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome,
-    WindowActivator, WindowEnumerator, WindowEventSource, WindowHandle, WindowRect,
-    WindowSnapshot, KEY_UP,
+    WindowActivator, WindowEnumerator, WindowEventSource, WindowHandle, WindowRect, WindowSnapshot,
+    KEY_UP,
 };
 
 /// 原生文件对话框（IFileDialog）：ComCtl 版免 PowerShell 冷启动（消除数秒延迟）。
@@ -74,10 +73,8 @@ pub struct Win32FileDialogs;
 /// 按需确保当前线程完成 COM 初始化（幂等；UI 线程粘贴热路径的 UIA 已初始化过）。
 fn ensure_com_initialized() {
     static COM_READY: OnceLock<()> = OnceLock::new();
-    COM_READY.get_or_init(|| {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
+    COM_READY.get_or_init(|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     });
 }
 
@@ -94,7 +91,7 @@ impl FileDialogs for Win32FileDialogs {
             dialog
                 .SetOptions(
                     windows::Win32::UI::Shell::FOS_PICKFOLDERS
-                        | windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM
+                        | windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM,
                 )
                 .map_err(|error| PlatformError::Window(format!("配置文件夹对话框失败: {error}")))?;
             dialog
@@ -102,18 +99,22 @@ impl FileDialogs for Win32FileDialogs {
                 .map_err(|error| PlatformError::Window(format!("设置对话框标题失败: {error}")))?;
             match dialog.Show(None) {
                 Ok(()) => {
-                    let item = dialog
-                        .GetResult()
-                        .map_err(|error| PlatformError::Window(format!("读取选择结果失败: {error}")))?;
+                    let item = dialog.GetResult().map_err(|error| {
+                        PlatformError::Window(format!("读取选择结果失败: {error}"))
+                    })?;
                     let name = item
                         .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
-                        .map_err(|error| PlatformError::Window(format!("读取选择路径失败: {error}")))?;
+                        .map_err(|error| {
+                            PlatformError::Window(format!("读取选择路径失败: {error}"))
+                        })?;
                     let path = name.to_string().unwrap_or_default();
                     CoTaskMemFree(Some(name.as_ptr() as *const core::ffi::c_void));
                     Ok(Some(PathBuf::from(path)))
                 }
                 Err(error) if is_cancelled(&error) => Ok(None),
-                Err(error) => Err(PlatformError::Window(format!("文件夹选择对话框失败: {error}"))),
+                Err(error) => Err(PlatformError::Window(format!(
+                    "文件夹选择对话框失败: {error}"
+                ))),
             }
         }
     }
@@ -133,7 +134,7 @@ impl FileDialogs for Win32FileDialogs {
             dialog
                 .SetOptions(
                     windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM
-                        | windows::Win32::UI::Shell::FOS_FILEMUSTEXIST
+                        | windows::Win32::UI::Shell::FOS_FILEMUSTEXIST,
                 )
                 .map_err(|error| PlatformError::Window(format!("配置文件对话框失败: {error}")))?;
             dialog
@@ -145,29 +146,35 @@ impl FileDialogs for Win32FileDialogs {
             if !kept.is_empty() {
                 let specs: Vec<windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC> = kept
                     .iter()
-                    .map(|(name, spec)| windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
-                        pszName: windows::core::PCWSTR(name.as_ptr()),
-                        pszSpec: windows::core::PCWSTR(spec.as_ptr()),
-                    })
+                    .map(
+                        |(name, spec)| windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC {
+                            pszName: windows::core::PCWSTR(name.as_ptr()),
+                            pszSpec: windows::core::PCWSTR(spec.as_ptr()),
+                        },
+                    )
                     .collect();
-                dialog
-                    .SetFileTypes(&specs)
-                    .map_err(|error| PlatformError::Window(format!("设置文件类型过滤失败: {error}")))?;
+                dialog.SetFileTypes(&specs).map_err(|error| {
+                    PlatformError::Window(format!("设置文件类型过滤失败: {error}"))
+                })?;
             }
             match dialog.Show(None) {
                 Ok(()) => {
-                    let item = dialog
-                        .GetResult()
-                        .map_err(|error| PlatformError::Window(format!("读取选择结果失败: {error}")))?;
+                    let item = dialog.GetResult().map_err(|error| {
+                        PlatformError::Window(format!("读取选择结果失败: {error}"))
+                    })?;
                     let name = item
                         .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
-                        .map_err(|error| PlatformError::Window(format!("读取选择路径失败: {error}")))?;
+                        .map_err(|error| {
+                            PlatformError::Window(format!("读取选择路径失败: {error}"))
+                        })?;
                     let path = name.to_string().unwrap_or_default();
                     CoTaskMemFree(Some(name.as_ptr() as *const core::ffi::c_void));
                     Ok(Some(PathBuf::from(path)))
                 }
                 Err(error) if is_cancelled(&error) => Ok(None),
-                Err(error) => Err(PlatformError::Window(format!("文件选择对话框失败: {error}"))),
+                Err(error) => Err(PlatformError::Window(format!(
+                    "文件选择对话框失败: {error}"
+                ))),
             }
         }
     }
@@ -189,7 +196,7 @@ impl FileDialogs for Win32FileDialogs {
             dialog
                 .SetOptions(
                     windows::Win32::UI::Shell::FOS_OVERWRITEPROMPT
-                        | windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM
+                        | windows::Win32::UI::Shell::FOS_FORCEFILESYSTEM,
                 )
                 .map_err(|error| PlatformError::Window(format!("配置保存对话框失败: {error}")))?;
             dialog
@@ -211,12 +218,14 @@ impl FileDialogs for Win32FileDialogs {
             let _ = filter; // filter 字符串参数为未来多类型场景预留
             match dialog.Show(None) {
                 Ok(()) => {
-                    let item = dialog
-                        .GetResult()
-                        .map_err(|error| PlatformError::Window(format!("读取保存结果失败: {error}")))?;
+                    let item = dialog.GetResult().map_err(|error| {
+                        PlatformError::Window(format!("读取保存结果失败: {error}"))
+                    })?;
                     let name = item
                         .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
-                        .map_err(|error| PlatformError::Window(format!("读取保存路径失败: {error}")))?;
+                        .map_err(|error| {
+                            PlatformError::Window(format!("读取保存路径失败: {error}"))
+                        })?;
                     let path = name.to_string().unwrap_or_default();
                     CoTaskMemFree(Some(name.as_ptr() as *const core::ffi::c_void));
                     Ok(Some(PathBuf::from(path)))
@@ -255,7 +264,6 @@ fn parse_filter_pairs(filter: &str) -> Vec<(windows::core::HSTRING, windows::cor
     }
     pairs
 }
-
 
 /// 等泵线程回报「钩子已装上」的上限。只在进程内首次订阅时付一次。
 const PUMP_STARTUP_CAP_MS: u64 = 500;
@@ -1254,7 +1262,7 @@ impl EventWait for Win32EventWait {
                     );
                     return WaitOutcome::Observed {
                         elapsed_ms: self.since.elapsed().as_millis() as u64,
-                    }
+                    };
                 }
                 Ok(other) => {
                     log::trace!(
@@ -1284,7 +1292,7 @@ impl EventWait for Win32EventWait {
                     );
                     return WaitOutcome::Observed {
                         elapsed_ms: self.since.elapsed().as_millis() as u64,
-                    }
+                    };
                 }
                 // 不匹配的事件继续丢弃：一条通道承载全部事件，过滤在此处完成。
                 Ok(other) => {

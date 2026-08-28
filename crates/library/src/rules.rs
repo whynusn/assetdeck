@@ -133,6 +133,9 @@ mod tests {
     #[test]
     fn unresolved_falls_back_to_inbox_semantics() {
         let chain = RuleChain::new(); // 空链
-        assert_eq!(chain.resolve(Path::new("root/a.png"), &CategoryContext::default()), None);
+        assert_eq!(
+            chain.resolve(Path::new("root/a.png"), &CategoryContext::default()),
+            None
+        );
     }
 }

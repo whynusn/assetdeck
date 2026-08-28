@@ -17,7 +17,10 @@ fn main() {
     // D38：日志初始化（子进程由 UI 注入 DSH_LOG_DIR/DSH_LOG_LEVEL；直跑回落）。
     // stdout 是协议通道，日志只进文件 + 低等级镜像 stderr，绝不污染协议。
     logging::init_from_env("sample-library", None, logging::Level::Info);
-    logging::info!("sample-library 启动：{:?}", std::env::args().collect::<Vec<_>>());
+    logging::info!(
+        "sample-library 启动：{:?}",
+        std::env::args().collect::<Vec<_>>()
+    );
     if let Err(error) = run() {
         logging::error!("sample-library failed: {error}");
         eprintln!("sample-library failed: {error}");
@@ -72,8 +75,14 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         }
     }
     Ok(RunOptions {
-        inbox: positional.first().cloned().unwrap_or_else(|| PathBuf::from("samples/inbox")),
-        out: positional.get(1).cloned().unwrap_or_else(|| PathBuf::from("samples/library")),
+        inbox: positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("samples/inbox")),
+        out: positional
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("samples/library")),
         mode,
     })
 }
@@ -172,13 +181,18 @@ impl Summary {
 /// 线程重叠进行，拷贝走库内的并发磁盘线程池，两侧天然流水线化。整体
 /// 未完成数量受通道容量 + 库背压双重钳制，不会积压到内存失守。
 fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(), String> {
-    let library = Arc::new(
-        Library::open_with_mode(mode.to_library_mode(), out).map_err(|e| e.to_string())?
-    );
+    let library =
+        Arc::new(Library::open_with_mode(mode.to_library_mode(), out).map_err(|e| e.to_string())?);
     let total = assets.len();
     if total == 0 {
-        let count = library.store().all_assets_count().map_err(|e| e.to_string())?;
-        println!("done: imported=0 skipped=0 failed=0 total={count} root={}", out.display());
+        let count = library
+            .store()
+            .all_assets_count()
+            .map_err(|e| e.to_string())?;
+        println!(
+            "done: imported=0 skipped=0 failed=0 total={count} root={}",
+            out.display()
+        );
         return Ok(());
     }
 
@@ -252,7 +266,10 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
     );
     if failed_total > 0 || !failures.is_empty() {
         // NOTICE 行：UI 侧 task_runner 解析后弹提示，失败不再「默默吞掉」。
-        println!("NOTICE\t有 {failed_total} 个素材导入失败：{}", summarize_failures(&failures));
+        println!(
+            "NOTICE\t有 {failed_total} 个素材导入失败：{}",
+            summarize_failures(&failures)
+        );
     }
     Ok(())
 }
@@ -268,28 +285,23 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
     match outcome {
         Ok(EnqueueOutcome::Ticket(ticket)) => {
             match library.wait_terminal(&ticket, TICKET_TIMEOUT) {
-                Some(CopyState::Done) => {
-                    match library.store().get_asset(&ticket.uuid) {
-                        Ok(Some(meta)) => {
-                            println!(
-                                "imported {} => {} ({} bytes)",
-                                asset.source.display(),
-                                meta.rel_path,
-                                meta.size_bytes
-                            );
-                            summary.imported.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Ok(None) => {
-                            summary.record_failure(&asset.source, "拷贝完成后元数据缺失");
-                        }
-                        Err(e) => {
-                            summary.record_failure(
-                                &asset.source,
-                                &format!("查询元数据失败：{e}"),
-                            );
-                        }
+                Some(CopyState::Done) => match library.store().get_asset(&ticket.uuid) {
+                    Ok(Some(meta)) => {
+                        println!(
+                            "imported {} => {} ({} bytes)",
+                            asset.source.display(),
+                            meta.rel_path,
+                            meta.size_bytes
+                        );
+                        summary.imported.fetch_add(1, Ordering::Relaxed);
                     }
-                }
+                    Ok(None) => {
+                        summary.record_failure(&asset.source, "拷贝完成后元数据缺失");
+                    }
+                    Err(e) => {
+                        summary.record_failure(&asset.source, &format!("查询元数据失败：{e}"));
+                    }
+                },
                 Some(CopyState::Failed(reason)) => {
                     // 拷贝/落库失败已在库侧回滚（无半成品），这里只记账继续。
                     summary.record_failure(&asset.source, &reason);
@@ -318,7 +330,10 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
     let done = summary.done.fetch_add(1, Ordering::Relaxed) + 1;
     // 逐件与收尾保证进度可见；中间按步长节流避免数万行管道噪音。
     if done == usize::MAX || done % summary.step == 0 {
-        println!("PROGRESS\t{done}\t{}", summary.done.load(Ordering::Relaxed).max(done));
+        println!(
+            "PROGRESS\t{done}\t{}",
+            summary.done.load(Ordering::Relaxed).max(done)
+        );
     }
 }
 
@@ -345,5 +360,3 @@ fn export_package(root: &Path, output: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("不支持的导出目标: {}", output.display()))?;
     writer.write(&library, output).map_err(|e| e.to_string())
 }
-
-
