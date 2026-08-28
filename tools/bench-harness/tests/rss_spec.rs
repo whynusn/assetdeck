@@ -60,14 +60,28 @@ fn locate_app_exe() -> PathBuf {
 #[ignore = "mem-regression job 与本地手动跑"]
 fn idle_rss_under_100mb() {
     let exe = locate_app_exe();
-    // idle 模式无参启动（design 契约）：真实 GUI 路径含渲染器驻留
+    // idle 模式无参启动（design 契约）：真实 GUI 路径含渲染器驻留。
+    // stderr 落盘：无 GPU 环境（CI runner/远程桌面）若启动即退，把 panic 现场
+    // 带回失败信息——「测量失败=红」必须可归因，不允许黑洞退出。
+    let stderr_path = std::env::temp_dir().join("asset-manager-idle-stderr.log");
     let mut child = Command::new(&exe)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(&stderr_path).expect("stderr 落盘失败"),
+        ))
         .spawn()
         .expect("测量失败=红: 拉起 asset-manager 失败");
-    let report = sample_median(child.id(), POLL_MS, WARMUP, IDLE_HOLD_MS)
-        .expect("测量失败=红: idle 采样中止");
+    let report = match sample_median(child.id(), POLL_MS, WARMUP, IDLE_HOLD_MS) {
+        Ok(report) => report,
+        Err(e) => {
+            let _ = child.wait();
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!(
+                "测量失败=红: idle 采样中止({e})\n== 子进程 stderr ==\n{stderr}\n== app 日志目录 ==\n{}",
+                dump_newest_app_log()
+            );
+        }
+    };
     // idle 进程在窗口内自行退出 = 提前退出 = 测量失败（PRD 红线）：
     // 部分窗口样本不代表稳态空闲，禁止当有效数据放行。
     match child.try_wait() {
@@ -136,6 +150,39 @@ fn browse_100k_rss_under_250mb() {
             "browse 中位数 {} 字节超 D10 预算 {BROWSE_BUDGET_BYTES} 字节",
             report.median_bytes
         );
+    }
+}
+
+/// 失败归因：抓取 exe 旁 logs/ 下最新的 app-*.log 尾部（D39 缺省日志位置）。
+fn dump_newest_app_log() -> String {
+    let logs_dir = locate_app_exe()
+        .parent()
+        .map(|dir| dir.join("logs"))
+        .expect("exe 路径异常");
+    let newest = std::fs::read_dir(&logs_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("app-") && name.ends_with(".log")
+                })
+                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        })
+        .map(|e| e.path());
+    match newest {
+        Some(path) => {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let tail: Vec<&str> = content.lines().rev().take(40).collect();
+            format!(
+                "[{} 尾部 40 行]\n{}",
+                path.display(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            )
+        }
+        None => format!("(无 app 日志: {} 不存在或为空)", logs_dir.display()),
     }
 }
 

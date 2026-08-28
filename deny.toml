@@ -25,6 +25,13 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    "BSL-1.0",
+    "NCSA",
+    # copyleft 白名单：cargo-deny 新版移除了 copyleft 键（EmbarkStudios/cargo-deny#611），
+    # 语义从「copyleft 全部 warn」收窄为「显式放行所需许可证」。Slint 社区版为 GPLv3，
+    # 行动项 A1（许可证路线）未裁决前在此放行——收紧时先裁决 A1。
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "GPL-2.0-only",
+    "LGPL-3.0-only",
 ]
-# copyleft 仅 warn 不 deny：Slint 社区版为 GPLv3，行动项 A1（许可证路线）未裁决前不收紧
-copyleft = "warn"
