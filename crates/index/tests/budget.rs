@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use domain::{Asset, AssetId, CategoryId, Filter};
+use domain::{Asset, AssetId, AssetKind, CategoryId, Filter};
 use index::FacetIndex;
 
 fn synthetic_index(n: u32) -> FacetIndex {
@@ -12,6 +12,8 @@ fn synthetic_index(n: u32) -> FacetIndex {
             category: Some(CategoryId(i % 200)),
             tags: vec![],
             created_at: i as i64,
+            size_bytes: Some(i as u64 * 3),
+            kind: AssetKind::Image,
         });
     }
     idx

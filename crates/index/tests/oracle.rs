@@ -1,4 +1,4 @@
-use domain::{Asset, AssetId, CategoryId, TagId};
+use domain::{Asset, AssetId, AssetKind, CategoryId, TagId};
 use index::FacetIndex;
 use proptest::prelude::*;
 
@@ -27,6 +27,8 @@ fn arb_assets() -> impl Strategy<Value = Vec<Asset>> {
                         .collect()
                 },
                 created_at: ts,
+                size_bytes: None,
+                kind: AssetKind::Other,
             })
             .collect()
     })
