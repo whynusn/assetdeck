@@ -15,6 +15,10 @@
 //! - 子进程：task_runner 注入 DSH_LOG_DIR / DSH_LOG_LEVEL，工具进程
 //!   启动即 init_from_env("sample-library")；
 //! - 运行时切换等级：settings 里的「细粒度诊断日志」开关直接 set_level。
+//!
+//! 目录解析（init_from_env）：DSH_LOG_DIR > 调用方 fallback_dir >
+//! 平台标准目录（%LOCALAPPDATA%\asset-manager\logs）。**永不回落到当前
+//! 工作目录**——否则 cargo test / 任意宿主直跑会把日志洒进源码树。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -139,7 +143,10 @@ pub fn init(opts: InitOptions) -> Option<PathBuf> {
 }
 
 /// 从环境变量初始化（子进程继承 DSH_LOG_DIR / DSH_LOG_LEVEL 的协作约定）。
-/// 目录缺失时回落默认目录 + 默认等级，保证工具进程永远不会因日志崩掉。
+/// 目录缺失时回落平台标准目录 + 默认等级，保证工具进程永远不会因日志崩掉。
+/// 缺省目录**永不**是当前工作目录：cargo test 的 cwd 是包根、任意宿主直跑的
+/// cwd 不可控，把日志写进 cwd 会污染源码树（实测 decode-worker 日志曾落进
+/// crates/worker/）。见 platform_default_dir。
 pub fn init_from_env(name: &str, fallback_dir: Option<PathBuf>, fallback_level: Level) -> Option<PathBuf> {
     let level = std::env::var("DSH_LOG_LEVEL")
         .ok()
@@ -149,7 +156,7 @@ pub fn init_from_env(name: &str, fallback_dir: Option<PathBuf>, fallback_level: 
         .ok()
         .map(PathBuf::from)
         .or(fallback_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(platform_default_dir);
     init(InitOptions {
         dir,
         name: name.to_string(),
@@ -184,9 +191,21 @@ pub fn logs_dir() -> Option<PathBuf> {
     active_log_path().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
-/// 便于外部拼装的启动默认目录。
-pub fn default_dir(exe_name: &str) -> PathBuf {
-    PathBuf::from(exe_name).join("logs")
+/// 平台标准缺省日志目录：`%LOCALAPPDATA%\asset-manager\logs`。
+///
+/// 三层兜底全部是绝对路径，任何分支都不含 cwd：
+/// `LOCALAPPDATA` → `USERPROFILE\AppData\Local` → 系统临时目录。
+/// 桌面端主进程不走这里（init 用 exe 同目录 logs/ 的便携约定，D39），
+/// 本函数只服务 init_from_env 的「环境变量与 fallback 均缺」场景。
+fn platform_default_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| PathBuf::from(profile).join("AppData").join("Local"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("asset-manager").join("logs")
 }
 
 /// 目录里所有进程的日志按 mtime 新到旧排序；为「打开日志文件夹」的方便性，
@@ -317,6 +336,18 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_default_dir_is_absolute_and_never_cwd() {
+        let dir = platform_default_dir();
+        assert!(dir.is_absolute(), "缺省日志目录必须是绝对路径，实际 {dir:?}");
+        // 三层兜底都不得把 cwd 相对段（如 "."）或空段混进路径。
+        for component in dir.components() {
+            if let std::path::Component::CurDir = component {
+                panic!("缺省日志目录不得包含当前目录段: {dir:?}");
+            }
+        }
+    }
 
     #[test]
     fn level_parse_roundtrip() {

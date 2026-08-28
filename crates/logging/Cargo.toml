@@ -5,4 +5,6 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-log = "0.4"
+# std feature 必须显式声明：log 0.4.33 起默认 features 为空，set_boxed_logger
+# 门在 std 之后；单独构建本 crate 时没有其它成员帮忙开启特性。
+log = { version = "0.4", features = ["std"] }
