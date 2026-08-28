@@ -26,6 +26,6 @@
 
 - trait 层定义 `WindowSnapshot`、`WindowEnumerator`、`WindowActivator`、`ForegroundObserver`、`ReadinessProbe`。
 - Win32 观察器使用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`；回调只投递 HWND，匹配和粘性决策在上层。
-- `Win32Readiness` 已包含 UIA 全局焦点 + 目标窗口后代浅探测；内置严格画像使用 `uia_strict`，只有证明可写输入框时才返回 `Ready`。
+- `Win32Readiness` 已包含 UIA 全局焦点 + 目标窗口后代浅探测：探得可写输入框才返回 `Ready`，探不到返回 `Inconclusive`（不伪装成阻塞）。四个内置画像一律 `uia_shallow`，判定语义是「否证阻塞才不注入」，`Inconclusive` 照常注入并标 `verified:false`；`uia_strict` 仅为用户可显式开启的严格档，不是内置默认（DECISIONS D15）。
 - 微信 4.0 在未打开聊天输入框时 UIA 树只暴露两个 Pane；进入聊天输入框后才会物化 `mmui::ChatInputField`。
 - Wayland/v2 分层方案归档在 DECISIONS.md 第四节，v1 不实现。

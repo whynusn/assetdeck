@@ -27,5 +27,5 @@
 - `paste_targeted()` 顺序固定为：协商 → 写剪贴板 → 精确 HWND 激活 → readiness → 最终前台复核 → Ctrl+V。
 - `ReadinessSignal::Blocked` 不注入；`Inconclusive` 可注入但结果必须是 `verified=false`。
 - `paste_targeted()` 不调用 `send()`，即使 `PasteConfig.auto_send=true` 也不合成 Enter。
-- 当前真实 Win32 readiness 只能识别无效/disabled HWND，其余返回 `Inconclusive`；“无会话/只读”仅由 Mock 契约证明。
+- 真实 `Win32Readiness`：无效/disabled HWND → `Blocked`（`WindowGone`/`ModalBlocking`，win32.rs blockers 仅此两项 O(1) 检查）；其余走 UIA 浅探——探得可写输入框（全局焦点或后代）→ `Ready`，探不到 → `Inconclusive`。“无会话/只读”类否证仍仅由 Mock 契约证明。
 - 参考：DECISIONS.md D8/D13、TDD_PLAN M6/M8。
