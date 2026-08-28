@@ -1,0 +1,22 @@
+{"file": ".trellis/spec/pipeline/backend/index.md", "reason": "PasteSession/negotiate 所在层，M8 的状态机接线、就绪度探测与注入序列改造都落在这里"}
+{"file": ".trellis/spec/platform/backend/index.md", "reason": "新增 window/uia 探测能力须遵守 trait 层零依赖零 cfg 门纪律，windows-sys 只能在 cfg(windows) target 门后"}
+{"file": ".trellis/spec/ui-viewmodels/backend/index.md", "reason": "T9 目标选择器与统一反馈收敛的 VM 落点，需沿用既有 grid_vm/catalog_loader 模式"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "M8 跨 platform/targets/pipeline/ui-viewmodels 四层，依赖方向与契约变更须按此指南推演"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "targets crate 抽取前先确认可复用 negotiate/TargetProfile 既有结构，避免重复抽象"}
+{"file": ".trellis/spec/pipeline/backend/directory-structure.md", "reason": "新增 tracker.rs/readiness.rs/registry 的文件落点须符合既有目录约定"}
+{"file": ".trellis/spec/targets/backend/index.md", "reason": "targets 纯逻辑与 Mock 闭环的代码规范"}
+{"file": ".trellis/spec/targets/backend/quality-guidelines.md", "reason": "精确多 IM 路由七段式契约：实例身份、歧义与无 Enter"}
+{"file": ".trellis/spec/pipeline/backend/quality-guidelines.md", "reason": "pipeline 层测试与质量门槛，M8 的 22 条红灯测试须对齐此标准"}
+{"file": ".trellis/spec/pipeline/backend/error-handling.md", "reason": "就绪度失败/无输入框的统一错误语义须复用既有错误分类与降级约定"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "platform 层新增探测接口的可测性与 mock 约定"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "真实 UIA 浅探测、隐藏窗口、实例号与严格就绪的最低契约"}
+{"file": ".trellis/tasks/08-23-m8-target-routing/research/real-im-closed-loop.md", "reason": "真实微信/千牛上框结果与 UIA/多实例注意事项"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "素材物化必须产出绝对且存在的 source_path：相对路径写进 CF_HDROP 会被 IM 静默丢弃"}
+{"file": "DECISIONS.md", "reason": "D14 HDROP 相对路径根因、D15 就绪策略翻转为否证阻塞才不注入"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "InputFocuser 三级降级契约、锚点换算与遮挡检查、鼠标还原与 Unavailable 语义"}
+{"file": ".trellis/spec/pipeline/backend/quality-guidelines.md", "reason": "顺序收敛为 write -> activate -> focus_input -> probe -> alive/foreground -> Ctrl+V，含焦点升格与 paste_sends 降级规则"}
+{"file": ".trellis/spec/targets/backend/quality-guidelines.md", "reason": "画像候选淘汰规则、paste_sends 能力位、input_anchor 越界报错不夹紧、Profile 仅 PartialEq"}
+{"file": ".trellis/spec/store/backend/directory-structure.md", "reason": "旁挂派生 objects/<uuid>/paste.png 的库内布局与回收语义"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "PNG 原图或旁挂 paste.png 均可内联，仍是纯 fs::read 不解码"}
+{"file": ".trellis/spec/ui-viewmodels/backend/directory-structure.md", "reason": "target_runtime.rs 收口为纯 trait 对象持有方，Win32 具体类型只在两处装配点"}
+{"file": "DECISIONS.md", "reason": "D16 装配边界、D18 paste_sends 是画像级能力、D20 旁挂 paste.png + CF_PNG、D21 焦点三级降级"}

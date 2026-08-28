@@ -29,6 +29,7 @@ crates/
   phash/         # pHash 计算与汉明距离匹配
   media/         # 缩略图/抽帧（仅接口定义在此，实现在 worker）
   pipeline/      # 粘贴管线：格式协商→剪贴板→焦点校验→注入→[auto-send]
+  targets/       # 多 IM 目标册：profile 加载/覆盖、窗口匹配打分、TargetTracker 粘性状态机、L0–L3 体检编排（纯函数，零 IO、零平台依赖）
   platform/      # Win32 实现：剪贴板/SendInput/前台窗口（trait + win32 impl）
   worker/        # 解码 worker 进程池：协议、监督重启、背压
   ui-viewmodels/ # ViewModel 层（纯 Rust，可全量单测）
@@ -37,7 +38,7 @@ tools/
   bench-harness/ # 内存/帧率测量夹具（合成库生成器 + RSS 采样器）
 ```
 
-依赖方向强制单向：`app-ui → ui-viewmodels → {domain,index,store,library,pipeline} → platform(trait)`。
+依赖方向强制单向：`app-ui → ui-viewmodels → {domain,index,store,library,pipeline} → targets → platform(trait)`。
 **守卫测试**：`cargo-deny` bans 配置禁止 UI crate 直接依赖 media/phash/worker 实现 crate（红线「UI 进程不解码」的编译期守卫），并 ban 向量检索类依赖（faiss/usearch/torch 等，红线 D4）。
 
 ## 三、工具链约定
@@ -139,6 +140,87 @@ tools/bench-harness：
 
 > 实现备注：采样器防御了 GetProcessMemoryInfo 对已退出进程返回恒定残留值(32KB)的陷阱（叠加 GetExitCodeProcess 判活）；idle 提前退出=测量失败=红；store 新增 upsert_assets 批量与 for_each_asset 流式枚举（uuid 升序，禁全量物化）；ui-viewmodels 新增 catalog_loader(uuid→顺序 AssetId 装配)。踩坑已沉淀 bench-harness spec。
 
+### M8 多 IM 目标路由（2 周，落地 D13）📋 部分实现，未交付
+
+新增 `crates/targets`（纯 Rust，零 IO / 零平台依赖）：目标册加载/覆盖、窗口匹配打分、`TargetTracker` 粘性状态机、体检编排。
+`platform` 新增 trait：`WindowEnumerator` / `WindowActivator` / `ForegroundObserver`(WinEvent 钩子) / `ReadinessProbe`(P0 纯 Win32 + P1 UIA 独立 COM 线程 + 超时)，实现进 `win32.rs`，非 Windows 走零平台 import。
+`pipeline` 改造：`negotiate()` 吃 profile 有序格式回落；`PasteSession.previous_foreground` → `TargetBinding`；新增就绪度阶段与 `PasteFeedback` 收敛层；`PasteOutcome::Injected` 携带 `verified: bool`；auto-send 挪到链路外的独立可选步。
+
+先写的失败测试（按优先级分组）：
+
+P0 核心链路：
+- [x] `core_upload_path_never_synthesizes_enter`（**新红线**：核心上框注入序列绝无 0x0D）
+- [x] `unknown_exe_falls_back_to_generic_profile`（长尾兜底）
+- [x] `negotiate_honors_profile_ordered_format_fallback`（只吃文件的 IM 回落到 hdrop）
+- [x] `not_ready_no_conversation_never_injects`（就绪度否证即止，降级 CopiedOnly）
+- [x] `unknown_readiness_injects_but_marks_unverified`（Unknown 中间档 → verified:false）
+- [x] `probe_timeout_falls_back_to_unknown_not_notready`（**Mock 契约**：UIA 超时映射为 Inconclusive→verified:false；真实 UIA 超时未实现）
+- [x] `l3_selftest_reads_back_sentinel_and_cleans_up`（**仅 Mock 报告判定**：SelfTestReport 读回+清场+无 Enter；真实哨兵写入/读回/清场未实现）
+- [x] `custom_target_requires_l0_l2_before_enabling`（自定义目标未过体检不得启用）
+
+P1 精准/粘性（`TargetTracker` 纯函数状态机）：
+- [x] `eligible_target_foreground_rewrites_hot_target`（唯一改写路径）
+- [x] `unrelated_foreground_does_not_change_hot_target`（铁律 A）
+- [x] `own_panel_foreground_is_ignored_by_tracker`（自身不沾染）
+- [x] `hot_target_has_no_ttl` / `pinned_target_not_overwritten`（无衰减 / 图钉冻结）
+- [ ] `hot_target_survives_close_to_tray_and_reopen`（部分：同 profile 唯一候选可重绑；**仍未证明同一账号/会话/窗口实例**）
+- [x] `resolve_two_wechat_windows_returns_ambiguous`（多开不静默选择一个）
+- [ ] `readonly_conversation_detected_and_blocked`（UIA 只读会话：未实现）
+- [x] `foreground_drift_before_inject_aborts`（注入前最后一次前台校验，铁律 B）
+- [x] `health_grade_downgrades_to_yellow_when_readiness_unprobeable`（四色语义：黄≠绿，绿只来自 L3）
+- [x] `window_not_running_is_unknown_not_red`（回归：休眠=灰，不是 L2 失败的红）
+
+反馈完备性：
+- [x] `every_not_ready_reason_maps_to_nonempty_feedback`（枚举穷举防漏）
+- [x] `feedback_headline_contains_target_label`（回显目标名）
+- [x] `all_degraded_feedback_mentions_clipboard_copied`（先说已复制）
+
+P2 增强（不阻塞核心）：
+- [x] `auto_send_off_never_synthesizes_enter`（沿用 M6 序列断言，开关独立）
+
+载荷正确性（D14 根因回归守卫，2026-08-23 新增）：
+- [x] `hdrop_promotes_relative_paths_to_absolute`（相对路径必须被提升，不能原样写进 CF_HDROP）
+- [x] `hdrop_keeps_absolute_paths_and_terminates_list`（绝对路径不改写 + 双 NUL 终止布局）
+- [x] `hdrop_rejects_empty_path_list`
+- [x] `materialized_source_path_is_absolute_for_relative_library_root`（相对库 root + `/` 分隔 rel_path → 绝对且存在）
+- [x] `video_payload_keeps_absolute_file_path_and_no_inline_bytes`
+
+键盘焦点送进输入框（D21 `InputFocuser` 三级降级，2026-08-24 新增）：
+- [x] `focus_step_runs_between_activate_and_probe`（顺序 write → activate → focus_input → probe → 前台复核 → Ctrl+V）
+- [x] `focus_step_never_injects_keys_before_paste_chord`（焦点步只允许鼠标/UIA，绝不先合成按键）
+- [x] `focus_unavailable_still_injects_but_marks_unverified`（`Unavailable` 不降级为仅复制，注入并标 `verified:false`）
+- [x] `confirmed_focus_upgrades_inconclusive_probe_to_verified`（焦点确证可把 `Inconclusive` 升格为已验证）
+- [x] `uia_strict_aborts_when_focus_unavailable`（严格画像才在拿不到焦点时中止）
+- [x] `profile_anchor_is_forwarded_to_focuser_verbatim` / `profile_without_anchor_forwards_none`（锚点原样透传，缺锚点不臆造点击）
+- [x] `input_anchor_is_parsed_and_exposed_as_focus_anchor` / `profile_without_input_anchor_yields_no_click_target` / `out_of_range_anchor_is_rejected_instead_of_clamped` / `user_profile_can_retune_input_anchor`（`crates/targets` 锚点解析：越界报错不夹紧，用户覆盖可重调）
+
+`paste_sends` 画像能力（D18，粘贴即发送的 IM 不得触发发送）：
+- [x] `negotiate_skips_paste_sends_formats`（协商阶段就跳过会自发的格式）
+- [x] `paste_sends_falls_back_to_safe_format_when_available`（有安全格式则回落）
+- [x] `paste_sends_format_copies_without_injecting`（无安全格式则只复制，绝不注入）
+- [x] `paste_sends_feedback_tells_user_to_paste_manually`（提示用户手动粘贴）
+- [x] `unsupported_and_would_send_are_distinct_results`（「不支持」与「会自发」是两种结果，不能混为一谈）
+- [x] `paste_sends_is_per_kind_not_per_format`（D22 修订：`paste_sends` 按「类别 × 格式」声明，千牛只有视频 HDROP 会即发）
+- [x] `legacy_flat_paste_sends_still_covers_every_kind`（旧的扁平数组写法仍解析为「所有类别」）
+- [x] `builtin_image_route_prefers_file_reference_over_full_png`（微信/千牛图片首选 `files`，`png` 退为末位兜底）
+- [x] `builtin_qianniu_sends_only_video_hdrop_not_image_hdrop`
+
+> M8 另外新增并通过：`targeted_pipeline_order_is_write_activate_probe_validate_inject`、`selected_cold_target_reaches_exact_hwnd_and_never_synthesizes_enter`、`no_selected_target_still_copies_before_friendly_feedback`、`same_profile_windows_are_selected_by_unique_window_key`、`chip_shows_hot_target_without_user_click`、`ambiguous_expands_picker`、`fallback_target_requires_first_use_confirm`、`pin_toggle_freezes_chip`、`l3_selftest_sequence_contains_no_enter`。
+
+> 当前 M8 已跑通真实双目标闭环：微信 2163916（文件传输助手）的文本/图片/视频、千牛 721614（接待中心）的文本/图片都通过产品路径进入输入框，全程无 Enter，截图取证在 `Default_Project_probe/`。千牛的视频例外——`paste_sends=["files"]` 意味着粘贴文件会被千牛当场发出，按 D18 停在「只复制 + 提示手动 Ctrl+V」，这是为守住「不替用户发消息」而刻意保留的边界。上一轮「jpg/mp4 上不了框」的根因是 CF_HDROP 写了相对路径被 IM 静默丢弃（DECISIONS D14），已修复并补齐上述五条守卫；就绪策略同时翻转为「否证阻塞才不注入」（D15）。
+
+> 2026-08-24 补验：`asset-manager.exe`（`--library-root samples\library`）双击真实素材 `dog.jpg`，**全程不手工点击 IM 输入框**，微信与千牛都由 `Win32InputFocuser` 自行把键盘焦点送进输入框后落框——微信提示「已粘贴到 微信 (4.0) · 微信，请确认输入框内容」，千牛提示「已上框到 千牛 · tb940472610424-接待中心」，截图 `Default_Project_probe/r14-prod-wechat-1.png`、`r14-prod-qianniu-1.png` 确认素材停在输入框待发区、发送按钮未被触发。千牛的 mp4 因 `paste_sends=["files"]` 按 D18 停在「只复制 + 提示手动粘贴」，这是有意的边界。真实 PDD/Telegram（缺会话）、热键唤起、自定义目标持久化、L3 真实执行器和 WinEvent/PrintWindow 收口仍未完成，任务状态保持 `in_progress`。
+
+> 2026-08-25 修订（D22）：上条里「图片走 `CF_PNG`」的表述已过期。微信与千牛的图片主路径改为
+> `files`（`CF_HDROP` 交文件引用），`png` 退为末位兜底；真机实测端到端从 2061~3346ms 降到
+> 587~1693ms，对端进程 CPU 从 1859~2234ms 降到 156~312ms，取证 `r17-wx-prodpath-files.png`、
+> `r17-qn-prodpath-files.png`（输入框内是真缩略图，非文件名卡片）。「千牛 mp4 只复制不注入」仍成立，
+> 但依据收窄为「千牛**仅视频** HDROP 即发」，图片 HDROP 实测停在输入框。
+
+> 人工验证边界（见第六节）：真实 IM 的 exe/类名/标题/UIA 可用性、Electron 壳 PrintWindow 行为、WinEvent 常驻内存，均须本机实测（行动项 A5/A6），配方化后每次只落一行 TOML + 一次体检，而非发版重编。微信/千牛已取得本机实测部分，PDD/Telegram 仍待补。
+
+> 任务级分解（开工闸门 / T1–T10 交付物 / D1–D10 排期 / 风险回退 / DoD）见 Trellis 任务目录 `.trellis/tasks/08-23-m8-target-routing/`（`prd.md` / `design.md` / `implement.md`，原始推导底稿在 `research/m8-plan-draft.md`）。
+
 ## 五、性能与内存回归方案（D10 落地）
 
 1. **合成库生成器**：确定性生成 N 条元数据 + 渐变占位缩略图（无版权、可复现）；
@@ -151,6 +233,9 @@ tools/bench-harness：
 诚实清单，写进每个 release 的检查单：
 
 - 真实 IM 目标（微信/QQ/千牛/Telegram）的粘贴行为兼容矩阵；
+- D13 目标册 builtin 数值（exe/窗口类名/标题模板/可接受剪贴板格式/settle_ms）与各 IM 的 UIA 树可用性（Electron 壳是否需 `--force-renderer-accessibility`）；
+- 各 IM 自我会话的 L3 端到端自证（微信文件传输助手 / QQ 我的电脑 / Telegram Saved Messages）；
+- `PrintWindow + PW_RENDERFULLCONTENT` 对 Electron 壳的悬停快照表现（全黑/耗时/挂线程）；
 - UIPI：管理员权限窗口收不到 SendInput 的降级表现；
 - 多显示器/DPI 变化下的浮层定位；
 - Wayland 相关一切（v2 才涉及，见 `DECISIONS.md` 第四节归档）。
@@ -182,10 +267,15 @@ job ignore-tests:  不跑（真实注入类留本地）
 | v1 禁向量检索 | cargo-deny bans |
 | pHash 去重必做 | M3 duplicate_rejected 测试 |
 | auto-send 默认关 | M6 默认值快照 + 注入序列断言 |
+| 核心上框链路绝不合成回车（D13） | M8 `core_upload_path_never_synthesizes_enter` |
+| 不确定就降级仅复制（D13 铁律 B） | M8 `foreground_drift_before_inject_aborts` + `not_ready_no_conversation_never_injects` |
+| 上框止步输入框，粘贴不得触发发送（D18） | M8 `paste_sends_format_copies_without_injecting` + `negotiate_skips_paste_sends_formats` |
+| 焦点注入只用鼠标/UIA，不得先合成按键（D21） | M8 `focus_step_never_injects_keys_before_paste_chord` + `focus_step_runs_between_activate_and_probe` |
 | 焦点校验降级 | M6 mock 死窗口测试 |
 | 仅 Windows | CI 仅 windows runner + platform crate cfg 门 |
 
 ## 十、里程碑顺序与工期合计
 
-M0(0.5) → M1(1.5) → M2(1) → M3(1.5) → M4(1) → M5(2–3) → M6(1.5) → M7(1) ≈ **10–11 周**。
+M0(0.5) → M1(1.5) → M2(1) → M3(1.5) → M4(1) → M5(2–3) → M6(1.5) → M7(1) → M8(2) ≈ **12–13 周**。
 关键路径在 M5（瀑布流网格）；若 M5 spike 两周内达不到帧预算，回退方案：v1 先做等宽网格（布局数学简单一个数量级），变宽高比瀑布流降级为 v1.1。
+M8（多 IM 目标路由）依赖 A5/A6 的本机实测数据，纯逻辑部分（`crates/targets` 状态机与体检编排）可先行 TDD，平台探测与 builtin 数值待实测填充。

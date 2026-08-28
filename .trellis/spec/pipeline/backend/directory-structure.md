@@ -1,22 +1,31 @@
 # Directory Structure — pipeline
 
-## 布局（M6 目标形态，当前为占位）
+## 实际布局
 
 ```
 crates/pipeline/
-├── Cargo.toml    # deps: domain; platform(trait) —— 不依赖 win32 实现
-└── src/lib.rs
+├── Cargo.toml
+├── src/
+│   ├── lib.rs        # M6 兼容入口 + M8 targeted 编排 + 独立 send()
+│   ├── negotiate.rs  # AssetPayload × Profile 有序格式回落
+│   └── feedback.rs   # PasteFeedback 统一降级文案
+└── tests/
+    └── target_routing_spec.rs
 ```
 
-## 管线阶段（D8 锁定，不可重排）
+## M8 targeted 阶段（D13 锁定，不可重排）
 
 ```
-触发(双击/热键) → 资产解析 → 格式协商(CF_HDROP/PNG/DIB/text) → 剪贴板写入 → 焦点校验 → 合成 Ctrl+V → [开关] 合成 Enter
+资产载荷 → profile 有序格式协商 → 写剪贴板 → 激活 target.hwnd
+→ readiness 三态 → is_alive + foreground 最终复核 → 合成 Ctrl+V
 ```
 
-- 每阶段一个纯函数或 trait 边界；格式协商必须**表驱动**（资产类型 × 目标 profile → 剪贴板格式）。
-- auto-send 是管线末端独立布尔开关，**默认关**——任何重构不得把它并进主路径。
+- 每阶段经纯函数或 platform trait 边界；格式协商读取 `Profile.formats` 的有序列表。
+- 剪贴板必须先写：后续无目标、休眠、NotReady、激活失败都降级为“已复制”。
+- `paste_targeted()` 绝不调用 `send()`；自动发送只能由显式独立命令触发。
+- M6 的 `paste()` 与 `previous_foreground` 仍作为兼容入口保留，不得把其自动发送行为误写成 M8 产品路径。
 
-## 命名约定
+## 当前边界
 
-- 测试名对齐 TDD_PLAN M6 清单：`format_negotiation_table_image_video_text`、`focus_check_failure_degrades_to_copy_only`、`auto_send_flag_defaults_off` 等。
+- pipeline 不读取目标配置文件，不枚举窗口，不导入 `platform::win32`。
+- `AssetPayload` 由调用方提供。当前 app-ui 仍传演示文本，不代表真实图片/文件素材链路已交付。

@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/targets/backend/index.md", "reason": "M8 验收复核：纯逻辑/Mock 与真实 IM 的边界"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "检查真实 UIA、隐藏窗口与严格就绪是否遵守平台契约"}
+{"file": ".trellis/tasks/08-23-m8-target-routing/research/real-im-closed-loop.md", "reason": "检查真实微信/千牛结果是否被错误写成完全交付"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "复核 CF_HDROP 绝对路径契约与三条守卫测试是否落地"}
+{"file": ".trellis/spec/ui-viewmodels/backend/quality-guidelines.md", "reason": "复核素材物化路径绝对性守卫"}
+{"file": ".trellis/spec/platform/backend/quality-guidelines.md", "reason": "复核 InputFocuser 三级降级与 Unavailable 不降级是否有守卫测试对应"}
+{"file": ".trellis/spec/pipeline/backend/quality-guidelines.md", "reason": "复核焦点步位置、绝不先合成按键、paste_sends 只复制不注入"}
+{"file": "TDD_PLAN.md", "reason": "复核 M8 焦点与 paste_sends 条目、红线↔守卫映射是否与真机结论一致，未把未做项写成已交付"}

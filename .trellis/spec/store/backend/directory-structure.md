@@ -20,3 +20,12 @@ crates/store/
 
 - 表小写复数；FTS 触发器 `<table>_fts_{ai,au,ad}`；测试名行为化（`schema_version_rejects_newer_db_file`）。
 - 测试库一律 `Store::open_in_memory()` 或 tempfile 临时目录，禁止写死路径。
+
+## 库内文件布局（纯函数生成，禁手工拼接）
+
+- 原件：`objects/<uuid>/raw.<ext>`。
+- 缩略图：`thumbs/<shard1>/<shard2>/<uuid>.<ext>`。
+- 上框派生 PNG：`objects/<uuid>/paste.png`，由 `Store::paste_png_path(uuid)` 生成。
+  存在动机是千牛把 `CF_HDROP` 当「直接发送文件」，只有 `CF_PNG` 才落进输入框（DECISIONS D18/D20）。
+  由 worker 子进程解码产出，UI 只 `fs::read` 不解码；与 `raw.<ext>` 同目录，
+  删除资产目录即连带回收，**不引入额外 GC 语义**。

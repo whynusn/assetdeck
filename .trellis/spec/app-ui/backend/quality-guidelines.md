@@ -2,7 +2,7 @@
 
 ## 红线
 
-1. **依赖白名单**：只许依赖 ui-viewmodels + slint。deps_guard 测试（`ui_cargo_toml_has_no_decode_layer_deps`）禁止 media/phash/worker 出现在 Cargo.toml——「UI 进程不解码」的编译期守卫之一。
+1. **依赖白名单**：只许依赖 ui-viewmodels + slint。deps_guard 测试（`ui_cargo_toml_has_no_decode_layer_deps`）禁止 media/phash/worker 出现在 Cargo.toml。
 2. **`.slint` 不写业务**：过滤/排序/状态迁移全在 VM；.slint 只绑定属性与转发回调。
 3. **空闲 RSS ≤100MB（D10）**：本 crate 是预算的直接责任人——M0 实测空窗 WorkingSet 77.8MB，新增组件/渲染特性时必须复核。
 
@@ -13,5 +13,7 @@
 
 ## Code Review 清单
 
-- [ ] 新依赖是否过 cargo-deny licenses（GPLv3 警示：Slint 社区版，A1 未裁决）？
-- [ ] main.rs 是否仍无业务逻辑？
+- [ ] 新依赖是否过 cargo-deny licenses（GPLv3 警示：Slint 社区版，A1 未裁决）。
+- [ ] main.rs 是否仍无业务逻辑。
+- [ ] 是否把真实素材载荷传给了粘贴管线（当前仅演示文本）。
+- [ ] 是否把 Win32 具体实现留在 VM crate（应迁回本二进制装配）。
