@@ -304,3 +304,19 @@ fn remove_clears_tombstone_membership() {
     assert!(!index.is_deleted(AssetId(3)));
     assert!(!index.unmark_deleted(AssetId(3)));
 }
+
+#[test]
+fn trash_filter_evaluates_to_tombstone_set() {
+    let mut index = idx();
+    index.mark_deleted(AssetId(2));
+    index.insert_as_deleted(&asset_of(9, "ghost", Some(CAT_PHOTO), vec![TAG_RED], 999));
+    assert_eq!(ids(&index.evaluate(&Filter::Trash)), vec![2, 9]);
+    // Not(Trash) = 活集（all 天然不含标删行，补集语义成立）。
+    assert_eq!(
+        ids(&index.evaluate(&Filter::Not(Box::new(Filter::Trash)))),
+        vec![1, 3, 4, 5]
+    );
+    // 恢复后自动退出回收站视图。
+    index.unmark_deleted(AssetId(2));
+    assert_eq!(ids(&index.evaluate(&Filter::Trash)), vec![9]);
+}

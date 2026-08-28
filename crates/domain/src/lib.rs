@@ -49,6 +49,9 @@ pub enum Filter {
     /// 文件名子串匹配（大小写不敏感）。v1 由 index 内存扫描实现；
     /// ≥3 字符的查全量检索走 Store FTS5（SearchProvider 统一入口）。
     NameContains(String),
+    /// D46 回收站视图：求值结果 = deleted 位图（与活集互斥，D47 语义下
+    /// 浏览/计数/搜索全走活集，只有显式切到此过滤器才见回收站行）。
+    Trash,
     Not(Box<Filter>),
     AllOf(Vec<Filter>),
     AnyOf(Vec<Filter>),

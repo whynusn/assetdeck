@@ -194,6 +194,27 @@ impl RealAssetResolver {
         Ok(self.store.search(query, limit)?)
     }
 
+    /// 行号 → uuid（子命令派发 `--cmd trash --uuid …` 与属性面板寻址用）。
+    pub fn uuid_of(&self, id: AssetId) -> Option<&str> {
+        self.uuids.get(id.0 as usize).map(|s| s.as_str())
+    }
+
+    /// 行号对应素材的元数据（属性面板数据源）。行被彻底删除后返回 None。
+    pub fn meta_of(&self, id: AssetId) -> Result<Option<store::AssetMeta>> {
+        match self.uuid_of(id) {
+            Some(uuid) => Ok(self.store.get_asset(uuid)?),
+            None => Ok(None),
+        }
+    }
+
+    /// 素材正本的绝对路径（属性面板「路径」字段，D14 教训：展示绝对路径）。
+    pub fn absolute_path(&self, id: AssetId) -> Option<PathBuf> {
+        let uuid = self.uuid_of(id)?;
+        let meta = self.store.get_asset(uuid).ok().flatten()?;
+        let joined = self.root.join(meta.rel_path);
+        Some(std::path::absolute(&joined).unwrap_or(joined))
+    }
+
     /// 浏览用缩略图的绝对路径；文件不存在时返回 `None`（瓦片回落纯色）。
     ///
     /// 只回路径不读字节：渲染端按需装载并自己管住驻留，避免「VM 存编码字节 +

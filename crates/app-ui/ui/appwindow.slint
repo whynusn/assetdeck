@@ -26,6 +26,10 @@ export global UiEnums {
     out property <int> card-kind-video: 1;
     out property <int> card-kind-text: 2;
     out property <int> card-kind-other: 3;
+    // D48 底部操作条形态：隐藏 / 多选（Normal）/ 回收站视图。
+    out property <int> bar-hidden: 0;
+    out property <int> bar-multi: 1;
+    out property <int> bar-trash: 2;
 }
 
 export struct TileData {
@@ -42,6 +46,8 @@ export struct TileData {
     kind: int,
     // 文本类素材的预览（首行若干字符）；其余类别为空串。
     preview: string,
+    // D47 选中标记：勾选角标 + accent 描边由它驱动。
+    selected: bool,
 }
 
 export struct SettingRowData {
@@ -115,12 +121,70 @@ export component AppWindow inherits Window {
     property <length> min-sidebar-width: 150px;
     property <length> max-sidebar-width: 420px;
 
+    // —— D47/D48 选区、菜单与弹窗状态（全部壳层驱动，视图无业务）——
+    in property <int> selection-bar: 0; // UiEnums.bar-*
+    in property <string> selection-text: ""; // 「已选 N 张」
+    in property <bool> select-mode-active: false; // 顶栏按钮高亮
+    in property <int> trash-count: 0; // 侧栏回收站角标（0 隐藏数字）
+    in property <bool> context-menu-open: false;
+    in property <length> context-menu-x: 0px;
+    in property <length> context-menu-y: 0px;
+    in property <string> context-menu-title: ""; // 目标摘要（「3 项」或文件名）
+    in property <bool> rename-open: false;
+    in property <string> rename-current: "";
+    in property <string> rename-error: "";
+    in property <bool> properties-open: false;
+    in property <string> props-name: "";
+    in property <string> props-size: "";
+    in property <string> props-bytes: "";
+    in property <string> props-created: "";
+    in property <string> props-path: "";
+    // 清空回收站的二段确认（与「清空素材库」DangerButton 同模式）。
+    in property <bool> empty-trash-armed: false;
+    in property <string> empty-trash-text: "清空回收站";
+    // 「移动到分类」弹层：现有分类 + 「待分类」兜底项 + 新名输入框。
+    in property <bool> move-menu-open: false;
+    in property <string> move-error: "";
+
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
     callback viewport-resized();
     callback double-clicked(int);
     callback tile-clicked(int);
-    callback filter-selected(int); // -1 = 全部，其余为分类号
+    // D47 选区交互：瓦片 pointer-event 拆件（up 左键带修饰 = tile-modified-click；
+    // up 右键 = tile-right-click 带瓦片绝对坐标供菜单定位）。坐标是窗口逻辑像素。
+    callback tile-modified-click(int, bool, bool);
+    callback tile-right-click(int, length, length);
+    // 顶栏「选择」按钮 / 操作条「取消」/ Esc 共用的模式开关（壳层判方向）。
+    callback select-mode-toggled();
+    // 操作条动作：全选 / 移动到分类 / 删除 / 恢复 / 彻底删除 / 清空回收站。
+    callback select-all-requested();
+    callback move-selection-requested();
+    callback delete-selection-requested();
+    // 库写子命令（trash/restore/purge/empty-trash/rename/move-category）收尾信号：
+    // 子进程线程只能持 Weak，收尾一律经本回调弹回 UI 线程处理（同 export-finished 模式）。
+    callback libcmd-finished(bool, string, string);
+    callback restore-selection-requested();
+    callback purge-selection-requested();
+    callback empty-trash-requested();
+    // 菜单动作回传（id 编码 0=复制..4=删除，与 selection::MenuAction 对齐）；
+    // 移动到分类的两级目的地（现有分类名或新名，壳层校验）。
+    callback menu-action(int);
+    callback move-to-category(string);
+    callback context-menu-dismissed();
+    // 重命名弹窗确认（新名；壳层 trim 校验非空/无路径分隔）与取消。
+    callback rename-confirmed(string);
+    callback rename-canceled();
+    callback properties-folder-requested();
+    callback properties-closed();
+    // Ctrl+A / Esc 键盘通道：FocusScope 捕获后转发，业务判定在壳层。
+    callback key-a-pressed();
+    callback escape-pressed();
+    // 启动时给 key-root 上焦：Slint 不为子元素生成 get_* 访问器，聚焦只能
+    // 在 .slint 内自理（Rust 侧 invoke，处理器里调元素方法）。
+    callback key-focus-requested();
+    key-focus-requested => { key-root.focus(); }
+    callback filter-selected(int); // -1 = 全部，-2 = 检索结果态，-3 = 回收站，其余为分类号
     callback search-changed(string);
     callback target-chip-clicked();
     callback target-choice-selected(string);
@@ -165,13 +229,32 @@ export component AppWindow inherits Window {
     }
 
     // overlay 宿主：填满窗口。内层先放常规布局，再叠绝对定位浮层。
-    Rectangle {
-        // 作为 Window 的根子元素，会被自动拉伸填满窗口，无需再写 width/height:100%。
-        // 关键：绝不能写 height:100%/width:100%——那会把本元素的布局 max 钉成
-        // “当前窗口尺寸”，于是 Slint 反过来用它约束窗口最大可拖尺寸，导致纵向
-        // 拉不动。改用显式的大 max，让窗口在两个方向都能自由拖拽。
-        max-height: 100000px;
-        max-width: 100000px;
+    // D47 键盘通道：根 FocusScope 兜住 Esc（关菜单/弹窗/退多选）与 Ctrl+A
+    // （全选当前视图）。capture 阶段父先于子：检索框/输入框编辑时让路，
+    // Ctrl+A 不误伤文本全选。壳层启动时 focus() 一次（见 main.rs）。
+    key-root := FocusScope {
+        focus-on-click: false;
+
+        capture_key_pressed(event) => {
+            // Ctrl+A：仅在没有任何文本输入持焦时截获（否则留给输入框全选文本）。
+            if (event.modifiers.control && (event.text == "a" || event.text == "A")
+                && !search-input.has-focus) {
+                root.key-a-pressed();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.escape-pressed();
+                return accept;
+            }
+            return reject;
+        }
+
+        Rectangle {
+        // FocusScope 不是 Window，子元素不会被自动拉伸：显式铺满。
+        // （外层 Rectangle 的「勿写 100%」告诫只针对 Window 根——那会反向
+        // 钳制窗口可拖尺寸；这里几何由 FocusScope 决定，100% 是安全的。）
+        width: 100%;
+        height: 100%;
 
         VerticalLayout {
             // 顶部工具栏：标题/总数 + 检索器 + 设置入口。
@@ -214,6 +297,57 @@ export component AppWindow inherits Window {
                     // 弹性占位，把检索器与设置推到最右。
                     Rectangle {
                         horizontal-stretch: 1;
+                    }
+
+                    // D47 顶栏「选择」：进入/退出多选模式的显式入口。
+                    select-anchor := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 62px;
+                        height: 30px;
+
+                        select-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.select-mode-toggled();
+                            }
+                        }
+
+                        Rectangle {
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: root.select-mode-active ? Theme.accent
+                                : select-touch.has-hover ? Theme.line-strong : Theme.line;
+                            background: root.select-mode-active ? Theme.accent-soft
+                                : select-touch.pressed ? Theme.bg-raised-press
+                                : select-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
+                            animate background, border-color { duration: 100ms; }
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 5px;
+
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    commands: root.select-mode-active ? Glyph.close : Glyph.check;
+                                    tint: root.select-mode-active ? Theme.accent : Theme.text-2;
+                                    width: 12px;
+                                    height: 12px;
+                                }
+                                select-label := Text {
+                                    text: root.select-mode-active ? "取消" : "选择";
+                                    color: root.select-mode-active ? Theme.accent : Theme.text-2;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Tooltip {
+                            text: @markdown("多选模式：期间单击=选中/取消，上框动作屏蔽（Esc 退出）");
+                        }
                     }
 
                     Icon {
@@ -524,6 +658,57 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // D46 回收站入口（侧栏系统分类项）：选中 = 专用 Trash 视图。
+                        Rectangle {
+                            height: 36px;
+                            background: root.selected-category == -3 ? Theme.accent-soft
+                                : (trash-touch.has-hover ? Theme.bg-raised : transparent);
+                            animate background { duration: 100ms; }
+
+                            Rectangle {
+                                x: 0;
+                                width: 3px;
+                                height: parent.height;
+                                background: root.selected-category == -3 ? Theme.accent : transparent;
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 12px;
+                                spacing: 6px;
+
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.trash;
+                                    tint: root.selected-category == -3 ? Theme.accent : Theme.text-3;
+                                    width: 13px;
+                                    height: 13px;
+                                }
+
+                                Text {
+                                    text: "回收站";
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    color: root.selected-category == -3 ? Theme.text : Theme.text-2;
+                                    font-size: 12px;
+                                }
+
+                                Text {
+                                    text: root.trash-count > 0 ? root.trash-count : "";
+                                    vertical-alignment: center;
+                                    color: Theme.text-3;
+                                    font-size: 10px;
+                                }
+                            }
+
+                            trash-touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.filter-selected(-3);
+                                }
+                            }
+                        }
+
                         Rectangle {
                             height: 1px;
                             background: Theme.line;
@@ -737,27 +922,79 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 边框覆盖层：hover 描一圈淡边，最近上框的那张描 accent。
+                            // 边框覆盖层：hover 描一圈淡边，选中描 accent（多选/回收站勾选态），
+                            // 最近上框的那张描 accent。选中优先于 hover。
                             Rectangle {
                                 width: 100%;
                                 height: 100%;
                                 background: transparent;
                                 border-radius: Theme.radius-lg;
-                                border-width: tile.asset-id == root.active-asset-id ? 2px
+                                border-width: tile.selected || tile.asset-id == root.active-asset-id ? 2px
                                     : tile-touch.has-hover ? 1px
                                     : 0px;
-                                border-color: tile.asset-id == root.active-asset-id
+                                border-color: tile.selected || tile.asset-id == root.active-asset-id
                                     ? Theme.accent
                                     : Theme.line-strong;
                             }
 
+                            // 左上勾选角标：选中即现（多选模式与常态 Ctrl 选共用）。
+                            if tile.selected: Rectangle {
+                                x: 6px;
+                                y: 6px;
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: Theme.accent;
+
+                                Icon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.check;
+                                    tint: white;
+                                    width: 12px;
+                                    height: 12px;
+                                }
+                            }
+
                             tile-touch := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
+                                // D47：按下的那一刻就按住修饰键 → 本次抬笔的
+                                // clicked/double-clicked（上框链路）整体作废。
+                                // 判定点在 Down（clicked 先于 Up 的 pointer-event 触发，
+                                // 事后挡不住）。无修饰路径 mod-on-down 恒 false，
+                                // 上框信号逐字照发（红线 B：现状不变）。
+                                property <bool> mod-on-down: false;
+
                                 clicked => {
-                                    root.tile-clicked(tile.asset-id);
+                                    if (!self.mod-on-down) {
+                                        root.tile-clicked(tile.asset-id);
+                                    }
                                 }
                                 double-clicked => {
-                                    root.double-clicked(tile.asset-id);
+                                    if (!self.mod-on-down) {
+                                        root.double-clicked(tile.asset-id);
+                                    }
+                                }
+                                // D47/D48：带修饰的左键抬笔走 modified-click、右键抬笔
+                                // 走 right-click；无修饰左键仍由 clicked/double-clicked
+                                // 承载（常态上框链路一字不动）。多选模式的普通单击
+                                // 由壳层在 tile-clicked 路径里判模式改走选区切换。
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                                        self.mod-on-down = event.modifiers.control || event.modifiers.shift;
+                                    }
+                                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                        root.tile-right-click(tile.asset-id,
+                                            self.absolute-position.x + self.mouse-x,
+                                            self.absolute-position.y + self.mouse-y);
+                                    }
+                                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                                        self.mod-on-down = false;
+                                        if (event.modifiers.control || event.modifiers.shift) {
+                                            root.tile-modified-click(tile.asset-id,
+                                                event.modifiers.control, event.modifiers.shift);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -804,8 +1041,12 @@ export component AppWindow inherits Window {
         }
 
         // 点外部收起：仅在有浮层打开时铺满窗口拦截点击。
+        // D48 扩充：右键菜单/移动到分类/重命名/属性弹窗同样吃这层 dismiss
+        // （壳层在 overlay-dismissed 里按开合优先级逐个关）。
         if root.settings-open || root.import-menu-open
-            || root.target-mode == UiEnums.target-mode-choose: TouchArea {
+            || root.target-mode == UiEnums.target-mode-choose
+            || root.context-menu-open || root.move-menu-open
+            || root.rename-open || root.properties-open: TouchArea {
             width: 100%;
             height: 100%;
             clicked => {
@@ -1032,5 +1273,349 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        // —— D48 右键菜单浮层：锚右键命中点，坐标由壳层夹取（贴边不越窗）——
+        if root.context-menu-open: Rectangle {
+            x: Math.min(root.context-menu-x, root.width - 220px);
+            y: Math.min(root.context-menu-y, root.height - 260px);
+            width: 220px;
+            height: menu-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            menu-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                if root.context-menu-title != "": Text {
+                    text: root.context-menu-title;
+                    color: Theme.text-3;
+                    font-size: 10px;
+                    x: 4px;
+                    width: parent.width - 8px;
+                    overflow: elide;
+                }
+
+                MenuItem {
+                    glyph: Glyph.paste;
+                    text: "复制";
+                    detail: "素材进剪贴板，绝不代发";
+                    clicked => {
+                        root.menu-action(0);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.folder;
+                    text: "移动到分类";
+                    clicked => {
+                        root.menu-action(1);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.file-text;
+                    text: "重命名";
+                    clicked => {
+                        root.menu-action(2);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.info;
+                    text: "属性";
+                    clicked => {
+                        root.menu-action(3);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.trash;
+                    text: "删除";
+                    detail: "进回收站，可恢复";
+                    clicked => {
+                        root.menu-action(4);
+                    }
+                }
+            }
+        }
+
+        // —— 「移动到分类」弹层：现有分类逐条 + 输入新名新建（统一归入同款交互）——
+        if root.move-menu-open: Rectangle {
+            x: Math.max(0px, (root.width - 280px) / 2);
+            y: 120px;
+            width: 280px;
+            height: move-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            move-layout := VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+
+                Text {
+                    text: "移动到分类";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                // 现有分类：横向滚动太挤，直接纵向列（分类数量级 <20）。
+                ScrollView {
+                    max-height: 200px;
+                    viewport-width: self.visible-width;
+                    viewport-height: move-cats.preferred-height;
+
+                    move-cats := VerticalLayout {
+                        spacing: 4px;
+                        for name[i] in root.categories: Rectangle {
+                            visible: i > 0; // 「全部」不是目的地
+                            height: 30px;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            border-color: move-cat-touch.has-hover ? Theme.accent : Theme.line;
+                            background: move-cat-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
+
+                            Text {
+                                x: 10px;
+                                text: name;
+                                color: Theme.text-2;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            move-cat-touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.move-to-category(name);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.move-error != "": Text {
+                    text: root.move-error;
+                    color: Theme.danger;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    move-name := LineEdit {
+                        placeholder-text: "输入新分类名即新建";
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "新建并移入";
+                        primary: true;
+                        clicked => {
+                            root.move-to-category(move-name.text);
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— D47/D46 底部操作条：多选与回收站两种形态 ——
+        if root.selection-bar != UiEnums.bar-hidden: Rectangle {
+            y: root.height - self.height - 16px;
+            x: (root.width - self.width) / 2;
+            width: 560px;
+            height: 48px;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: root.selection-text;
+                    color: Theme.text;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                // 条件子项直接进布局：按钮自带 preferred 宽，无需再包一层。
+                if root.selection-bar == UiEnums.bar-multi: Button {
+                    text: "全选";
+                    clicked => { root.select-all-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-multi: Button {
+                    text: "移动到分类";
+                    clicked => { root.move-selection-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-multi: Button {
+                    text: "删除";
+                    clicked => { root.delete-selection-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-multi: Button {
+                    text: "取消";
+                    clicked => { root.select-mode-toggled(); }
+                }
+
+                if root.selection-bar == UiEnums.bar-trash: Button {
+                    text: "全选";
+                    clicked => { root.select-all-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-trash: Button {
+                    text: "恢复";
+                    clicked => { root.restore-selection-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-trash: Button {
+                    text: "彻底删除";
+                    clicked => { root.purge-selection-requested(); }
+                }
+                if root.selection-bar == UiEnums.bar-trash: DangerButton {
+                    text: root.empty-trash-text;
+                    armed: root.empty-trash-armed;
+                    clicked => { root.empty-trash-requested(); }
+                }
+            }
+        }
+
+        // —— 重命名弹窗 ——
+        if root.rename-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: rename-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            rename-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: "重命名";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                rename-input := LineEdit {
+                    text: root.rename-current;
+                    placeholder-text: "新名称（只改显示名，不动磁盘路径）";
+                }
+
+                if root.rename-error != "": Text {
+                    text: root.rename-error;
+                    color: Theme.danger;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "取消";
+                        clicked => {
+                            root.rename-canceled();
+                        }
+                    }
+                    Button {
+                        text: "保存";
+                        primary: true;
+                        clicked => {
+                            root.rename-confirmed(rename-input.text);
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— 属性弹窗（R13：尺寸/大小/导入时间/绝对路径）——
+        if root.properties-open: Rectangle {
+            x: (root.width - 420px) / 2;
+            y: 120px;
+            width: 420px;
+            height: props-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            props-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.props-name;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                // 两列网格：左标签右值。空值（如视频无宽高）显示 —。
+                VerticalLayout {
+                    spacing: 4px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "尺寸"; width: 70px; color: Theme.text-3; font-size: 11px; }
+                        Text { text: root.props-size; horizontal-stretch: 1; color: Theme.text; font-size: 11px; }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "大小"; width: 70px; color: Theme.text-3; font-size: 11px; }
+                        Text { text: root.props-bytes; horizontal-stretch: 1; color: Theme.text; font-size: 11px; }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "导入时间"; width: 70px; color: Theme.text-3; font-size: 11px; }
+                        Text { text: root.props-created; horizontal-stretch: 1; color: Theme.text; font-size: 11px; }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "路径"; width: 70px; color: Theme.text-3; font-size: 11px; }
+                        Text { text: root.props-path; horizontal-stretch: 1; color: Theme.text; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button { text: "打开所在文件夹"; clicked => { root.properties-folder-requested(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "关闭"; clicked => { root.properties-closed(); } }
+                }
+            }
+        }
     }
+    } // key-root FocusScope 收口
 }

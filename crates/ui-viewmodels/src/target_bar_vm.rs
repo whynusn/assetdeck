@@ -374,6 +374,30 @@ impl TargetRoutingVm {
         self.tracker.hot()
     }
 
+    /// D48 右键菜单「复制」：只写剪贴板，绝不激活目标/注入 Ctrl+V——
+    /// 与上框链路共享格式协商（negotiate_detailed），语义止步「素材进剪贴板」。
+    /// 「粘贴即发送」格式（千牛类）照写：本路径不注入，用户自行 Ctrl+V 时
+    /// 的发送与否是目标语义，不是本应用的注入行为。
+    pub fn copy_to_clipboard(
+        &self,
+        payload: &AssetPayload<'_>,
+        deps: &mut TargetPipelineDeps<'_>,
+    ) -> Result<(), String> {
+        let profile = self
+            .tracker
+            .hot()
+            .and_then(|binding| self.profiles.get(&binding.id))
+            .unwrap_or_else(|| self.profiles.generic());
+        let clipboard_payload = match pipeline::negotiate_detailed(payload, profile) {
+            pipeline::Negotiated::Safe { payload, .. }
+            | pipeline::Negotiated::WouldSend { payload, .. } => payload,
+            pipeline::Negotiated::Unsupported => return Err("素材类型无可用剪贴板格式".to_string()),
+        };
+        deps.clipboard
+            .write(&clipboard_payload)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn paste(
         &self,
         payload: &AssetPayload<'_>,

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use slint::{ModelRc, Timer, TimerMode, VecModel};
 use ui_viewmodels::grid_vm::LibraryGridVm;
+use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::{
     AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, DarkThemeProvider,
     FacetIndex, FacetSearchProvider, Filter, LightThemeProvider, RealAssetResolver, SearchProvider,
@@ -156,6 +157,331 @@ fn poll_targets_wakeup(handle: slint::Weak<AppWindow>) -> impl Fn() + Send + Syn
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// D46/D47/D48 CRUD 壳层协作件：选区同步 + 库写子命令派发 + 回收站视图。
+// ---------------------------------------------------------------------------
+
+/// CRUD 动作的共享上下文（与 handlers 同生命周期，全部 UI 线程访问）。
+/// 集中一处，避免每个 handler 抄一遍五元组 clone。
+#[derive(Clone)]
+struct CrudCtx {
+    ui: slint::Weak<AppWindow>,
+    vm: Rc<RefCell<LibraryGridVm>>,
+    resolver: ThumbSource,
+    grid: Rc<GridCtx>,
+    filter_categories: Rc<RefCell<Vec<String>>>,
+    current_filter: Rc<RefCell<Filter>>,
+    filter_label: Rc<RefCell<slint::SharedString>>,
+    library_root: Option<String>,
+    importing: Arc<AtomicBool>,
+    thumb_cache: Rc<RefCell<ThumbCache>>,
+}
+
+/// 回收站视图的哨兵分类号（与 appwindow.slint 侧栏条目 -3 对应）。
+const TRASH_CATEGORY: i32 = -3;
+
+impl CrudCtx {
+    fn is_trash_view(&self) -> bool {
+        matches!(*self.current_filter.borrow(), Filter::Trash)
+    }
+
+    /// 当前过滤器（复制出来，避免长持借用）。
+    fn filter(&self) -> Filter {
+        self.current_filter.borrow().clone()
+    }
+
+    /// 菜单/操作条动作的目标 id 集：选区优先，空则回退右键命中的那张。
+    fn action_targets(&self, hit: Option<AssetId>) -> Vec<AssetId> {
+        let vm = self.vm.borrow();
+        let ids = vm.selection_ids();
+        if !ids.is_empty() {
+            return ids;
+        }
+        hit.into_iter().collect()
+    }
+
+    /// 把选区中的 AssetId 翻成 uuid（库写子命令的入参）。解析不出来的跳过。
+    fn uuids_of(&self, ids: &[AssetId]) -> Vec<String> {
+        let binding = self.resolver.borrow();
+        let Some(resolver) = binding.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(uuid) = resolver.uuid_of(*id) {
+                out.push(uuid.to_string());
+            }
+        }
+        out
+    }
+
+    /// 按当前过滤器刷新视图：列表重算、计数、回收站角标、滚动回顶、瓦片重建，
+    /// 外加选区栏形态。过滤器切换（含回收站进出）的唯一出口。
+    fn sync_view_after_filter(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let (total, trash_count) = {
+            let vm = self.vm.borrow();
+            (vm.total(), vm.trash_count())
+        };
+        ui.set_content_y(0.0);
+        sync_counts(&ui, total, self.resolver.borrow().is_some());
+        ui.set_trash_count(trash_count as i32);
+        self.grid.sync();
+        self.sync_selection();
+    }
+
+    /// 选区/模式变化统一出口：同步顶栏高亮、操作条形态与文案，并刷瓦片勾选态。
+    fn sync_selection(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let vm = self.vm.borrow();
+        let multi = vm.multi_mode();
+        let trash = self.is_trash_view();
+        let count = vm.selected_count();
+        ui.set_select_mode_active(multi);
+        ui.set_selection_bar(if trash {
+            ui_enums::BAR_TRASH
+        } else if multi {
+            ui_enums::BAR_MULTI
+        } else {
+            ui_enums::BAR_HIDDEN
+        });
+        ui.set_selection_text(
+            if trash {
+                if count > 0 {
+                    format!("回收站 · 已选 {count} 张")
+                } else {
+                    "回收站（删除的素材在这里，可恢复或彻底删除）".to_string()
+                }
+            } else {
+                format!("已选 {count} 张")
+            }
+            .into(),
+        );
+        drop(vm);
+        self.grid.sync();
+    }
+
+    /// 切换过滤器（侧栏分类 / 回收站入口共用）：写 current_filter + VM 重算 +
+    /// 清检索框 + 重钉侧栏高亮与顶栏后缀。与 on_filter_selected 原路径同构。
+    fn apply_filter(&self, f: Filter, label: slint::SharedString) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        *self.current_filter.borrow_mut() = f.clone();
+        *self.filter_label.borrow_mut() = label.clone();
+        {
+            let mut vm = self.vm.borrow_mut();
+            vm.set_filter(&f);
+        }
+        // 切视图清掉检索框：搜索与分类/回收站视图不叠加，避免「回收站里搜出
+        // 正常素材」的口径混乱（R2：回收站不占搜索结果）。
+        ui.set_search_text("".into());
+        // 高亮哨兵：-1=全部，-3=回收站，分类=其 0 基下标（与侧栏条目一致）。
+        ui.set_selected_category(match &f {
+            Filter::All => -1,
+            Filter::Trash => TRASH_CATEGORY,
+            Filter::InCategory(cat) => cat.0 as i32,
+            _ => -2,
+        });
+        ui.set_filter_label(label);
+        self.sync_view_after_filter();
+    }
+
+    /// 派发库写子命令（单写者纪律：app-ui 不直开 meta.db，见 deps_guard）。
+    /// 完成后经 `libcmd-finished` 回调弹回 UI 线程收尾（与导入管线同模式：
+    /// 回调闭包只许 Fn+Send，故 Rc 型上下文一律经 ui 句柄转接，不能直捕）。
+    fn spawn_lib_cmd(&self, action: &str, uuids: &[String], value: Option<&str>, label: &str) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.importing.load(Ordering::SeqCst) {
+            show_notice(
+                &ui,
+                TargetNoticeTone::Warning,
+                "正在导入/生成缩略图，请等进度条结束后再操作".to_string(),
+            );
+            return;
+        }
+        if uuids.is_empty() && action != "empty-trash" {
+            return;
+        }
+        let root = self
+            .library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        let mut args: Vec<String> = vec!["--cmd".into(), action.into(), "--library".into(), root];
+        for uuid in uuids {
+            args.push("--uuid".into());
+            args.push(uuid.clone());
+        }
+        if let Some(value) = value {
+            args.push("--value".into());
+            args.push(value.to_string());
+        }
+        ui.set_progress_visible(true);
+        ui.set_progress_percent(0.0);
+        ui.set_progress_text(label.into());
+        logging::info!(
+            "库写子命令 action={action} items={} label={label}",
+            uuids.len()
+        );
+
+        let weak = ui.as_weak();
+        let weak_progress = weak.clone();
+        let label_owned = label.to_string();
+        let weak_done = weak.clone();
+        let label_done = label_owned.clone();
+        let mut task = ChildTask::new(helper_exe("sample-library.exe"), args);
+        if let Some(dir) = logging::logs_dir() {
+            task = task
+                .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
+                .with_env("DSH_LOG_LEVEL", logging::current_level().as_str());
+        }
+        let _ = task
+            .with_progress(move |done, total| {
+                let weak = weak_progress.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_progress_visible(true);
+                        ui.set_progress_percent(if total > 0 {
+                            done as f32 / total as f32
+                        } else {
+                            0.0
+                        });
+                    }
+                });
+            })
+            .with_finished(move |success, message| {
+                let weak = weak_done.clone();
+                let label = label_done.clone();
+                let message = message.trim().to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_libcmd_finished(success, message.into(), label.into());
+                    }
+                });
+            })
+            .run_in_background();
+    }
+
+    /// 子命令收尾（libcmd-finished 的落点）：整库重载与库状态对齐，随后重钉
+    /// 当前视图高亮、刷新选区栏。失败时错误原文上通知条——本地即时反馈与库
+    /// 已分叉，重载后差异自然收敛。
+    fn reload_after_cmd(&self, success: bool, message: &str, label: &str) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        ui.set_progress_visible(false);
+        let root = self
+            .library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
+            Ok((index, resolver)) => {
+                let names = resolver.category_names();
+                let counts = category_counts_for(&resolver, &names);
+                apply_categories(&ui, &self.filter_categories, &names, &counts);
+                let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
+                new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
+                if let Ok(aspects) = resolver.aspects() {
+                    new_vm.set_aspects(aspects);
+                }
+                *self.vm.borrow_mut() = new_vm;
+                *self.resolver.borrow_mut() = Some(resolver);
+                self.thumb_cache.borrow_mut().clear();
+                // apply_categories 把高亮拍回「全部」，按当前过滤器重钉。
+                self.apply_filter(self.filter(), self.filter_label.borrow().clone());
+            }
+            Err(error) => {
+                show_notice(&ui, TargetNoticeTone::Error, format!("库刷新失败: {error}"));
+                return;
+            }
+        }
+        if success {
+            show_notice(&ui, TargetNoticeTone::Success, format!("{label}完成"));
+        } else {
+            let detail = if message.is_empty() {
+                String::new()
+            } else {
+                format!("：{message}")
+            };
+            show_notice(&ui, TargetNoticeTone::Error, format!("{label}失败{detail}"));
+        }
+    }
+}
+
+/// 属性弹窗的字段组装（R13：尺寸/大小/导入时间/绝对路径）。
+fn fill_properties(ui: &AppWindow, resolver: &RealAssetResolver, id: AssetId) -> bool {
+    let Ok(Some(meta)) = resolver.meta_of(id) else {
+        return false;
+    };
+    ui.set_props_name(meta.file_name.clone().into());
+    ui.set_props_size(
+        match (meta.width, meta.height) {
+            (Some(w), Some(h)) => format!("{w} × {h} px"),
+            _ => "—（尚未探测）".to_string(),
+        }
+        .into(),
+    );
+    ui.set_props_bytes(human_size(meta.size_bytes).into());
+    ui.set_props_created(format_timestamp(meta.imported_at).into());
+    ui.set_props_path(
+        resolver
+            .absolute_path(id)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| meta.rel_path.clone())
+            .into(),
+    );
+    true
+}
+
+/// 字节数 → 人话（属性面板用；不进热路径）。
+fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes.max(0) as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
+/// unix 秒 → `2026-08-28 17:03` （本地时区近似：epoch + 8h 东八区约定，
+/// 与素材库写入侧 created_at 的产出方式一致，见 store 导入路径）。
+fn format_timestamp(secs: i64) -> String {
+    if secs <= 0 {
+        return "—".to_string();
+    }
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // 民用历法换算（Howard Hinnant days_from_civil 逆运算）。
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    // 东八区：库写入用本地秒（见 tools 导入侧），展示不再换算。
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 /// 总数文案 + 空态文案的唯一出口。
@@ -441,6 +767,10 @@ fn main() {
     // 缩略图缓存（D43）：窗口显式驱逐 + LRU 容量兜底，替代旧无界 HashMap。
     let thumb_cache = Rc::new(RefCell::new(ThumbCache::new(THUMB_CACHE_CAPACITY)));
 
+    // 导入/派生/库写子命令在途标记：清空库与 CRUD 动作在有任务时拒绝执行，
+    // 避免删到正在写入的文件。提前到这里声明是因为 CrudCtx 要捕获它。
+    let importing = Arc::new(AtomicBool::new(false));
+
     // 网格同步上下文：滚动/过滤/库重载共用的唯一刷新入口。
     let grid = Rc::new(GridCtx::new(
         app.as_weak(),
@@ -457,6 +787,407 @@ fn main() {
     let target_choices: Rc<VecModel<TargetChoiceData>> = Rc::new(VecModel::default());
     app.set_target_choices(ModelRc::from(target_choices.clone()));
     sync_target_bar(&app, &target_choices, routing.borrow().snapshot());
+
+    // CRUD 协作上下文（D46–D48）：选区同步/过滤切换/库写子命令的统一出口。
+    let crud = CrudCtx {
+        ui: app.as_weak(),
+        vm: vm.clone(),
+        resolver: real_resolver.clone(),
+        grid: grid.clone(),
+        filter_categories: filter_categories.clone(),
+        current_filter: current_filter.clone(),
+        filter_label: filter_label.clone(),
+        library_root: library_root.clone(),
+        importing: importing.clone(),
+        thumb_cache: thumb_cache.clone(),
+    };
+    // 启动即摆正回收站角标（库里可能已有墓碑行）。
+    app.set_trash_count(crud.vm.borrow().trash_count() as i32);
+    // 最近一次动作目标（右键命中的那张 / 重命名与属性打开的那张）。菜单收起
+    // 不清它——下一次菜单或操作条动作会重新设定，读侧只在弹窗里回显。
+    let menu_target: Rc<RefCell<Option<AssetId>>> = Rc::new(RefCell::new(None));
+    // 「清空回收站」两步确认的武装态（第一次点=确认文案，再点才执行）。
+    let empty_armed = Rc::new(Cell::new(false));
+
+    // 库写子命令收尾：经 libcmd-finished 弹回 UI 线程（子进程线程零捕获 Rc）。
+    {
+        let crud = crud.clone();
+        app.on_libcmd_finished(move |success, message, label| {
+            crud.reload_after_cmd(success, message.as_str(), label.as_str());
+        });
+    }
+
+    // D47 修饰键点击：Ctrl 增删、Shift 范围（替换/并集随 Ctrl 与否）。
+    {
+        let crud = crud.clone();
+        app.on_tile_modified_click(move |id, ctrl, shift| {
+            crud.vm.borrow_mut().single_click(
+                AssetId(id.max(0) as u32),
+                selection::Modifiers { ctrl, shift },
+            );
+            crud.sync_selection();
+        });
+    }
+
+    // D48 右键：先过 VM 层菜单请求校验，命中后置菜单内容/位置。
+    {
+        let crud = crud.clone();
+        let menu_target = menu_target.clone();
+        app.on_tile_right_click(move |id, x, y| {
+            let id = AssetId(id.max(0) as u32);
+            let hit = {
+                let vm = crud.vm.borrow();
+                vm.context_menu(id)
+            };
+            // 菜单目标：选区 ∪ 命中（context_menu 已算好，targets 非空即合法）。
+            if hit.targets.is_empty() {
+                return;
+            }
+            *menu_target.borrow_mut() = Some(id);
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let title = match hit.targets.len() {
+                1 => {
+                    let binding = crud.resolver.borrow();
+                    match binding
+                        .as_ref()
+                        .and_then(|r| r.meta_of(hit.targets[0]).ok().flatten())
+                    {
+                        Some(meta) => meta.file_name,
+                        None => "1 项".to_string(),
+                    }
+                }
+                n => format!("{n} 项"),
+            };
+            ui.set_context_menu_title(title.into());
+            ui.set_context_menu_x(x);
+            ui.set_context_menu_y(y);
+            ui.set_context_menu_open(true);
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_context_menu_dismissed(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_context_menu_open(false);
+            }
+        });
+    }
+
+    // 顶栏「选择」按钮：切换多选模式；退出清选区（R8/R9）。
+    {
+        let crud = crud.clone();
+        app.on_select_mode_toggled(move || {
+            {
+                let mut vm = crud.vm.borrow_mut();
+                if vm.multi_mode() {
+                    vm.exit_multi();
+                } else {
+                    vm.enter_multi();
+                }
+            }
+            crud.sync_selection();
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_select_all_requested(move || {
+            crud.vm.borrow_mut().select_all_visible();
+            crud.sync_selection();
+        });
+    }
+
+    // Ctrl+A（key-root 捕获，检索框聚焦时已让位）：等价「全选」。
+    {
+        let crud = crud.clone();
+        app.on_key_a_pressed(move || {
+            crud.vm.borrow_mut().select_all_visible();
+            crud.sync_selection();
+        });
+    }
+
+    // Esc：关闭链（菜单→移动→重命名→属性→清空选区退多选），自内向外的栈式收起。
+    {
+        let crud = crud.clone();
+        app.on_escape_pressed(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            if ui.get_context_menu_open() {
+                ui.set_context_menu_open(false);
+            } else if ui.get_move_menu_open() {
+                ui.set_move_menu_open(false);
+            } else if ui.get_rename_open() {
+                ui.set_rename_open(false);
+                ui.set_rename_error("".into());
+            } else if ui.get_properties_open() {
+                ui.set_properties_open(false);
+            } else if crud.vm.borrow().multi_mode() {
+                crud.vm.borrow_mut().exit_multi();
+                crud.sync_selection();
+            }
+        });
+    }
+
+    // D48 菜单五项 → 动作派发（R10/R11：目标=选区∪命中）。
+    {
+        let crud = crud.clone();
+        let menu_target = menu_target.clone();
+        let routing = routing.clone();
+        app.on_menu_action(move |id| {
+            let Some(action) = ui_enums::menu_action(id) else {
+                return;
+            };
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_context_menu_open(false);
+            }
+            let targets = crud.action_targets(*menu_target.borrow());
+            if targets.is_empty() {
+                return;
+            }
+            match action {
+                MenuAction::Copy => {
+                    let Some(ui) = crud.ui.upgrade() else { return };
+                    let binding = crud.resolver.borrow();
+                    let Some(resolver) = binding.as_ref() else {
+                        show_notice(
+                            &ui,
+                            TargetNoticeTone::Warning,
+                            "演示库不支持复制".to_string(),
+                        );
+                        return;
+                    };
+                    // 多选时复制第一张（文件级复制=进剪贴板，与上框共用 negotiate
+                    // 降级链，但绝不注入：copy_to_clipboard 只写剪贴板）。
+                    match resolver.materialize(targets[0]) {
+                        Ok(Some(materialized)) => {
+                            let payload = materialized.as_payload();
+                            match routing.borrow_mut().copy_to_clipboard(&payload) {
+                                Ok(()) => show_notice(
+                                    &ui,
+                                    TargetNoticeTone::Success,
+                                    "已复制到剪贴板".to_string(),
+                                ),
+                                Err(error) => show_notice(&ui, TargetNoticeTone::Warning, error),
+                            }
+                        }
+                        _ => {
+                            show_notice(&ui, TargetNoticeTone::Warning, "素材读取失败".to_string())
+                        }
+                    }
+                }
+                MenuAction::MoveToCategory => {
+                    if let Some(ui) = crud.ui.upgrade() {
+                        ui.set_move_menu_open(true);
+                        ui.set_move_error("".into());
+                    }
+                }
+                MenuAction::Rename => {
+                    *menu_target.borrow_mut() = Some(targets[0]);
+                    let Some(ui) = crud.ui.upgrade() else { return };
+                    let current = {
+                        let binding = crud.resolver.borrow();
+                        binding
+                            .as_ref()
+                            .and_then(|r| r.meta_of(targets[0]).ok().flatten())
+                            .map(|m| m.file_name)
+                            .unwrap_or_default()
+                    };
+                    ui.set_rename_current(current.into());
+                    ui.set_rename_error("".into());
+                    ui.set_rename_open(true);
+                }
+                MenuAction::Properties => {
+                    *menu_target.borrow_mut() = Some(targets[0]);
+                    let Some(ui) = crud.ui.upgrade() else { return };
+                    let filled = crud
+                        .resolver
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|r| fill_properties(&ui, r, targets[0]));
+                    if filled {
+                        ui.set_properties_open(true);
+                    } else {
+                        show_notice(
+                            &ui,
+                            TargetNoticeTone::Warning,
+                            "该素材尚未入库完成，暂无属性可读".to_string(),
+                        );
+                    }
+                }
+                MenuAction::Delete => {
+                    // UI 先行：本地隐藏即时见效，子命令落库后整库重载对齐（失败会显形回来）。
+                    crud.vm.borrow_mut().hide_locally(&targets);
+                    crud.apply_filter(crud.filter(), crud.filter_label.borrow().clone());
+                    let uuids = crud.uuids_of(&targets);
+                    crud.spawn_lib_cmd("trash", &uuids, None, "删除");
+                }
+            }
+        });
+    }
+
+    // 移动到分类：既服务多选操作条，也服务右键菜单（目标集取法一致）。
+    {
+        let crud = crud.clone();
+        let menu_target = menu_target.clone();
+        app.on_move_selection_requested(move || {
+            let targets = crud.action_targets(*menu_target.borrow());
+            if targets.is_empty() {
+                return;
+            }
+            let Some(ui) = crud.ui.upgrade() else { return };
+            ui.set_move_menu_open(true);
+            ui.set_move_error("".into());
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        let menu_target = menu_target.clone();
+        app.on_move_to_category(move |category| {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_move_menu_open(false);
+            }
+            let targets = crud.action_targets(*menu_target.borrow());
+            if targets.is_empty() {
+                return;
+            }
+            let uuids = crud.uuids_of(&targets);
+            let name = category.as_str().trim().to_string();
+            crud.spawn_lib_cmd("move-category", &uuids, Some(&name), "移动到分类");
+        });
+    }
+
+    // 删除（操作条「删除」按钮，目标=整份选区）。
+    {
+        let crud = crud.clone();
+        app.on_delete_selection_requested(move || {
+            let targets = crud.action_targets(None);
+            if targets.is_empty() {
+                return;
+            }
+            crud.vm.borrow_mut().hide_locally(&targets);
+            crud.apply_filter(crud.filter(), crud.filter_label.borrow().clone());
+            let uuids = crud.uuids_of(&targets);
+            crud.spawn_lib_cmd("trash", &uuids, None, "删除");
+        });
+    }
+
+    // 回收站视图动作：恢复 / 彻底删除 / 清空（两步确认）。
+    {
+        let crud = crud.clone();
+        app.on_restore_selection_requested(move || {
+            let targets = crud.action_targets(None);
+            if targets.is_empty() {
+                return;
+            }
+            let uuids = crud.uuids_of(&targets);
+            crud.spawn_lib_cmd("restore", &uuids, None, "恢复");
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_purge_selection_requested(move || {
+            let targets = crud.action_targets(None);
+            if targets.is_empty() {
+                return;
+            }
+            let uuids = crud.uuids_of(&targets);
+            crud.spawn_lib_cmd("purge", &uuids, None, "彻底删除");
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        let empty_armed = empty_armed.clone();
+        app.on_empty_trash_requested(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            if empty_armed.get() {
+                empty_armed.set(false);
+                ui.set_empty_trash_armed(false);
+                ui.set_empty_trash_text("清空回收站".into());
+                crud.spawn_lib_cmd("empty-trash", &[], None, "清空回收站");
+            } else {
+                empty_armed.set(true);
+                ui.set_empty_trash_armed(true);
+                ui.set_empty_trash_text("再点一次确认清空".into());
+            }
+        });
+    }
+
+    // 重命名：校验在壳层（Slint 无 trim 内建）；合法才起子命令。
+    {
+        let crud = crud.clone();
+        let rename_target = menu_target.clone();
+        app.on_rename_confirmed(move |new_name| {
+            let name = new_name.as_str().trim().to_string();
+            let invalid = name.is_empty() || name.contains('/') || name.contains('\\');
+            if invalid {
+                if let Some(ui) = crud.ui.upgrade() {
+                    ui.set_rename_error("名称不能为空或含路径分隔符".into());
+                }
+                return;
+            }
+            let Some(id) = *rename_target.borrow() else {
+                if let Some(ui) = crud.ui.upgrade() {
+                    ui.set_rename_open(false);
+                }
+                return;
+            };
+            let Some(ui) = crud.ui.upgrade() else { return };
+            ui.set_rename_open(false);
+            let uuids = crud.uuids_of(&[id]);
+            crud.spawn_lib_cmd("rename", &uuids, Some(&name), "重命名");
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_rename_canceled(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_rename_open(false);
+                ui.set_rename_error("".into());
+            }
+        });
+    }
+
+    // 属性「打开所在文件夹」：explorer /select 定位（与日志目录入口同法）。
+    {
+        let crud = crud.clone();
+        let props_target = menu_target.clone();
+        app.on_properties_folder_requested(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let Some(id) = *props_target.borrow() else {
+                return;
+            };
+            let path = crud
+                .resolver
+                .borrow()
+                .as_ref()
+                .and_then(|r| r.absolute_path(id));
+            match path {
+                Some(p) => {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(format!("/select,{}", p.to_string_lossy()))
+                        .spawn();
+                }
+                None => show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "素材文件路径解析失败".to_string(),
+                ),
+            }
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_properties_closed(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_properties_open(false);
+            }
+        });
+    }
 
     {
         let ui = app.as_weak();
@@ -592,6 +1323,11 @@ fn main() {
         let resolver = real_resolver.clone();
         Rc::new(move |ui: &AppWindow, id: i32| {
             let mut vm = vm.borrow_mut();
+            // 红线 A（D47）：多选模式期间上框链路完全无操作——连 active 标记
+            // 都不留，模式内点击只是改选区。
+            if vm.multi_mode() {
+                return;
+            }
             vm.double_click(AssetId(id.max(0) as u32));
             // 标出最近上框的那张，用户连续操作时能看清刚才点的是哪个。
             ui.set_active_asset_id(id);
@@ -646,15 +1382,22 @@ fn main() {
     }
 
     // 单击上框：仅单击模式生效；双击模式下单击不触发。
+    // D47：无修饰单击同样进选区状态机——常态只更新锚点（为 Shift 范围备料），
+    // 多选模式内改选区；上框链路在多选期间被 paste_asset 的红线 A 挡住。
     {
         let ui = app.as_weak();
         let paste_asset = paste_asset.clone();
         let single_click = single_click.clone();
+        let crud = crud.clone();
         app.on_tile_clicked(move |id| {
+            let ui = ui.unwrap();
+            crud.vm
+                .borrow_mut()
+                .single_click(AssetId(id.max(0) as u32), selection::Modifiers::default());
+            crud.sync_selection();
             if !single_click.get() {
                 return;
             }
-            let ui = ui.unwrap();
             paste_asset(&ui, id);
         });
     }
@@ -663,41 +1406,25 @@ fn main() {
     // 供清空检索时回落。选择分类会清掉检索框。
     {
         let ui = app.as_weak();
-        let vm = vm.clone();
-        let thumbs = real_resolver.clone();
-        let filter_categories = filter_categories.clone();
-        let current_filter = current_filter.clone();
-        let filter_label = filter_label.clone();
-        let grid = grid.clone();
+        let crud = crud.clone();
         app.on_filter_selected(move |cat| {
-            let ui = ui.unwrap();
-            let filter = if cat < 0 {
-                Filter::All
+            let Some(ui) = ui.upgrade() else { return };
+            // 侧栏条目：-1=全部，-3=回收站（D46），0..=分类；-2（检索态）不可点。
+            let (filter, label) = if cat == TRASH_CATEGORY {
+                (Filter::Trash, slint::SharedString::from("回收站"))
+            } else if cat < 0 {
+                (Filter::All, slint::SharedString::from("全部"))
             } else {
-                Filter::InCategory(CategoryId(cat as u32))
-            };
-            let label: slint::SharedString = if cat < 0 {
-                "全部".into()
-            } else {
-                let categories = filter_categories.borrow();
-                categories
+                let categories = crud.filter_categories.borrow();
+                let name: slint::SharedString = categories
                     .get((cat as usize) + 1)
                     .cloned()
                     .unwrap_or_else(|| format!("分类{cat}"))
-                    .into()
+                    .into();
+                (Filter::InCategory(CategoryId(cat as u32)), name)
             };
-            *current_filter.borrow_mut() = filter.clone();
-            *filter_label.borrow_mut() = label.clone();
-            ui.set_search_text("".into());
             ui.set_selected_category(cat);
-            {
-                let mut guard = vm.borrow_mut();
-                guard.set_filter(&filter);
-            }
-            ui.set_content_y(0.0);
-            ui.set_filter_label(label);
-            sync_counts(&ui, vm.borrow().total(), thumbs.borrow().is_some());
-            grid.sync();
+            crud.apply_filter(filter, label);
         });
     }
 
@@ -727,6 +1454,7 @@ fn main() {
             if query.trim().is_empty() {
                 ui.set_selected_category(match &filter {
                     Filter::InCategory(id) => id.0 as i32,
+                    Filter::Trash => TRASH_CATEGORY,
                     _ => -1,
                 });
                 ui.set_filter_label(filter_label.borrow().clone());
@@ -791,6 +1519,11 @@ fn main() {
             let ui = ui.unwrap();
             ui.set_settings_open(false);
             ui.set_import_menu_open(false);
+            // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
+            ui.set_context_menu_open(false);
+            ui.set_move_menu_open(false);
+            ui.set_rename_open(false);
+            ui.set_properties_open(false);
             if ui.get_target_mode() == ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
                 let mut routing = routing.borrow_mut();
                 routing.toggle_picker();
@@ -1017,9 +1750,6 @@ fn main() {
             }
         });
     }
-
-    // 导入/派生在途标记：清空库在有任务时拒绝执行，避免删到正在写入的文件。
-    let importing = Arc::new(AtomicBool::new(false));
 
     // 清空库：两次点击确认，删除当前真实库的 objects/thumbs/meta.db，并回到空库。
     // 任何情况都要把界面重置回空库：删除失败绝不早退（早退会让旧瓦片/旧 resolver 残留，
@@ -1382,6 +2112,9 @@ fn main() {
     }
 
     grid.sync();
+    // 键盘捕获根（Esc / Ctrl+A）在启动时拿到焦点：capture 模式不抢输入焦点，
+    // 检索框等 LineEdit 仍可正常打字（其聚焦态在 key-root 的让位判断里处理）。
+    app.invoke_key_focus_requested();
     // GL 驱动缺失的自愈（实测：CI runner/远程桌面等无 GL 环境，femtovg 在事件循环
     // 启动时报 "Failed to initialize OpenGL driver: Could not locate glCreateShader
     // symbol" 直接退出）。winit 一进程只允许一个事件循环，进程内换后端不可行，

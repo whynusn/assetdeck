@@ -318,6 +318,11 @@ impl LibraryGridVm {
         self.selection.is_multi()
     }
 
+    /// 回收站行数（侧栏角标，D46/R5 入口可见性）。
+    pub fn trash_count(&self) -> usize {
+        self.index.deleted_count() as usize
+    }
+
     pub fn is_selected(&self, id: AssetId) -> bool {
         self.selection.contains(id)
     }
@@ -380,6 +385,16 @@ impl LibraryGridVm {
                 })
                 .collect(),
         }
+    }
+
+    /// 「删除」点击即本地隐藏（design §3.2：UI 先行即时反馈）：mark_deleted
+    /// 把行摘出活集，调用方随后 `set_filter(当前过滤器)` 重排视图即可见效；
+    /// 子进程落库完成后的整库重载做最终对齐（成功时幂等，失败时行会重新显形）。
+    /// 返回实际隐藏数（已是回收站行的幂等跳过）。
+    pub fn hide_locally(&mut self, ids: &[AssetId]) -> usize {
+        ids.iter()
+            .filter(|id| self.index.mark_deleted(**id))
+            .count()
     }
 
     /// 取走全部待处理事件（取走即清空）。

@@ -302,6 +302,9 @@ fn build_rows(
                 thumb,
                 kind: ui_enums::card_kind(kind),
                 preview: card.preview.into(),
+                // D47 勾选态：瓦片重绘时从选区状态机现取（sync 由壳层在
+                // 选区变化后统一触发，这里不缓存）。
+                selected: vm.is_selected(id),
             };
             if loaded_real {
                 updates.push((i, tile.clone()));

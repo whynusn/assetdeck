@@ -202,4 +202,18 @@ impl TargetRoutingRuntime {
         }
         notice
     }
+
+    /// D48 右键「复制」入口：只写剪贴板，不激活、不注入、不进连击合并记录
+    /// （它不是上框，last_injected 语义是「实际注入成功」）。
+    pub fn copy_to_clipboard(&mut self, payload: &AssetPayload<'_>) -> Result<(), String> {
+        let mut deps = TargetPipelineDeps {
+            clipboard: self.deps.clipboard.as_mut(),
+            focus: self.deps.focus.as_ref(),
+            injector: self.deps.injector.as_mut(),
+            activator: self.deps.activator.as_ref(),
+            readiness: self.deps.readiness.as_ref(),
+            focuser: self.deps.focuser.as_ref(),
+        };
+        self.routing.copy_to_clipboard(payload, &mut deps)
+    }
 }

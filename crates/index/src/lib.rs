@@ -160,6 +160,11 @@ impl FacetIndex {
         self.deleted.contains(id.0)
     }
 
+    /// 回收站行数（侧栏角标数据源，D46）。
+    pub fn deleted_count(&self) -> u64 {
+        self.deleted.len()
+    }
+
     pub fn len(&self) -> u64 {
         self.all.len()
     }
@@ -246,6 +251,8 @@ impl FacetIndex {
             Filter::InCategory(cat) => self.by_category.get(&cat.0).cloned().unwrap_or_default(),
             Filter::HasTag(tag) => self.by_tag.get(&tag.0).cloned().unwrap_or_default(),
             Filter::NameContains(needle) => self.search_names(needle),
+            // D46 回收站视图：deleted 位图即结果（占号不显形的行在这里显形）。
+            Filter::Trash => self.deleted.clone(),
             Filter::Not(inner) => &self.all - &self.evaluate(inner),
             Filter::AllOf(filters) => {
                 let mut acc: Option<RoaringBitmap> = None;

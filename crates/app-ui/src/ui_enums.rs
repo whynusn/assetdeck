@@ -4,6 +4,7 @@
 //! Rust 侧唯一写这些数字的地方。新增 target 模式 / notice 类型 / 卡片类别时，
 //! 只需同步这里 + appwindow.slint 的 UiEnums。
 
+use ui_viewmodels::selection::MenuAction;
 use ui_viewmodels::{AssetKind, TargetBarMode, TargetNoticeTone};
 
 /// 目标条模式 → UiEnums.target-mode-*（与 slint 常量严格对应）。
@@ -34,6 +35,23 @@ pub fn card_kind(kind: AssetKind) -> i32 {
         AssetKind::Other => 3,
     }
 }
+
+/// 右键菜单动作 id → [`MenuAction`]（与 appwindow.slint menu-action 的整数编码严格对应）。
+pub fn menu_action(id: i32) -> Option<MenuAction> {
+    match id {
+        0 => Some(MenuAction::Copy),
+        1 => Some(MenuAction::MoveToCategory),
+        2 => Some(MenuAction::Rename),
+        3 => Some(MenuAction::Properties),
+        4 => Some(MenuAction::Delete),
+        _ => None,
+    }
+}
+
+/// 底部操作条形态 → UiEnums.bar-*（隐藏 / 多选 / 回收站）。
+pub const BAR_HIDDEN: i32 = 0;
+pub const BAR_MULTI: i32 = 1;
+pub const BAR_TRASH: i32 = 2;
 
 #[cfg(test)]
 mod tests {
