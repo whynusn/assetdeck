@@ -1,0 +1,129 @@
+# M8 内置目标画像。
+#
+# 本文件内容已用 OpenDesktop("default") 对交互桌面做真实窗口枚举回填（2026-08-23）。
+# 值来源：Admin 桌面会话枚举得出的进程名 / 窗口类名 / 标题模板，非猜测。
+#
+# readiness 一律为 uia_shallow：真实实测证明 Qt 自绘（微信）与 CEF（千牛）都无法事前
+# 证明「存在可写输入框」，而 caret / UIA 焦点探测在能成功粘贴的窗口上同样返回空值。
+# 因此策略是「否证阻塞才不注入」而非「证明就绪才注入」，探测不到就注入并标 unverified。
+# uia_strict 保留为用户可显式开启的严格档，不作为内置默认。
+#
+# paste_sends 记录「该格式粘进去等于直接发送」的实测事实，按素材类别分行声明。
+# 2026-08-25 受控复验推翻了「千牛对 CF_HDROP 一律即发」的旧概括：
+# 千牛接待中心对**视频** HDROP 是立即发出，对**图片** HDROP 则停在输入框并渲染
+# 真缩略图（取证 q3-our-hdrop-image.png）；微信 4.0 两者都停在输入框，且图片
+# HDROP 按下发送后发出的是图片消息而非文件卡片（取证 v6-wx-hdrop-sent.png）。
+# 所以即发是 (类别 × 格式) 事实，不是纯格式事实。
+#
+# 图片的格式顺序由此定为 files 优先、png 兜底。理由是实测的进程成本：同一张
+# 4096x3072 素材，走 HDROP 时对端只向外壳要几百像素缩略图，微信全流程 436ms /
+# 进程 CPU ~250ms、千牛 1027ms / CPU 125ms；走 CF_PNG 时对端必须在自己进程里
+# 全量解码 8.84MB PNG，微信 2061ms / CPU 1859~2031ms、千牛 3346ms / CPU 2234ms。
+# 这段开销在对方进程内，我们的 timing[paste] 量不到，只体现为用户看到的卡顿。
+# png 保留在末位是兜底：素材不在本地库内（无可交路径）时仍能上框。
+#
+# input_anchor 是「激活窗口后把键盘焦点送进输入框」的兜底锚点（客户区宽高比例）。
+# 实测事实：SetForegroundWindow 之后焦点停在窗口根控件（Qt 自绘 / CEF 都不暴露可
+# SetFocus 的输入框），Ctrl+V 会落空。平台层先试 UIA SetFocus，失败才对锚点做一次
+# 左键单击。比例值由 2026-08-24 真机截图量取，随窗口缩放仍成立。
+#
+# focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "anchor"]。
+# 微信 / 千牛显式去掉 "uia"：实测这两个目标的 UIA 子树里可写 Edit/Document 候选数为 0
+# （微信 descendant count=2、千牛 91 个全不可写），该级别必然失败，白付 22~83ms。
+# pdd / telegram 未取得真机会话，保留三级缺省，不凭猜测裁剪。
+#
+# 图片格式顺序：全部画像统一 files 优先（D22，2026-08-27 回填完 pdd/telegram）。
+# pdd/telegram 此前残留 ["png", "files"] 是 D22 落地时的回填遗漏——files 优先与
+# 是否实测过该目标无关：它同时压缩对端解码成本（实测微信 files 436ms vs png 2061ms）
+# 和触发侧成本（D41：物化层已不再预读 png_bytes，files 承载是零 IO 路径）。
+
+[[profiles]]
+id = "wechat"
+label = "微信 (4.0)"
+exe_names = ["Weixin.exe"]
+class_names = ["Qt51514QWindowIcon"]
+title_regexes = ["^微信$"]
+not_ready_title_regexes = ["微信登录", "微信未登录"]
+readiness = "uia_shallow"
+settle_ms = 150
+# 实测微信 4.0 对图片与视频的 CF_HDROP 都停在输入框，无需排除任何组合。
+paste_sends = { image = [], video = [], text = [], other = [] }
+# 实测：UIA 全子树扫描在微信 4.0 上耗 22~27ms 且候选数 0，跳过。
+focus_strategy = ["already", "anchor"]
+
+# 微信 4.0 主窗口 1342x971 时输入框位于底部图标行之上、正文列中部偏右。
+[profiles.input_anchor]
+x_ratio = 0.66
+y_ratio = 0.85
+
+[profiles.formats]
+image = ["files", "png"]
+video = ["files"]
+text = ["text"]
+other = []
+
+[[profiles]]
+id = "qianniu"
+# 画像覆盖千牛的两个主窗口（工作台 / 接待中心），label 不写死「工作台」以免
+# 接待中心候选显示成「千牛工作台 · …-接待中心」这种自相矛盾的名字。
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+class_names = ["Qt5152QWindowIcon"]
+# 接待中心（会话窗口）标题形如 `tb940472610424-接待中心`，是真正带输入框的上框目标，
+# 必须显式声明，不能依赖 `-千牛工作台` 的巧合匹配。
+title_regexes = ["接待中心$", "千牛工作台", "千牛登录"]
+not_ready_title_regexes = ["千牛登录"]
+readiness = "uia_shallow"
+settle_ms = 120
+# 实测：CF_UNICODETEXT 与 CF_PNG 停在输入框；CF_HDROP 的结论按类别分叉——
+# 视频 HDROP 直接发送到会话流（qn-round3-video.png），图片 HDROP 停在输入框
+# 并显示真缩略图（q3-our-hdrop-image.png，会话流无新消息）。因此只把
+# video × files 标为即发，图片得以走 files 的低成本路径。
+paste_sends = { image = [], video = ["files"], text = [], other = [] }
+# 实测：UIA 全子树扫描在千牛接待中心（CEF）上耗 83ms 且可写候选数 0，跳过。
+focus_strategy = ["already", "anchor"]
+
+# 千牛接待中心 1845x1200 时会话输入框在中栏下部；锚点必须落在中栏，
+# 右侧是「千牛工单」面板，点错会把焦点送进工单搜索框。
+[profiles.input_anchor]
+x_ratio = 0.394
+y_ratio = 0.787
+
+[profiles.formats]
+image = ["files", "png"]
+video = ["files"]
+text = ["text"]
+other = []
+
+[[profiles]]
+id = "pdd"
+label = "拼多多商家版"
+exe_names = ["PddWorkbench.exe"]
+class_names = ["g_wszPDDWindowClass"]
+title_regexes = ["拼多多工作台"]
+not_ready_title_regexes = ["登录"]
+readiness = "uia_shallow"
+settle_ms = 120
+# 未取得真实会话，暂不声明；一旦实测为即发再补 files。
+paste_sends = []
+
+[profiles.formats]
+image = ["files", "png"]
+video = ["files"]
+text = ["text"]
+other = []
+
+[[profiles]]
+id = "telegram"
+label = "Telegram"
+exe_names = ["Telegram.exe"]
+class_names = ["Qt51514QWindowIcon"]
+readiness = "uia_shallow"
+settle_ms = 80
+paste_sends = []
+
+[profiles.formats]
+image = ["files", "png"]
+video = ["files"]
+text = ["text"]
+other = []

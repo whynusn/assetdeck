@@ -22,7 +22,7 @@ use platform::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {
-    WriteClipboard(ClipboardPayload),
+    WriteClipboard(ClipboardPayload<'static>),
     CheckAlive(WindowHandle),
     Inject(Vec<u16>),
 }
@@ -44,8 +44,8 @@ impl Log {
 struct MockSink(Log);
 
 impl ClipboardSink for MockSink {
-    fn write(&mut self, payload: &ClipboardPayload) -> Result<()> {
-        self.0.push(Op::WriteClipboard(payload.clone()));
+    fn write(&mut self, payload: &ClipboardPayload<'_>) -> Result<()> {
+        self.0.push(Op::WriteClipboard(payload.clone().into_owned()));
         Ok(())
     }
 }
@@ -140,7 +140,7 @@ fn format_negotiation_table_image_video_text() {
     let img = image_payload(&png);
     assert_eq!(
         negotiate(&img, TargetProfile::ImGeneric),
-        Some(ClipboardPayload::Png(png))
+        Some(ClipboardPayload::Png(png.as_slice().into()))
     );
 
     // Video → Files 且携带源路径。
@@ -165,7 +165,7 @@ fn format_negotiation_table_image_video_text() {
     };
     assert_eq!(
         negotiate(&text, TargetProfile::ImGeneric),
-        Some(ClipboardPayload::Text("你好 IM".to_string()))
+        Some(ClipboardPayload::Text("你好 IM".into()))
     );
 
     // 未知组合（未路由的 Other 类资产）→ None，调用方降级处理。

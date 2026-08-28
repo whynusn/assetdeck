@@ -175,6 +175,8 @@ packages:
     path: crates/pipeline
   platform:
     path: crates/platform
+  targets:
+    path: crates/targets
   store:
     path: crates/store
   ui-viewmodels:

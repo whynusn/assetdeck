@@ -73,6 +73,8 @@ pub fn run_closed_loop_probe() -> Result<ClosedLoopReport, String> {
             category: Some(CategoryId(i % 3)),
             tags: vec![TagId(i % 5)],
             created_at: i as i64,
+            size_bytes: None,
+            kind: AssetKind::Other,
         });
     }
     let mut vm = LibraryGridVm::new(idx, Sorter::default(), 16);
@@ -145,7 +147,7 @@ pub fn run_closed_loop_probe() -> Result<ClosedLoopReport, String> {
 }
 
 fn cleanup_clipboard(sink: &mut Win32Clipboard) {
-    let _ = sink.write(&ClipboardPayload::Text(String::new()));
+    let _ = sink.write(&ClipboardPayload::Text("".into()));
 }
 
 /// 直调 Win32 读回 CF_UNICODETEXT 文本（platform crate 未暴露读 API，design 允许）。
