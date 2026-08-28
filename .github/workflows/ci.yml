@@ -19,6 +19,19 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # EOF newline 守卫：git diff --check 抓不到缺尾换行（已实证），独立扫末字节。
+      - name: 检查跟踪文本文件以 LF 结尾（EOF newline）
+        shell: pwsh
+        run: |
+          $binExts = @('.png','.jpg','.jpeg','.webp','.ico','.mp4','.webm','.mp3','.wav','.db','.sqlite','.exe','.dll','.zip','.gz','.tar','.pdf','.wasm')
+          $bad = @()
+          git ls-files | ForEach-Object {
+            $f = $_
+            if ($binExts -contains [IO.Path]::GetExtension($f).ToLowerInvariant()) { return }
+            $b = [IO.File]::ReadAllBytes($f)
+            if ($b.Length -gt 0 -and $b[$b.Length - 1] -ne 10) { $bad += $f }
+          }
+          if ($bad.Count -gt 0) { Write-Error ('以下文件缺少 EOF 换行：' + ($bad -join ', ')); exit 1 }
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

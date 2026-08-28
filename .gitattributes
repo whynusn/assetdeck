@@ -7,3 +7,29 @@
 # picking either side (task state lives in task.json, not index.md). See
 # .trellis/spec/cli/backend/directory-structure.md for details.
 .trellis/workspace/*/journal-*.md merge=union
+
+# ---- 行尾统一策略（2026-08-28）----
+# 仓库对象一律 LF；工作树按平台（Windows=CRLF，与 core.autocrlf=true 现状一致，
+# 显式化避免依赖本机 git 配置）。
+* text=auto
+# PowerShell 5.1 对 LF-only .ps1 偶发解析异常，钉 CRLF 保险（团队全 PS7 可去掉）。
+*.ps1 text eol=crlf
+# 二进制钉死，防 autocrlf 误转换/误判（此前只靠 git 启发式）。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.mp4 binary
+*.webm binary
+*.mp3 binary
+*.wav binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.db binary
+*.sqlite binary
+*.pdf binary
+*.wasm binary
