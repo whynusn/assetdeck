@@ -176,6 +176,8 @@ fn cmd_measure_rss(args: &[String]) -> i32 {
             let _ = child.wait();
             let retry = match Command::new(&margs.exe)
                 .env("SLINT_BACKEND", "winit-software")
+                .env("ASSETDECK_FORCE_SOFTWARE", "1")
+                .env("ASSETDECK_RENDER_FALLBACK", "1")
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()

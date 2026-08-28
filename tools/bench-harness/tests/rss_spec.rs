@@ -67,6 +67,7 @@ fn idle_rss_under_100mb() {
     // 首拉预设回退哨兵：禁用应用内「GL 失败自愈重启」，避免首拉进程悄悄换出
     // 孤儿子进程污染测量；由本测试显式决定是否以软件档重测。
     let mut child = spawn_idle(&exe, false);
+    let first_pid = child.id();
     let report = match sample_median(child.id(), POLL_MS, WARMUP, IDLE_HOLD_MS) {
         Ok(report) => report,
         Err(first) => {
@@ -76,18 +77,21 @@ fn idle_rss_under_100mb() {
             let _ = child.wait();
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
             let child2 = spawn_idle(&exe, true);
+            let retry_pid = child2.id();
             match sample_median(child2.id(), POLL_MS, WARMUP, IDLE_HOLD_MS) {
                 Ok(report2) => {
                     child = child2;
                     report2
                 }
                 Err(second) => panic!(
-                    "测量失败=红: idle 采样中止(首拉={first} 重测={second})\n== 首拉 stderr ==\n{stderr}\n== app 日志 ==\n{}",
+                    "测量失败=红: idle 采样中止(首拉={first} 重测={second})\n首拉pid={first_pid} 重测pid={retry_pid}\n== 首拉(stderr) ==\n{stderr}\n== 重测(pid {retry_pid}) app 日志 ==\n{}\n== 最新 app 日志 ==\n{}",
+                    dump_app_log_for(retry_pid),
                     dump_newest_app_log()
                 ),
             }
         }
     };
+    let retry_pid = child.id();
     // idle 进程在窗口内自行退出 = 提前退出 = 测量失败（PRD 红线）：
     // 部分窗口样本不代表稳态空闲，禁止当有效数据放行。
     match child.try_wait() {
@@ -96,8 +100,8 @@ fn idle_rss_under_100mb() {
             let _ = child.wait();
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
             panic!(
-                "测量失败=红: idle 子进程在采样窗口内自行退出({status})\n== 子进程 stderr ==\n{stderr}\n== app 日志 ==\n{}",
-                dump_newest_app_log()
+                "测量失败=红: idle 子进程在采样窗口内自行退出({status}) pid={retry_pid}\n== 子进程 stderr ==\n{stderr}\n== pid {retry_pid} app 日志(头部含渲染档决策) ==\n{}",
+                dump_app_log_for(retry_pid)
             );
         }
         Err(e) => panic!("测量失败=红: wait 失败: {e}"),
@@ -119,7 +123,12 @@ fn spawn_idle(exe: &PathBuf, force_software: bool) -> std::process::Child {
     let stderr_path = std::env::temp_dir().join("asset-manager-idle-stderr.log");
     let mut cmd = Command::new(exe);
     if force_software {
-        cmd.env("SLINT_BACKEND", "winit-software");
+        // 三保险：env 档 + 程序化强制软件档（ASSETDECK_FORCE_SOFTWARE 走应用自己的
+        // BackendSelector，backend/renderer 分开传，不再依赖 Slint 的 env 解析黑盒）
+        // + 哨兵（禁用应用内自愈重启，防换进程污染测量）。
+        cmd.env("SLINT_BACKEND", "winit-software")
+            .env("ASSETDECK_FORCE_SOFTWARE", "1")
+            .env("ASSETDECK_RENDER_FALLBACK", "1");
     } else {
         cmd.env("ASSETDECK_RENDER_FALLBACK", "1");
     }
@@ -178,6 +187,48 @@ fn browse_100k_rss_under_250mb() {
             "browse 中位数 {} 字节超 D10 预算 {BROWSE_BUDGET_BYTES} 字节",
             report.median_bytes
         );
+    }
+}
+
+/// 失败归因：按 pid 精确抓取对应子进程的 app-<pid>-*.log（头部 + 尾部）。
+/// 头部必含「渲染档」决策行——判定该进程到底跑的哪个渲染器。
+fn dump_app_log_for(pid: u32) -> String {
+    let logs_dir = locate_app_exe()
+        .parent()
+        .map(|dir| dir.join("logs"))
+        .expect("exe 路径异常");
+    let prefix = format!("app-{pid}-");
+    let path = std::fs::read_dir(&logs_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(&prefix) && name.ends_with(".log")
+                })
+                .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        })
+        .map(|e| e.path());
+    match path {
+        Some(path) => {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = content.lines().collect();
+            let head: Vec<&str> = lines.iter().take(12).copied().collect();
+            let tail: Vec<&str> = lines.iter().rev().take(40).copied().collect();
+            format!(
+                "[{} 共 {} 行；头部 12 行]\n{}\n[尾部 40 行]\n{}",
+                path.display(),
+                lines.len(),
+                head.join("\n"),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            )
+        }
+        None => format!(
+            "(pid {pid} 无日志: {} 下无 {prefix}*.log)",
+            logs_dir.display()
+        ),
     }
 }
 

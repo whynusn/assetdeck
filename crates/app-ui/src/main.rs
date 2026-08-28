@@ -1390,7 +1390,8 @@ fn main() {
     if let Err(e) = app.run() {
         let can_fallback = settings.borrow().gpu_rendering
             && std::env::var_os("SLINT_BACKEND").is_none()
-            && std::env::var_os("ASSETDECK_RENDER_FALLBACK").is_none();
+            && std::env::var_os("ASSETDECK_RENDER_FALLBACK").is_none()
+            && std::env::var_os("ASSETDECK_FORCE_SOFTWARE").is_none();
         if !can_fallback {
             panic!("Slint 事件循环异常退出: {e}");
         }
@@ -1399,6 +1400,7 @@ fn main() {
         let respawn = std::process::Command::new(exe)
             .args(std::env::args_os().skip(1))
             .env("SLINT_BACKEND", "winit-software")
+            .env("ASSETDECK_FORCE_SOFTWARE", "1")
             .env("ASSETDECK_RENDER_FALLBACK", "1")
             .spawn();
         if let Err(spawn_err) = respawn {
