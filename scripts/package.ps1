@@ -53,6 +53,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ---- 分发产物静态链接 CRT（仅 MSVC 工具链）----
+# MSVC 动态链接的 exe 依赖 VCRUNTIME140.dll（VC Redist 随附，非系统自带）——干净
+# 系统上直接拒载（实测报「找不到 VCRUNTIME140.dll」）。CI 的 MSVC 分发构建一律
+# +crt-static 自包含。windows-gnu 构建（本地）链接系统自带的 msvcrt.dll，本就自
+# 包含；且 +crt-static 在 gnu 下改变链接行为（实测报找不到 -lshlwapi），故只对
+# msvc host 生效。仅作用于本脚本（打包）；日常开发/CI 测试构建不受影响。
+$hostTriple = (& rustc -vV 2>$null | Select-String '^host:').ToString()
+if ($hostTriple -match 'msvc') {
+    $env:RUSTFLAGS = "-C target-feature=+crt-static"
+}
+
 # ---- 路径（全部相对仓库根解析，脚本可从任意 cwd 调用）----
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Dist = Join-Path $RepoRoot "dist"
@@ -112,7 +123,9 @@ function Step-Portable {
 
     Write-Host "==> [portable] 打 zip"
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    $zip = Join-Path $OutDir "素材管理器-便携版-$Version.zip"
+    # 分发名一律 ASCII：中文文件名在 GitHub 资产链路被吞（实测「素材管理器-便携版-0.1.0」
+    # 上传后变成「-.-0.1.0」）。应用内显示名不变，仅产物文件名用 ASCII。
+    $zip = Join-Path $OutDir "assetdeck-portable-$Version.zip"
     $zipOk = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
@@ -174,7 +187,7 @@ function Step-Installer {
     Assert-LastExitCode "cargo build installer"
 
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-    $installerOut = Join-Path $OutDir "素材管理器-安装版-$Version.exe"
+    $installerOut = Join-Path $OutDir "assetdeck-installer-$Version.exe"
     Copy-Item -Path $InstallerExe -Destination $installerOut -Force
 
     # 兜底校验：安装包必须比 payload 大（防 include_bytes! 嵌进空/陈旧文件）

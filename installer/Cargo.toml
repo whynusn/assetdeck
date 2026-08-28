@@ -19,3 +19,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# 快捷方式走原生 COM（IShellLinkW+IPersistFile）与 SHGetKnownFolderPath，
+# 取代此前 4 次 powershell.exe 子进程——GUI 进程 spawn 控制台程序会弹黑框。
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
