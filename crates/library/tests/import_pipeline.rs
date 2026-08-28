@@ -16,6 +16,16 @@ fn make_png(dir: &Path, name: &str, gray: u8) -> PathBuf {
     path
 }
 
+fn make_image(dir: &Path, name: &str, gray: u8) -> PathBuf {
+    let path = dir.join(name);
+    // RGB 而非 Luma8：GIF 编码器不接受灰度，webp/bmp 用 RGB 亦无碍。
+    let img = image::RgbImage::from_fn(32, 32, |_x, _y| image::Rgb([gray, gray, gray]));
+    DynamicImage::ImageRgb8(img)
+        .save(&path)
+        .expect("写测试图片失败");
+    path
+}
+
 fn wait_for(lib: &Library, ticket: &ImportTicket, pred: impl Fn(&CopyState) -> bool) -> CopyState {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -197,6 +207,95 @@ fn manual_category_and_inbox_fallback() {
         lib.store().get_asset(&t2.uuid).unwrap().unwrap().category,
         Some(library::INBOX_CATEGORY.to_string())
     );
+}
+
+#[test]
+fn misnamed_png_with_jpg_extension_imports_via_content_sniffing() {
+    // 回归：PNG 内容挂 .jpg 名，旧实现按扩展名走 JPEG 解码器，
+    // 报「Format error decoding Jpeg: Illegal start bytes: 89504e47…」
+    // 并让整批导入失败。现在按内容嗅探格式，应正常入库且带 phash。
+    let dir = tempfile::tempdir().unwrap();
+    let png_bytes = {
+        let img = image::GrayImage::from_fn(32, 32, |_x, _y| image::Luma([64]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageLuma8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    };
+    let source = dir.path().join("伪装图.jpg");
+    std::fs::write(&source, &png_bytes).unwrap();
+    let lib_dir = dir.path().join("library");
+    let lib = Library::open(&lib_dir).unwrap();
+
+    let t = expect_ticket(
+        lib.enqueue(ImportRequest {
+            source,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap(),
+    );
+    wait_for(&lib, &t, |s| matches!(s, CopyState::Done));
+    let meta = lib.store().get_asset(&t.uuid).unwrap().unwrap();
+    assert!(meta.phash.is_some(), "伪装扩展名不影响 phash 计算");
+}
+
+#[test]
+fn undecodable_image_is_rejected_without_touching_library() {
+    // 回归：损坏图片曾是 `?` 硬错误，整批导入中止（sample-library failed）。
+    // 现在返回 Unsupported：无入库数据、无残留对象目录，批内其他素材不受影响。
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("broken.jpg");
+    std::fs::write(&bad, b"\x00not-an-image-payload\xff").unwrap();
+    let lib_dir = dir.path().join("library");
+    let lib = Library::open(&lib_dir).unwrap();
+
+    let outcome = lib
+        .enqueue(ImportRequest {
+            source: bad,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap();
+    match outcome {
+        EnqueueOutcome::Unsupported { reason } => {
+            assert!(!reason.is_empty(), "失败原因不应为空");
+        }
+        other => panic!("损坏图片应返回 Unsupported，实际 {other:?}"),
+    }
+    assert_eq!(lib.store().all_assets_count().unwrap(), 0);
+    assert_eq!(
+        std::fs::read_dir(lib_dir.join("objects")).unwrap().count(),
+        0,
+        "被拒素材不得留下半成品对象目录"
+    );
+}
+
+#[test]
+fn registry_image_formats_webp_gif_bmp_are_decodable() {
+    // 回归：media 注册表把 webp/gif/bmp 标为可导入图片，但 library 的 image
+    // 依赖只开了 png/jpeg feature——扩展名正确的 webp 也会 Unsupported。
+    // features 补齐后三种注册格式都必须能走完解码→phash→入库。
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("library");
+    let lib = Library::open(&lib_dir).unwrap();
+
+    for (name, gray) in [("pic.webp", 40u8), ("ani.gif", 150), ("icon.bmp", 220)] {
+        let source = make_image(dir.path(), name, gray);
+        let t = expect_ticket(
+            lib.enqueue(ImportRequest {
+                source,
+                category: None,
+                tags: vec![],
+            })
+            .unwrap(),
+        );
+        wait_for(&lib, &t, |s| matches!(s, CopyState::Done));
+        let meta = lib.store().get_asset(&t.uuid).unwrap().unwrap();
+        assert!(meta.phash.is_some(), "{name} 应算出 phash");
+    }
+    assert_eq!(lib.store().all_assets_count().unwrap(), 3);
 }
 
 #[test]

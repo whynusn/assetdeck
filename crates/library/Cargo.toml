@@ -5,9 +5,13 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+domain = { path = "../domain" }
+media = { path = "../media" }
 store = { path = "../store" }
 phash = { path = "../phash" }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# features 与 media 注册表 Image 类目对齐（png/jpg/jpeg/gif/webp/bmp）：
+# 注册表声明可导入的图片格式，这里必须真能解码，否则一个坏图拖垮整批导入。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
