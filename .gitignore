@@ -9,3 +9,14 @@ Cargo.lock.bak
 *.pdb
 /mem-reports/
 /crates/ui-viewmodels/target/
+
+# 本地调试/会话临时产物（decode-worker 日志会在测试时再生成）
+/work/
+/.dsh-inspect/
+/.v2c/
+/samples/debug/
+/samples/library/
+/crates/worker/decode-worker-*.log
+/cargo-check*.log
+/cargo-test*.log
+
