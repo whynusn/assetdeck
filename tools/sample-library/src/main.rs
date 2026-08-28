@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use library::{CopyState, EnqueueOutcome, ImportMode, ImportRequest, Library};
 use packages::{DirectoryReader, EmoReader, EmoWriter, ImportedAsset, PackageRegistry};
+mod import_paths;
 
 fn main() {
     // D38：日志初始化（子进程由 UI 注入 DSH_LOG_DIR/DSH_LOG_LEVEL；直跑回落）。
@@ -93,6 +94,14 @@ fn run() -> Result<(), String> {
     // D46/D48 库写子命令族先于导入分支拦截（壳层 ChildTaskRunner 驱动）。
     if let Some(cmd) = library_cmd::parse_library_cmd(&raw)? {
         return library_cmd::execute(&cmd);
+    }
+    // D49 通用导入清单分支（归类弹窗产物，一次调用完成整批混选导入）。
+    if raw.iter().any(|a| a == "--import-paths") {
+        return import_paths::run_cli(&raw);
+    }
+    // D50「含 N 个分类」预扫描（UI 起弹窗前调用；只读结构，零解码）。
+    if raw.iter().any(|a| a == "--probe-categories") {
+        return import_paths::run_probe(&raw);
     }
     if raw.first().map(String::as_str) == Some("export") {
         if raw.len() < 3 {

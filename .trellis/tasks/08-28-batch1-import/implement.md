@@ -10,8 +10,8 @@
 
 ## 阶段 1 — sample-library 收集层 + CLI
 
-- [ ] 1.1 红灯（tools/sample-library/tests）：`--import-paths` 三分来源解析；混选（f:+p:）→ 包内分类落库 + 散文件走 override；`--category-override` 使 explicit 胜过 groupName（RuleChain 语义）；`--force-inbox`；取消路径零文件进库（CLI 无 UI，测=「未传 cmd 则不写库」）。
-- [ ] 1.2 实现 `ImportSource` 解析 + `run()` 分发；分类数预扫描函数 `probe_source_categories`（EmoReader 清单 / 目录子项数，只读结构）。
+- [x] 1.1 红灯（tools/sample-library/tests）：`--import-paths` 三分来源解析；混选（f:+p:）→ 包内分类落库 + 散文件走 override；`--category-override` 使 explicit 胜过 groupName（RuleChain 语义）；`--force-inbox`；取消路径零文件进库（CLI 无 UI，测=「未传 cmd 则不写库」）。
+- [x] 1.2 实现 `ImportSource` 解析 + `run()` 分发；分类数预扫描函数 `probe_source_categories`（EmoReader 清单 / 目录子项数，只读结构）。
 
 ## 阶段 2 — 归类弹窗 VM（ui-viewmodels，纯函数）
 

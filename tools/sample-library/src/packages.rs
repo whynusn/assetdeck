@@ -344,7 +344,7 @@ impl AssetPackageReader for EmoReader {
 }
 
 /// .emo 且是文件（目录叫 .emo 不算归档，交给 DirectoryReader）。
-fn is_emo_archive(path: &Path) -> bool {
+pub(crate) fn is_emo_archive(path: &Path) -> bool {
     path.is_file()
         && path
             .extension()

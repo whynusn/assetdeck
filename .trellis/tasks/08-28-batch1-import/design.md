@@ -14,6 +14,12 @@
 
 - `import_package(inbox, out, mode)` 现为单目录入口；新增 `--import-paths <file>`：file 每行一条来源（前缀 `f:`=散文件、`d:`=目录、`p:`=.emo），逐条走 `PackageRegistry`（D24 首命中者胜）+ 显式 category 参数 `--category-override <name>`（存在时 RuleChain explicit 置 Some，覆盖包内规则）/ `--force-inbox` / 缺省=按来源规则（= 现行为，记住路径复用）。
 - 千牛结构目录判定 = ParentDirectoryRule 已有逻辑（D29），无需新代码。
+- **修订（阶段 1 实施时定案）**：归类决策不能是全局旗标——混选各组分属不同
+  决策，全局 `--category-override` 会把 .emo 组的包内分类一并覆盖。改为逐行
+  指令：`<kind>	<mode>	<path>`，mode ∈ `auto` | `inbox` | `category:<名称>`；
+  散文件不走注册表（DirectoryReader 只认目录），按 media 注册表判扩展名直接
+  入列，不支持 = 静默跳过（R4）。预扫描出 `--probe-categories <path>` 分支，
+  stdout 一行 `PROBE<HT>categories=<n|none>`（zip 只读中央目录不解压）。
 
 ## 2. 归类弹窗 VM（crates/ui-viewmodels，纯函数）
 

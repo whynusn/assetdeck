@@ -9,3 +9,7 @@ library = { path = "../../crates/library" }
 logging = { path = "../../crates/logging" }
 media = { path = "../../crates/media" }
 serde_json = "1"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
