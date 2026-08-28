@@ -28,4 +28,4 @@ crates/pipeline/
 ## 当前边界
 
 - pipeline 不读取目标配置文件，不枚举窗口，不导入 `platform::win32`。
-- `AssetPayload` 由调用方提供。当前 app-ui 仍传演示文本，不代表真实图片/文件素材链路已交付。
+- `AssetPayload` 由调用方提供。app-ui 双击上框已走真实载荷：`--library-root` 下 `RealAssetResolver::materialize` → `MaterializedAsset::as_payload`（绝对 `source_path`；D41 起 `png_bytes` 恒空，协商自然回落 `CF_HDROP`）。仅未指定 `--library-root` 的演示回退才构造演示文本载荷。

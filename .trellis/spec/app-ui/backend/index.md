@@ -25,5 +25,5 @@
 - M0 实测：空窗 WorkingSet 77.8MB < 100MB 预算。
 - GPLv3 风险：Slint 社区版，行动项 A1 未裁决，deny.toml copyleft=warn。
 - M8 目标条：chip、四色点、图钉、冷目标选择列表、notice 均已接线。
-- 双击上框走真实素材载荷（`RealAssetResolver` 物化 → 绝对路径 / 内联 PNG 字节），终点是 IM 输入框，不发送；热键唤起流程尚未实现。
+- 双击上框走真实素材载荷（`RealAssetResolver` 物化 → 绝对 `source_path`；D41 起 `png_bytes` 恒空，协商回落 `CF_HDROP`），终点是 IM 输入框，不发送；热键唤起流程尚未实现。
 - 参考：`crates/app-ui/tests/deps_guard.rs`、TDD_PLAN M0/M5/M8。

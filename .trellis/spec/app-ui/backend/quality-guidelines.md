@@ -15,5 +15,5 @@
 
 - [ ] 新依赖是否过 cargo-deny licenses（GPLv3 警示：Slint 社区版，A1 未裁决）。
 - [ ] main.rs 是否仍无业务逻辑。
-- [ ] 是否把真实素材载荷传给了粘贴管线（当前仅演示文本）。
+- [ ] 双击上框是否走 `RealAssetResolver` 物化载荷而非演示文本（仅无 `--library-root` 的演示回退允许演示文本）。
 - [ ] 是否把 Win32 具体实现留在 VM crate（应迁回本二进制装配）。

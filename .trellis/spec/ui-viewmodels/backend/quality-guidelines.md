@@ -94,10 +94,10 @@ match stable_instance_match(&hot, &choices) {
   调用方传入相对路径（`--library samples/library`），绝对化的责任在本层。
 - `meta.rel_path` 以 `/` 分隔存储，必须逐段 `push` 拼接，不能整串 `join`（会产出
   `root\a/b/c` 这类混合分隔的相对路径）。
-- 可内联 `png_bytes` 的有两种：PNG 原图，以及旁挂派生 `objects/<uuid>/paste.png`
-  （见 DECISIONS D20，供千牛这类不认 jpg 原字节的 IM 使用）。两者都只是
-  `fs::read`，**不解码**，「UI 进程不解码」红线不变。
-- 其余素材（mp4/无派生的 jpg/…）靠 `source_path` 走 HDROP。
+- `png_bytes` **恒为空**（D41 物化零读盘）：物化期不再 `fs::read` PNG 原图或旁挂
+  派生 `objects/<uuid>/paste.png`（D20 的内联路径已废除，`asset_payload_spec`
+  有回归守卫），一律靠绝对 `source_path` 让协商回落 `CF_HDROP`。
+  「UI 进程不解码」红线不变。
 
 ### 3. Validation & Error Matrix
 
@@ -105,8 +105,7 @@ match stable_instance_match(&hot, &choices) {
 |---|---|
 | 相对库 root + `/` 分隔 rel_path | 绝对且存在的 `source_path` |
 | 文件缺失 | `CatalogError::Io`，不返回半成品载荷 |
-| 非 PNG 且无旁挂 `paste.png` | `png_bytes` 为空，靠路径上框 |
-| 非 PNG 但有旁挂 `paste.png` | 内联该派生文件字节，以 `CF_PNG` 交付 |
+| 非 PNG（无论有无旁挂 `paste.png`） | `png_bytes` 恒为空，靠 `source_path` 上框（D41 物化零读盘） |
 
 ### 4. Tests Required
 
