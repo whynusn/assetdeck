@@ -2700,3 +2700,185 @@ pub mod dragdrop {
         }
     }
 }
+
+/// 恢复重绘守卫：Windows 上 winit 不派发 Occluded 事件，glutin 对 WGL 表面
+/// 的 resize 是 no-op（"not supported with WGL"）——窗口尺寸变化后交换链
+/// 缓冲内容为未定义（黑），客户端区能否恢复全靠系统补发 WM_PAINT（winit
+/// 以它驱动 RedrawRequested）。最小化→唤出路径众多（任务栏点击、Win+D、
+/// 第三方唤起器），偶发漏发时未呈现的黑色缓冲会一直留在屏上（真机复现：
+/// 多次唤出后窗口部分渲染黑屏）。这里对主窗口 HWND 做旧式子类化：捕获
+/// 「最小化→非最小化」的 WM_SIZE 转换并补一发 RDW_INTERNALPAINT（系统侧
+/// 合并去重，不产生重绘风暴），把「恢复后必有重绘」变成硬保证。
+pub mod paint_guard {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{RedrawWindow, RDW_INTERNALPAINT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, SIZE_MINIMIZED,
+        WM_NCDESTROY, WM_SIZE, WNDPROC,
+    };
+
+    use crate::PlatformError;
+
+    static ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    static WAS_MINIMIZED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "system" fn guard_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_SIZE => {
+                let minimized = wparam == SIZE_MINIMIZED as usize;
+                let was = WAS_MINIMIZED.swap(minimized, Ordering::Relaxed);
+                if was && !minimized {
+                    // 恢复帧：补发内部绘制。winit 的 WM_PAINT 分支把它转成
+                    // RedrawRequested，femtovg 由此重铺整帧覆盖未定义缓冲。
+                    unsafe { RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_INTERNALPAINT) };
+                }
+            }
+            WM_NCDESTROY => {
+                // 还原子类化，避免销毁路径上 proc 悬垂。
+                let original = ORIGINAL_PROC.load(Ordering::Relaxed);
+                if original != 0 {
+                    unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, original) };
+                }
+            }
+            _ => {}
+        }
+        let original = ORIGINAL_PROC.load(Ordering::Relaxed);
+        if original == 0 {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        } else {
+            let proc: WNDPROC = std::mem::transmute(original);
+            unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+        }
+    }
+
+    /// 在主窗口 HWND 上安装守卫（幂等）。UI 线程 STA 单线程泵消息，安装期间
+    /// 不会有并发 proc 调用，ORIGINAL_PROC 的落库顺序因此安全。失败仅告警，
+    /// 不阻断主流程（守卫是兜底，常态路径是系统自发的 WM_PAINT）。
+    pub fn install(hwnd: isize) -> Result<(), PlatformError> {
+        if hwnd == 0 {
+            return Err(PlatformError::Window("窗口句柄为空，恢复重绘守卫不可用".into()));
+        }
+        if INSTALLED.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let previous = unsafe {
+            SetWindowLongPtrW(hwnd as HWND, GWLP_WNDPROC, guard_proc as *const () as usize as isize)
+        };
+        if previous == 0 {
+            INSTALLED.store(false, Ordering::Release);
+            return Err(PlatformError::Window("SetWindowLongPtrW 子类化失败".into()));
+        }
+        ORIGINAL_PROC.store(previous, Ordering::Release);
+        Ok(())
+    }
+}
+
+/// 事件驱动的「主窗口就绪」通知：winit 窗口在事件循环首轮才创建，业务侧
+/// （拖拽注册、渲染守卫）需要一个不轮询的挂载时机。这里用 WinEvent 钩子
+/// （EVENT_OBJECT_SHOW，按本进程过滤）实现：首个可见、无属主的顶层窗口
+/// 出现即回调一次并自摘钩子。替代旧「100ms Timer 退避重试」——临时
+/// slint::Timer 出语句即被 Drop 取消，轮询从未真正发生过（D49 拖拽注册
+/// 因此一直是死代码），且轮询本身违反项目「事件驱动优先」约束。
+pub mod window_ready {
+    use std::cell::RefCell;
+
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Accessibility::{
+        SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetClientRect, GetWindowLongPtrW, GetWindowThreadProcessId,
+        IsWindowVisible, EVENT_OBJECT_SHOW, GA_ROOT, GWLP_HWNDPARENT, OBJID_WINDOW,
+        WINEVENT_OUTOFCONTEXT,
+    };
+
+    use crate::PlatformError;
+
+    // WinEvent 回调投递在注册线程（Slint 主线程）上，thread_local 即可；
+    // 闭包捕获 slint::Weak（非 Send），不能进全局静态。
+    type PendingReadyCallback = Option<Box<dyn FnOnce(isize)>>;
+    thread_local! {
+        static PENDING: RefCell<PendingReadyCallback> = const { RefCell::new(None) };
+    }
+
+    unsafe extern "system" fn win_event_proc(
+        hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        id_object: i32,
+        id_child: i32,
+        _id_thread: u32,
+        _dwms_event_time: u32,
+    ) {
+        if event != EVENT_OBJECT_SHOW || id_object != OBJID_WINDOW || id_child != 0 || hwnd.is_null()
+        {
+            return;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid != GetCurrentProcessId() {
+            return;
+        }
+        // 只认本进程的可见、自 rooted、无属主顶层窗口（winit 主窗口；弹层与
+        // 消息专用窗口在此被滤掉）。
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let (visible, root, client_ok, owned) = unsafe {
+            (
+                IsWindowVisible(hwnd) != 0,
+                GetAncestor(hwnd, GA_ROOT),
+                GetClientRect(hwnd, &mut rect) != 0,
+                GetWindowLongPtrW(hwnd, GWLP_HWNDPARENT) != 0,
+            )
+        };
+        let client = client_ok && rect.right - rect.left > 0 && rect.bottom - rect.top > 0;
+        if !visible || root != hwnd || owned || !client {
+            return;
+        }
+        let callback = PENDING.with(|pending| pending.borrow_mut().take());
+        if let Some(callback) = callback {
+            unsafe { UnhookWinEvent(hook) };
+            callback(hwnd as isize);
+        }
+    }
+
+    /// 挂钩（run 事件循环前调用；钩子回调依赖调用线程泵消息，Slint 主线程
+    /// 满足）。窗口就绪即触发一次回调；失败仅返回 Err，由调用方降级。
+    pub fn on_first_visible_window(
+        callback: Box<dyn FnOnce(isize) + 'static>,
+    ) -> Result<(), PlatformError> {
+        let already_pending = PENDING.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            let was = pending.is_some();
+            *pending = Some(callback);
+            was
+        });
+        if already_pending {
+            return Err(PlatformError::Window("窗口就绪钩子已挂号".into()));
+        }
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_SHOW,
+                EVENT_OBJECT_SHOW,
+                std::ptr::null_mut(),
+                Some(win_event_proc),
+                GetCurrentProcessId(),
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.is_null() {
+            PENDING.with(|pending| *pending.borrow_mut() = None);
+            return Err(PlatformError::Window("SetWinEventHook 安装失败".into()));
+        }
+        Ok(())
+    }
+}

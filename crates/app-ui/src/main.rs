@@ -936,6 +936,11 @@ struct SlintFileDropSink {
 
 impl platform::FileDropSink for SlintFileDropSink {
     fn files_dropped(&self, paths: Vec<std::path::PathBuf>) {
+        logging::info!(
+            "拖拽 Drop 送达：{} 条路径（{}）",
+            paths.len(),
+            paths.first().map(|p| p.display().to_string()).unwrap_or_default()
+        );
         let weak = self.ui.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
@@ -951,42 +956,18 @@ impl platform::FileDropSink for SlintFileDropSink {
     }
 }
 
-/// HWND 就绪后注册拖入目标（winit 窗口在事件循环首轮才创建；未就绪则退避
-/// 重试，上限 5 秒后放弃——拖拽导入是增强项，失败不阻断主流程）。
-fn register_file_drop_when_ready(
-    app: slint::Weak<AppWindow>,
-    sink: std::sync::Arc<SlintFileDropSink>,
-    attempt: u32,
-) {
-    use raw_window_handle::HasWindowHandle;
-    const MAX_ATTEMPTS: u32 = 50;
-    let Some(ui) = app.upgrade() else {
-        return;
-    };
-    let hwnd = match ui.window().window_handle().window_handle() {
-        Ok(handle) => match handle.as_raw() {
-            raw_window_handle::RawWindowHandle::Win32(win32) => win32.hwnd.get(),
-            _ => 0,
-        },
-        Err(_) => 0,
-    };
-    if hwnd == 0 && attempt < MAX_ATTEMPTS {
-        // Timer 回调是 FnMut（不可移动捕获）：闭包只跑一次，用 Option.take 取出。
-        let mut next = Some((app, sink));
-        slint::Timer::default().start(
-            slint::TimerMode::SingleShot,
-            std::time::Duration::from_millis(100),
-            move || {
-                if let Some((app, sink)) = next.take() {
-                    register_file_drop_when_ready(app, sink, attempt + 1);
-                }
-            },
-        );
-        return;
-    }
+/// 主窗口就绪（WinEvent 钩子回调，事件驱动，无轮询）后的挂载项：D49 拖拽
+/// 导入注册 + 恢复重绘守卫（winit/femtovg 在 Windows 上的黑屏兜底，见
+/// platform::win32::paint_guard / window_ready 模块注释）。任一失败只告警，
+/// 不阻断主流程。
+fn mount_when_window_ready(hwnd: isize, sink: std::sync::Arc<SlintFileDropSink>) {
     match platform::win32::dragdrop::register_file_drop(hwnd, sink) {
         Ok(()) => logging::info!("拖拽导入已注册（hwnd={hwnd:#x}）"),
         Err(error) => logging::warn!("拖拽导入注册失败：{error}（可继续用导入入口）"),
+    }
+    match platform::win32::paint_guard::install(hwnd) {
+        Ok(()) => logging::info!("恢复重绘守卫已安装（hwnd={hwnd:#x}）"),
+        Err(error) => logging::warn!("恢复重绘守卫安装失败：{error}（不影响常规重绘）"),
     }
 }
 
@@ -1483,6 +1464,7 @@ fn main() {
                 .iter()
                 .map(|s| std::path::PathBuf::from(s.as_str()))
                 .collect();
+            logging::info!("UI files_dropped 回调：{} 条", paths.len());
             if paths.is_empty() {
                 return;
             }
@@ -2858,10 +2840,15 @@ fn main() {
     }
 
     grid.sync();
-    // D49 拖拽导入：等 HWND 就绪后注册（run 前排队，循环首轮起跑重试退避）。
+    // D49 拖拽导入 + 黑屏兜底（恢复后强制补一发重绘）：事件驱动等主窗口就绪
+    // ——run 前 WinEvent 钩子挂号，窗口首次可见即一次性装配（无轮询）。
     {
         let sink = std::sync::Arc::new(SlintFileDropSink { ui: app.as_weak() });
-        register_file_drop_when_ready(app.as_weak(), sink, 0);
+        if let Err(error) = platform::win32::window_ready::on_first_visible_window(Box::new(
+            move |hwnd| mount_when_window_ready(hwnd, sink),
+        )) {
+            logging::warn!("窗口就绪钩子挂号失败：{error}（拖拽导入与重绘守卫不可用）");
+        }
     }
     // 键盘捕获根（Esc / Ctrl+A）在启动时拿到焦点：capture 模式不抢输入焦点，
     // 检索框等 LineEdit 仍可正常打字（其聚焦态在 key-root 的让位判断里处理）。
