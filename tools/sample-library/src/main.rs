@@ -174,6 +174,7 @@ struct Summary {
     skipped: AtomicUsize,
     failed_total: AtomicUsize,
     failures: Mutex<Vec<String>>,
+    duplicates: Mutex<Vec<String>>,
     done: AtomicUsize,
     /// 进度行步长（1% 粒度），由 run_import 按总量算好注入。
     step: usize,
@@ -186,6 +187,15 @@ impl Summary {
         let mut list = self.failures.lock().unwrap();
         if list.len() < FAILURE_LIST_CAP {
             list.push(format!("{}：{reason}", source.display()));
+        }
+    }
+
+    /// 去重命中同样要可点名：skipped 不是「无事发生」，汇总 NOTICE 据此
+    /// 弹提示，否则「导入完成」与「实际入库 0 条」对用户无法区分。
+    fn record_duplicate(&self, source: &Path, existing: &str) {
+        let mut list = self.duplicates.lock().unwrap();
+        if list.len() < FAILURE_LIST_CAP {
+            list.push(format!("{} ≈ 已有素材「{}」", source.display(), existing));
         }
     }
 }
@@ -226,6 +236,7 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
         skipped: AtomicUsize::new(0),
         failed_total: AtomicUsize::new(0),
         failures: Mutex::new(Vec::new()),
+        duplicates: Mutex::new(Vec::new()),
         done: AtomicUsize::new(0),
         step,
     });
@@ -266,6 +277,7 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
     let skipped = summary.skipped.load(Ordering::Relaxed);
     let failed_total = summary.failed_total.load(Ordering::Relaxed);
     let failures = summary.failures.lock().unwrap();
+    let duplicates = summary.duplicates.lock().unwrap();
 
     // 进度收尾必须打满：节流可能让最后一段停在 99%。
     println!("PROGRESS\t{total}\t{total}");
@@ -283,6 +295,12 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
         println!(
             "NOTICE\t有 {failed_total} 个素材导入失败：{}",
             summarize_failures(&failures)
+        );
+    }
+    if skipped > 0 || !duplicates.is_empty() {
+        println!(
+            "NOTICE\t有 {skipped} 个素材与库内已有素材重复，已跳过：{}",
+            summarize_failures(&duplicates)
         );
     }
     Ok(())
@@ -327,7 +345,15 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
             }
         }
         Ok(EnqueueOutcome::Duplicate { existing_uuid }) => {
+            let existing = library
+                .store()
+                .get_asset(&existing_uuid)
+                .ok()
+                .flatten()
+                .map(|meta| meta.file_name)
+                .unwrap_or_else(|| existing_uuid.clone());
             println!("duplicate {existing_uuid} <= {}", asset.source.display());
+            summary.record_duplicate(&asset.source, &existing);
             summary.skipped.fetch_add(1, Ordering::Relaxed);
         }
         Ok(EnqueueOutcome::Unsupported { reason }) => {

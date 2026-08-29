@@ -26,6 +26,8 @@ pub enum CatalogError {
     MissingDatabase(String),
     Store(store::StoreError),
     Io(std::io::Error),
+    /// 素材存在但不可上框：已删除（回收站）/对象文件缺失。
+    PasteBlocked(String),
 }
 
 impl fmt::Display for CatalogError {
@@ -34,6 +36,7 @@ impl fmt::Display for CatalogError {
             CatalogError::MissingDatabase(msg) => write!(f, "库目录无效: {msg}"),
             CatalogError::Store(e) => write!(f, "存储错误: {e}"),
             CatalogError::Io(e) => write!(f, "IO 错误: {e}"),
+            CatalogError::PasteBlocked(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -393,6 +396,21 @@ impl RealAssetResolver {
             joined.push(segment);
         }
         let source_path = std::path::absolute(&joined)?;
+        // 上框域 = 活动素材（D60）：回收站行（对象已移 trash/）与文件缺失在
+        // 此拒绝——旧实现照常产出载荷，HDROP 指向不存在文件，IM 端静默丢弃
+        // 整次粘贴（提示「成功」、实际贴了空气）。
+        if self.store.is_deleted(&meta.uuid)? {
+            return Err(CatalogError::PasteBlocked(format!(
+                "素材已在回收站：{}",
+                meta.file_name
+            )));
+        }
+        if !source_path.is_file() {
+            return Err(CatalogError::PasteBlocked(format!(
+                "素材对象文件缺失：{}",
+                source_path.display()
+            )));
+        }
         // 类别判定统一走 media 注册表（综合分析报告「扩展性缺口 #2」）。
         let kind = media::kind_of(&source_path);
 

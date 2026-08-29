@@ -172,6 +172,39 @@ fn ext_of(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// 库内文本不变量（D60）：所有入库文本统一为 UTF-8（无 BOM）。
+///
+/// 判定顺序（确定性，不做内容嗅探）：UTF-8 BOM → 剥壳（主体须仍合法，病态
+/// 文件的主体再按 GBK）；UTF-16 BOM → 交给 encoding_rs 按 BOM 精确解码；
+/// 无 BOM 且合法 UTF-8 → 原样通过（最常见路径，零拷贝）；其余一律按 GBK
+/// 转码——中文 Windows 的 ANSI 事实标准。GBK 解码全域可映射不会失败，异种
+/// 编码会得到替换字符：宁可如此也不把非 UTF-8 字节放进库。
+///
+/// 只作用于入库副本，原始文件不动。纯内存计算，无 IO。
+pub fn normalize_text_to_utf8(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        return match std::str::from_utf8(rest) {
+            Ok(_) => std::borrow::Cow::Borrowed(rest),
+            Err(_) => std::borrow::Cow::Owned(gbk_to_utf8(rest)),
+        };
+    }
+    // UTF-16 BOM（LE/BE）分支：for_bom 按 BOM 选编码解码（此分支必然命中，
+    // UTF-8 BOM 已在上面剥离）。注意 encoding_rs 没有自由函数 decode()。
+    if let Some((encoding, _)) = encoding_rs::Encoding::for_bom(bytes) {
+        let (text, _, _) = encoding.decode(bytes);
+        return std::borrow::Cow::Owned(text.into_owned().into_bytes());
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    std::borrow::Cow::Owned(gbk_to_utf8(bytes))
+}
+
+fn gbk_to_utf8(bytes: &[u8]) -> Vec<u8> {
+    let (text, _, _) = encoding_rs::GBK.decode(bytes);
+    text.into_owned().into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +248,45 @@ mod tests {
         assert!(!is_paste_derivable("unknown"));
         assert!(is_importable(Path::new("x/photo.webp")));
         assert!(!is_importable(Path::new("x/pdf")));
+    }
+
+    /// D60 库内文本不变量的四条输入路径：UTF-8 直通、GBK 转码、BOM 剥壳、
+    /// UTF-16 解码——产出一律是合法 UTF-8（严格解码验证）。
+    #[test]
+    fn text_normalization_covers_utf8_gbk_bom_and_utf16() {
+        // 无 BOM 合法 UTF-8：原样通过（零拷贝借用）。
+        let utf8 = "你好，world".as_bytes().to_vec();
+        assert!(matches!(
+            normalize_text_to_utf8(&utf8),
+            std::borrow::Cow::Borrowed(_)
+        ));
+
+        // GBK（中文 Windows ANSI）：你好 = C4 E3 BA C3。
+        let gbk = [0xC4u8, 0xE3, 0xBA, 0xC3, b'a', b'b'];
+        assert_eq!(
+            normalize_text_to_utf8(&gbk).as_ref(),
+            "你好ab".as_bytes()
+        );
+
+        // UTF-8 BOM：剥壳。
+        let mut bom_utf8 = vec![0xEFu8, 0xBB, 0xBF];
+        bom_utf8.extend_from_slice("hi".as_bytes());
+        assert_eq!(normalize_text_to_utf8(&bom_utf8).as_ref(), b"hi");
+
+        // UTF-16LE BOM：解码为 UTF-8。
+        let mut utf16 = vec![0xFFu8, 0xFE];
+        for unit in "你好".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(normalize_text_to_utf8(&utf16).as_ref(), "你好".as_bytes());
+
+        // 归一化产物必须是严格合法 UTF-8。
+        for input in [gbk.as_slice(), bom_utf8.as_slice(), utf16.as_slice()] {
+            let out = normalize_text_to_utf8(input);
+            assert!(
+                std::str::from_utf8(out.as_ref()).is_ok(),
+                "归一化输出必须是合法 UTF-8"
+            );
+        }
     }
 }

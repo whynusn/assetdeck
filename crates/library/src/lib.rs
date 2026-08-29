@@ -591,7 +591,21 @@ impl Library {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_else(|| "bin".to_string());
         let rel_path = format!("{rel_dir}/raw.{ext}");
-        let size_bytes = fs::metadata(&req.source)?.len() as i64;
+        // 文本素材（D60 库内文本不变量）：尺寸按转码后字节计，超限在入口硬
+        // 拒绝——病态大文本不进拷贝队列（粘贴端对文本本就是同步读盘）。
+        let size_bytes = if kind == AssetKind::Text {
+            if fs::metadata(&req.source)?.len() > TEXT_IMPORT_MAX_BYTES {
+                return Ok(EnqueueOutcome::Unsupported {
+                    reason: format!(
+                        "文本素材超过 {}MB，暂不支持导入",
+                        TEXT_IMPORT_MAX_BYTES / (1024 * 1024)
+                    ),
+                });
+            }
+            media::normalize_text_to_utf8(&fs::read(&req.source)?).len() as i64
+        } else {
+            fs::metadata(&req.source)?.len() as i64
+        };
         let created_at = fs::metadata(&req.source)?
             .modified()
             .ok()
@@ -779,7 +793,7 @@ fn worker_loop(
             }
         };
 
-        let outcome = copy_with_progress(&job.source, &job.dest, job.total, |copied| {
+        let progress = |copied: u64| {
             let (lock, _) = &*shared;
             let mut g = lock.lock().unwrap();
             g.states.insert(
@@ -789,7 +803,13 @@ fn worker_loop(
                     total: job.total,
                 },
             );
-        });
+        };
+        // 文本素材走归一化拷贝（D60 库内文本不变量的写入点），其余逐块复制。
+        let outcome = if media::kind_of(&job.dest) == AssetKind::Text {
+            copy_text_normalized(&job.source, &job.dest, job.total, progress)
+        } else {
+            copy_with_progress(&job.source, &job.dest, job.total, progress)
+        };
 
         match outcome {
             Ok(()) => {
@@ -1021,6 +1041,9 @@ fn flush_upsert_batch(
     }
 }
 
+/// 文本素材入库字节上限（D60 库内文本不变量的资源闸）：超过即入口硬拒绝。
+const TEXT_IMPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 fn copy_with_progress(
     src: &Path,
     dst: &Path,
@@ -1041,6 +1064,21 @@ fn copy_with_progress(
         on_progress(copied.min(total));
     }
     writer.flush()?;
+    Ok(())
+}
+
+/// 文本素材拷贝：读取 → 归一化 UTF-8 → 落盘。与 enqueue 的尺寸预计算共用
+/// [`media::normalize_text_to_utf8`]，保证 meta.size_bytes 与实盘字节一致。
+fn copy_text_normalized(
+    src: &Path,
+    dst: &Path,
+    total: u64,
+    mut on_progress: impl FnMut(u64),
+) -> std::io::Result<()> {
+    let bytes = fs::read(src)?;
+    let normalized = media::normalize_text_to_utf8(&bytes);
+    fs::write(dst, normalized.as_ref())?;
+    on_progress(total.max(normalized.len() as u64));
     Ok(())
 }
 

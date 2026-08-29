@@ -6,3 +6,6 @@ publish.workspace = true
 
 [dependencies]
 domain = { path = "../domain" }
+# D60 库内文本不变量：入库文本统一转 UTF-8（BOM 识别 + GBK 回转码）。
+# 许可证 Apache-2.0/MIT（AGENTS.md 许可证审查通过）；纯内存计算无 IO。
+encoding_rs = "0.8"
