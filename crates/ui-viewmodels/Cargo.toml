@@ -17,6 +17,9 @@ platform = { path = "../platform" }
 lru = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# D56 更新检查：GitHub release 清单是 JSON。serde_json 已在依赖树里
+# （Cargo.lock 既有条目），升为直接依赖不新增任何 vendored crate。
+serde_json = "1"
 # D42（上框解绑竞态自愈）落地：target_runtime 直接使用 log facade。
 log = "0.4"
 

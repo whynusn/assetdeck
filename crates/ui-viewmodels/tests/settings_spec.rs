@@ -26,6 +26,9 @@ fn defaults_are_conservative() {
     assert!(!s.light_theme, "默认深色主题");
     assert!(s.ui_animations, "默认开界面动画");
     assert_eq!(s.sidebar_width, 212.0, "默认侧栏宽度 212");
+    assert!(s.auto_update_check, "默认开自动检查更新（D56）");
+    assert_eq!(s.last_check_unix, 0, "默认从未检查过");
+    assert!(s.dismissed_version.is_empty(), "默认没有跳过的版本");
 }
 
 #[test]
@@ -48,6 +51,9 @@ fn save_then_load_roundtrips() {
         remember_folder_category: String::new(),
         remember_loose_mode: "unified".into(),
         remember_loose_category: "相册".into(),
+        auto_update_check: false,
+        last_check_unix: 1_700_000_000,
+        dismissed_version: "v0.2.0".into(),
     };
     s.save(&path).expect("写设置失败");
     let loaded = AppSettings::load(&path);

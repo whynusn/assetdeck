@@ -5232,6 +5232,7 @@ dependencies = [
  "pipeline",
  "platform",
  "serde",
+ "serde_json",
  "store",
  "targets",
  "toml",

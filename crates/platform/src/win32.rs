@@ -2885,3 +2885,292 @@ pub mod window_ready {
         Ok(())
     }
 }
+
+/// HTTP 文本拉取（D56 更新检查）与「系统默认方式打开 URL」。
+///
+/// 为什么是 WinHTTP 而不是 reqwest/ureq：零新依赖（D56）——windows-sys
+/// 已在编译树里，schannel 出 TLS 不新增任何 crate；更新检查是 24h 一次的
+/// 低频动作，不值得为它背一整套 HTTP 客户端栈。AUTOMATIC_PROXY 跟随用户
+/// 系统代理——国内直连 GitHub 常需代理，这是「镜像顺序回落」之外的生命线。
+///
+/// 每次拉取独立建会话（session→connect→request，RAII 逆声明序回收）：
+/// 频率极低，不为复用句柄引入跨线程生命周期管理。
+pub mod http {
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Networking::WinHttp::{
+        WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+        WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+        WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+        WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    };
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    use crate::{HttpTextFetcher, PlatformError, Result, UrlOpener};
+
+    /// 响应体上限：release 清单 JSON 是 KB 量级（超长 notes 也远够），对端
+    /// 异常时不得无界吃内存。
+    const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+    /// WinHTTP 句柄 RAII：任一步失败自动关闭已建句柄，不泄漏。
+    struct HttpHandle(*mut core::ffi::c_void);
+    impl Drop for HttpHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { WinHttpCloseHandle(self.0) };
+            }
+        }
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn last_error() -> u32 {
+        unsafe { GetLastError() }
+    }
+
+    /// 拆 URL 为 (是否 https, 主机, 端口, 路径)。仅接受 http(s)——更新源清单
+    /// 是静态配置而非用户输入，更宽松的协议没有服务对象。
+    fn split_url(url: &str) -> Result<(bool, String, u16, String)> {
+        let (secure, rest) = match url.split_once("://") {
+            Some(("https", rest)) => (true, rest),
+            Some(("http", rest)) => (false, rest),
+            _ => return Err(PlatformError::Network(format!("不支持的 URL: {url}"))),
+        };
+        let (authority, path) = match rest.find('/') {
+            Some(index) => (&rest[..index], &rest[index..]),
+            None => (rest, "/"),
+        };
+        let (host, port) = match authority.rsplit_once(':') {
+            // 末段全数字才当端口（避免吃掉 IPv6 裸地址的冒号段）。
+            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (
+                h,
+                p.parse::<u16>()
+                    .map_err(|_| PlatformError::Network(format!("端口非法: {url}")))?,
+            ),
+            _ => (authority, if secure { 443 } else { 80 }),
+        };
+        if host.is_empty() {
+            return Err(PlatformError::Network(format!("URL 缺主机名: {url}")));
+        }
+        Ok((secure, host.to_string(), port, path.to_string()))
+    }
+
+    pub struct Win32HttpFetcher;
+
+    impl HttpTextFetcher for Win32HttpFetcher {
+        fn fetch_text(&self, url: &str, timeout_ms: u64) -> Result<String> {
+            let (secure, host, port, path) = split_url(url)?;
+            let host_w = wide(&host);
+            let path_w = wide(&path);
+            let verb_w = wide("GET");
+            // api.github.com 无 User-Agent 直接拒绝请求；Accept 按 GitHub JSON 惯例带。
+            let headers_w = wide(concat!(
+                "User-Agent: assetdeck-updater/",
+                env!("CARGO_PKG_VERSION"),
+                "\r\nAccept: application/vnd.github+json\r\n"
+            ));
+            // 各相位同一上限：解析/连接/发送/接收合计最坏 ~4×timeout，
+            // 后台线程执行不阻塞 UI，语义是「单源最多拖这么久」。
+            let timeout = timeout_ms.clamp(1_000, 60_000) as i32;
+
+            unsafe {
+                let session = HttpHandle(WinHttpOpen(
+                    wide(concat!("assetdeck-updater/", env!("CARGO_PKG_VERSION"))).as_ptr(),
+                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                ));
+                if session.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "WinHttpOpen 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
+
+                let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
+                if connection.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "连接 {host} 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
+                let request = HttpHandle(WinHttpOpenRequest(
+                    connection.0,
+                    verb_w.as_ptr(),
+                    path_w.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    flags,
+                ));
+                if request.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "构造请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                if WinHttpSendRequest(
+                    request.0,
+                    headers_w.as_ptr(),
+                    // 头串长度按字符计（全 ASCII，UTF-16 长度与字节数一致）。
+                    headers_w.len() as u32 - 1,
+                    ptr::null(),
+                    0,
+                    0,
+                    0,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "发送请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                if WinHttpReceiveResponse(request.0, ptr::null_mut()) == 0 {
+                    return Err(PlatformError::Network(format!(
+                        "接收响应失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let mut status: u32 = 0;
+                let mut status_size = std::mem::size_of::<u32>() as u32;
+                let mut index: u32 = 0;
+                if WinHttpQueryHeaders(
+                    request.0,
+                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    ptr::null(),
+                    &mut status as *mut u32 as *mut core::ffi::c_void,
+                    &mut status_size,
+                    &mut index,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "读状态码失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                if !(200..300).contains(&status) {
+                    return Err(PlatformError::Network(format!("HTTP {status}（{host}）")));
+                }
+
+                let mut body: Vec<u8> = Vec::new();
+                loop {
+                    let mut available: u32 = 0;
+                    if WinHttpQueryDataAvailable(request.0, &mut available) == 0 {
+                        return Err(PlatformError::Network(format!(
+                            "探测数据量失败 (错误码 {})",
+                            last_error()
+                        )));
+                    }
+                    if available == 0 {
+                        break;
+                    }
+                    if body.len() + available as usize > MAX_BODY_BYTES {
+                        return Err(PlatformError::Network(
+                            "响应体超出 2 MiB 上限，疑似异常响应".into(),
+                        ));
+                    }
+                    let start = body.len();
+                    body.resize(start + available as usize, 0);
+                    let mut read: u32 = 0;
+                    if WinHttpReadData(
+                        request.0,
+                        body[start..].as_mut_ptr() as *mut core::ffi::c_void,
+                        available,
+                        &mut read,
+                    ) == 0
+                    {
+                        return Err(PlatformError::Network(format!(
+                            "读取响应失败 (错误码 {})",
+                            last_error()
+                        )));
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                    body.truncate(start + read as usize);
+                }
+
+                String::from_utf8(body)
+                    .map_err(|_| PlatformError::Network("响应体不是合法 UTF-8".into()))
+            }
+        }
+    }
+
+    pub struct Win32UrlOpener;
+
+    impl UrlOpener for Win32UrlOpener {
+        fn open_url(&self, url: &str) -> Result<()> {
+            let operation = wide("open");
+            let file = wide(url);
+            let instance = unsafe {
+                ShellExecuteW(
+                    ptr::null_mut(),
+                    operation.as_ptr(),
+                    file.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    SW_SHOWNORMAL,
+                )
+            };
+            // ShellExecuteW 约定：返回值 > 32 为成功。
+            if instance as usize > 32 {
+                Ok(())
+            } else {
+                Err(PlatformError::External(format!(
+                    "ShellExecuteW 返回 {}（打开 {url}）",
+                    instance as usize
+                )))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::split_url;
+
+        #[test]
+        fn split_url_breaks_down_https_default_port() {
+            let parsed = split_url("https://api.github.com/repos/x/y/releases/latest").unwrap();
+            assert_eq!(
+                parsed,
+                (
+                    true,
+                    "api.github.com".to_string(),
+                    443u16,
+                    "/repos/x/y/releases/latest".to_string()
+                )
+            );
+        }
+
+        #[test]
+        fn split_url_keeps_explicit_port_and_bare_host() {
+            assert_eq!(
+                split_url("http://mirror.example:8080").unwrap(),
+                (
+                    false,
+                    "mirror.example".to_string(),
+                    8080u16,
+                    "/".to_string()
+                )
+            );
+        }
+
+        #[test]
+        fn split_url_rejects_non_http_and_hostless() {
+            assert!(split_url("ftp://mirror.example/file").is_err());
+            assert!(split_url("api.github.com/x").is_err());
+        }
+    }
+}
+
+pub use http::{Win32HttpFetcher, Win32UrlOpener};

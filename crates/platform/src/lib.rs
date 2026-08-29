@@ -124,6 +124,10 @@ pub enum PlatformError {
     Inject(String),
     /// 窗口枚举、观察、激活或状态查询失败。
     Window(String),
+    /// 网络请求失败（DNS/连接/超时/HTTP 状态非 2xx/响应体超限或非法编码）。
+    Network(String),
+    /// 外部链接或程序经系统默认方式打开失败（ShellExecute 返回值 ≤ 32）。
+    External(String),
     Io(std::io::Error),
 }
 
@@ -133,6 +137,8 @@ impl fmt::Display for PlatformError {
             PlatformError::Clipboard(msg) => write!(f, "剪贴板错误: {msg}"),
             PlatformError::Inject(msg) => write!(f, "输入注入错误: {msg}"),
             PlatformError::Window(msg) => write!(f, "窗口操作错误: {msg}"),
+            PlatformError::Network(msg) => write!(f, "网络错误: {msg}"),
+            PlatformError::External(msg) => write!(f, "外部打开失败: {msg}"),
             PlatformError::Io(e) => write!(f, "IO 错误: {e}"),
         }
     }
@@ -367,6 +373,19 @@ pub trait WindowEventSource {
     /// 输入框元素，我们能观测到的只有这些迹象。观测到就早走，观测不到就等满上限后
     /// 照旧注入 —— 与改造前「睡满 settle_ms 再注入」相比只会更早，不会更晚。
     fn await_input_surface(&self, window: WindowHandle) -> Box<dyn EventWait>;
+}
+
+/// HTTP 文本拉取端（D56 更新检查）。实现负责 TLS、系统代理与超时；
+/// 非 2xx、超时、断连或响应非法编码都算失败。响应体大小上限由实现自定
+/// （对端异常时不得无界吃内存）。签名不外泄平台术语，调用方按 URL 表达意图。
+pub trait HttpTextFetcher {
+    fn fetch_text(&self, url: &str, timeout_ms: u64) -> Result<String>;
+}
+
+/// 系统默认方式打开 URL（更新弹窗「打开发布页」，D56）。实现把「交给系统
+/// 默认浏览器」这一意图收拢到平台层；用户取消之外的失败返回 Err。
+pub trait UrlOpener {
+    fn open_url(&self, url: &str) -> Result<()>;
 }
 
 // 平台实现模块：声明本身不带条件门，「仅 Windows」的门在该文件内部，

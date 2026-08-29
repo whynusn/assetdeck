@@ -78,6 +78,22 @@ pub struct AppSettings {
     pub remember_loose_mode: String,
     #[serde(default)]
     pub remember_loose_category: String,
+    /// D56 自动检查更新：true（默认）= 启动后静默检查（≥24h 节流）；
+    /// false = 只能经设置面板手动检查。
+    #[serde(default = "default_auto_update_check")]
+    pub auto_update_check: bool,
+    /// 上次发起更新检查的时刻（Unix 秒）。无论成败都刷新——失败也退避，
+    /// 不让每次启动都对不可达的源白打一发。0 = 从未检查。
+    #[serde(default)]
+    pub last_check_unix: u64,
+    /// 「跳过此版本」记录的版本号；空串 = 没跳过过。静默检查命中该版本
+    /// 不再弹窗（手动检查不受影响）。
+    #[serde(default)]
+    pub dismissed_version: String,
+}
+
+fn default_auto_update_check() -> bool {
+    true
 }
 
 fn default_ask_classify() -> bool {
@@ -160,6 +176,9 @@ impl Default for AppSettings {
             remember_folder_category: String::new(),
             remember_loose_mode: String::new(),
             remember_loose_category: String::new(),
+            auto_update_check: default_auto_update_check(),
+            last_check_unix: 0,
+            dismissed_version: String::new(),
         }
     }
 }
@@ -167,18 +186,33 @@ impl Default for AppSettings {
 impl AppSettings {
     /// 按 [`SETTING_SPECS`] 顺序产出全部设置项视图（含动态说明文案与当前值）。
     ///
-    /// 壳层直接渲染返回向量；顺序即展示顺序，无需再维护第二份 key 表。
+    /// 分区标题按 `section` 字段变化就地插入（`header=true` 的视图，key 为空、
+    /// 无开关），壳层照序渲染即可。顺序即展示顺序，无需再维护第二份 key 表。
     pub fn describe(&self) -> Vec<SettingView> {
-        SETTING_SPECS
-            .iter()
-            .map(|spec| SettingView {
+        let mut views = Vec::with_capacity(SETTING_SPECS.len() + 4);
+        let mut last_section = "";
+        for spec in SETTING_SPECS {
+            if spec.section != last_section {
+                views.push(SettingView {
+                    key: String::new(),
+                    title: spec.section.to_string(),
+                    detail: String::new(),
+                    checked: false,
+                    enabled: false,
+                    header: true,
+                });
+                last_section = spec.section;
+            }
+            views.push(SettingView {
                 key: spec.key.to_string(),
                 title: spec.title.to_string(),
                 detail: self.detail_for(spec.key).to_string(),
                 checked: self.value_of(spec.key),
                 enabled: self.enabled_for(spec.key),
-            })
-            .collect()
+                header: false,
+            });
+        }
+        views
     }
 
     /// 按 key 翻转对应开关字段；返回是否认识该 key。
@@ -204,6 +238,7 @@ impl AppSettings {
             "fast_import_mode" => self.fast_import_mode,
             "verbose_diagnostics" => self.verbose_diagnostics,
             "ask_classify_on_import" => self.ask_classify_on_import,
+            "auto_update_check" => self.auto_update_check,
             _ => false,
         }
     }
@@ -219,6 +254,7 @@ impl AppSettings {
             "fast_import_mode" => Some(&mut self.fast_import_mode),
             "verbose_diagnostics" => Some(&mut self.verbose_diagnostics),
             "ask_classify_on_import" => Some(&mut self.ask_classify_on_import),
+            "auto_update_check" => Some(&mut self.auto_update_check),
             _ => None,
         }
     }
@@ -228,27 +264,20 @@ impl AppSettings {
         !matches!(key, "send_after_paste")
     }
 
-    /// key → 动态说明文案（设置面板次要行的「当前状态说明」）。
+    /// key → 动态说明文案（设置面板次要行）。一句话讲清「开了会怎样/何时生效」，
+    /// 不写「开启（默认）：……」这类把出厂状态复读给用户的长句——文字墙会
+    /// 把整块面板拖成需要阅读而不是扫一眼的表单（真机截图教训）。
     fn detail_for(&self, key: &str) -> &'static str {
         match key {
-            "activate_on_single_click" => "开启：单击素材即进入输入框；关闭：需双击才上框。",
-            "send_after_paste" => "即将支持：当前上框只会粘贴到输入框，不会自动发送。",
-            "gpu_rendering" => "重启后生效。默认关闭：GPU 档拖拽窗口尺寸时明显卡顿（femtovg 逐帧重建）；显卡好的机器可开启。",
-            "light_theme" => {
-                "立即生效：自绘层与控件（输入框/按钮/进度条）一并切换明暗，无需重启。"
-            }
-            "ui_animations" => {
-                "开启：弹层（设置/目标选择/导入菜单）展开播过渡动画；关闭则立即展开。"
-            }
-            "fast_import_mode" => {
-                "开启（默认）：导入用多线程高速并发，吞吐优先；关闭：后台慢速，不抢前台操作。对后续导入生效。"
-            }
-            "verbose_diagnostics" => {
-                "关闭（默认）：只记录导入/上框/焦点切换等重要事件；临时开启后连高频细节一起落盘，方便排查。"
-            }
-            "ask_classify_on_import" => {
-                "开启（默认）：每次导入前弹归类弹窗；关闭后按上次勾选「记住我的选择」的方式直接导入，不再询问。"
-            }
+            "activate_on_single_click" => "开启：单击素材即上框；关闭：双击上框。",
+            "send_after_paste" => "即将支持：上框目前止步于输入框，不会自动发送。",
+            "gpu_rendering" => "重启后生效。默认关闭：GPU 档拖拽窗口易卡顿。",
+            "light_theme" => "深浅主题立即切换，无需重启。",
+            "ui_animations" => "关闭后弹层立即展开，不播过渡动画。",
+            "fast_import_mode" => "多线程高速导入；关闭后转后台慢速，不抢前台。",
+            "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
+            "ask_classify_on_import" => "每次导入前询问归类；关闭后按记住的方式直接导入。",
+            "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",
             _ => "",
         }
     }
@@ -260,56 +289,84 @@ pub enum SettingKind {
     Toggle,
 }
 
-/// 设置项静态规格：键、标题与控件种类。构造辅助是 `const fn`，
+/// 设置项静态规格：键、标题、所属分区与控件种类。构造辅助是 `const fn`，
 /// 可静态初始化（见 [`SETTING_SPECS`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingSpec<'a> {
     pub key: &'a str,
     pub title: &'a str,
+    /// 所属分区名；相邻 spec 的 section 变化处即面板分区标题插入点。
+    pub section: &'a str,
     pub kind: SettingKind,
 }
 
 impl<'a> SettingSpec<'a> {
     /// const 构造辅助：支持 `static` 上下文静态初始化。
-    pub const fn new(key: &'a str, title: &'a str, kind: SettingKind) -> Self {
-        SettingSpec { key, title, kind }
+    pub const fn new(key: &'a str, title: &'a str, section: &'a str, kind: SettingKind) -> Self {
+        SettingSpec {
+            key,
+            title,
+            section,
+            kind,
+        }
     }
 }
 
-/// 全部设置项（v1 全为开关）。顺序即设置面板展示顺序；
+/// 全部设置项（v1 全为开关）。顺序即设置面板展示顺序（按分区聚簇）；
 /// [`AppSettings::describe`] 按此顺序产出视图，[`AppSettings::toggle`] 按 key 翻转。
 pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
     SettingSpec::new(
         "activate_on_single_click",
         "上框触发方式",
+        "上框行为",
         SettingKind::Toggle,
     ),
     SettingSpec::new(
         "send_after_paste",
-        "上框后自动发送（即将支持）",
+        "上框后自动发送",
+        "上框行为",
         SettingKind::Toggle,
     ),
-    SettingSpec::new("gpu_rendering", "GPU 渲染", SettingKind::Toggle),
     SettingSpec::new(
         "ask_classify_on_import",
         "导入时询问归类",
+        "导入",
         SettingKind::Toggle,
     ),
-    SettingSpec::new("light_theme", "浅色主题", SettingKind::Toggle),
-    SettingSpec::new("ui_animations", "界面动画", SettingKind::Toggle),
-    SettingSpec::new("fast_import_mode", "前台高速导入", SettingKind::Toggle),
-    SettingSpec::new("verbose_diagnostics", "细粒度诊断日志", SettingKind::Toggle),
+    SettingSpec::new(
+        "fast_import_mode",
+        "前台高速导入",
+        "导入",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new("light_theme", "浅色主题", "外观", SettingKind::Toggle),
+    SettingSpec::new("ui_animations", "界面动画", "外观", SettingKind::Toggle),
+    SettingSpec::new("gpu_rendering", "GPU 渲染", "高级", SettingKind::Toggle),
+    SettingSpec::new(
+        "verbose_diagnostics",
+        "细粒度诊断日志",
+        "高级",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
+        "auto_update_check",
+        "自动检查更新",
+        "高级",
+        SettingKind::Toggle,
+    ),
 ];
 
-/// 设置项动态视图：`describe()` 为每条规格补齐说明文案与当前值。
+/// 设置项动态视图：`describe()` 为每条规格补齐说明文案与当前值；
+/// 分区标题行 `header=true`（key 空、无开关）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingView {
     pub key: String,
     pub title: String,
-    /// 动态说明文案（如 gpu_rendering 注明「重启后生效」、light_theme 注明「切换主题需重启」）。
+    /// 动态说明文案（一句话讲清效果与生效时机）。
     pub detail: String,
     pub checked: bool,
     pub enabled: bool,
+    pub header: bool,
 }
 
 /// 设置文件位置（便携约定）：有库根 → `<root>/settings.toml`；
@@ -347,14 +404,35 @@ mod tests {
             remember_folder_category: String::new(),
             remember_loose_mode: String::new(),
             remember_loose_category: String::new(),
+            auto_update_check: true,
+            last_check_unix: 0,
+            dismissed_version: String::new(),
         };
         let views = settings.describe();
 
-        assert_eq!(views.len(), SETTING_SPECS.len(), "describe 覆盖全部规格");
-        for (view, spec) in views.iter().zip(SETTING_SPECS.iter()) {
+        // 分区标题按 section 变化插入：4 组 → 恰好 4 条 header，且位置正确。
+        let headers: Vec<&SettingView> = views.iter().filter(|v| v.header).collect();
+        assert_eq!(
+            headers
+                .iter()
+                .map(|h| h.title.as_str())
+                .collect::<Vec<_>>(),
+            ["上框行为", "导入", "外观", "高级"],
+            "分区标题按顺序恰好出现一次"
+        );
+
+        // 非标题行与 SETTING_SPECS 一一同构（顺序 + 字段）。
+        let rows: Vec<&SettingView> = views.iter().filter(|v| !v.header).collect();
+        assert_eq!(rows.len(), SETTING_SPECS.len(), "设置行覆盖全部规格");
+        for (view, spec) in rows.iter().zip(SETTING_SPECS.iter()) {
             assert_eq!(view.key, spec.key);
             assert_eq!(view.title, spec.title);
             assert!(!view.detail.is_empty(), "{} 应有动态说明文案", spec.key);
+            assert!(
+                !view.detail.contains('\n'),
+                "{} 的说明应为一句话，不换行",
+                spec.key
+            );
             let expected = match spec.key {
                 "activate_on_single_click" => settings.activate_on_single_click,
                 "send_after_paste" => settings.send_after_paste,
@@ -364,6 +442,7 @@ mod tests {
                 "fast_import_mode" => settings.fast_import_mode,
                 "verbose_diagnostics" => settings.verbose_diagnostics,
                 "ask_classify_on_import" => settings.ask_classify_on_import,
+                "auto_update_check" => settings.auto_update_check,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(
@@ -372,6 +451,11 @@ mod tests {
                 spec.key
             );
         }
+        // 标题行紧邻各自组首行：header 之后紧跟该组第一条设置。
+        assert!(views[0].header, "首项之前应有分组标题");
+        assert!(!views[1].header && views[1].key == "activate_on_single_click");
+        assert_eq!(views[2].key, "send_after_paste", "同组连续排列");
+        assert!(views[3].header, "分组切换处插入标题");
     }
 
     #[test]
@@ -420,6 +504,26 @@ mod tests {
         let loaded = AppSettings::load(&path);
         assert_eq!(loaded.sidebar_width, SIDEBAR_MIN_WIDTH, "低于下限夹回 150");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_check_fields_roundtrip_via_disk() {
+        let dir = PathBuf::from("target").join("tmp").join("settings-update");
+        let path = dir.join("settings.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("建临时目录失败");
+
+        let settings = AppSettings {
+            last_check_unix: 1_700_000_000,
+            dismissed_version: "v0.2.0".to_string(),
+            ..AppSettings::default()
+        };
+        settings.save(&path).expect("写设置失败");
+        let loaded = AppSettings::load(&path);
+        assert_eq!(loaded.last_check_unix, 1_700_000_000, "检查时刻 round-trip");
+        assert_eq!(loaded.dismissed_version, "v0.2.0", "跳过版本 round-trip");
+        assert!(loaded.auto_update_check, "默认开启自动检查");
         let _ = fs::remove_dir_all(&dir);
     }
 

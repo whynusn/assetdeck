@@ -11,6 +11,7 @@ pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
 pub mod target_runtime;
 pub mod theme;
+pub mod update_check;
 
 pub use catalog_loader::{
     load_library_catalog, load_real_library, CatalogError, FacetEntry, LibraryFacets,
@@ -28,10 +29,16 @@ pub use target_bar_vm::{
     TargetPasteNotice, TargetRoutingVm,
 };
 pub use theme::{DarkThemeProvider, LightThemeProvider, ThemeProvider, ThemeTokens};
+pub use update_check::{
+    check_update, load_feeds, relative_time, unix_now_secs, CheckOutcome, ReleaseInfo,
+    UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS, FETCH_TIMEOUT_MS,
+};
 
 pub use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps};
 pub use target_runtime::{TargetRoutingRuntime, TargetRuntimeDeps};
-pub use targets::{Health as TargetHealth, ProfileError as TargetProfileError};
+pub use targets::{
+    AliasMap, Health as TargetHealth, ProfileError as TargetProfileError,
+};
 
 /// 壳层（app-ui）依赖白名单只有本 crate + slint，装配所需的领域类型经此转发。
 pub use domain::{
