@@ -48,6 +48,10 @@ pub struct TargetBinding {
     pub minimized: bool,
     pub visible: bool,
     pub instance_id: String,
+    /// 匹配时标题正则是否命中（「会话窗口」证据）。千牛优惠弹窗这类
+    /// 「类名命中但标题不合会话特征」的窗口为 false，热目标切换日志据此
+    /// 区分正常跟随与可疑顶替。
+    pub session_window: bool,
 }
 
 impl TargetBinding {
@@ -60,6 +64,7 @@ impl TargetBinding {
             minimized: false,
             visible: true,
             instance_id: format!("handle-{}", hwnd.0),
+            session_window: false,
         }
     }
 }

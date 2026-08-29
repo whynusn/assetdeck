@@ -133,6 +133,7 @@ fn profile() -> Profile {
         class_names: Vec::new(),
         title_regexes: Vec::new(),
         not_ready_title_regexes: Vec::new(),
+        require_title: false,
         formats: FormatPolicy::default(),
         paste_sends: SendPolicy::default(),
         readiness: targets::ReadinessMode::UiaShallow,

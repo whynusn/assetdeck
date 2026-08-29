@@ -43,6 +43,8 @@ label = "微信 (4.0)"
 exe_names = ["Weixin.exe"]
 class_names = ["Qt51514QWindowIcon"]
 title_regexes = ["^微信$"]
+# 微信不启用 require_title（严格档）：独立聊天窗口标题是联系人名，靠类名兜住
+# 才是合法上框目标；微信杂窗口少、弹窗不抢前台，宽松档的误配风险可接受。
 not_ready_title_regexes = ["微信登录", "微信未登录"]
 readiness = "uia_shallow"
 settle_ms = 150
@@ -69,10 +71,17 @@ id = "qianniu"
 label = "千牛"
 exe_names = ["AliWorkbench.exe"]
 class_names = ["Qt5152QWindowIcon"]
+# 会话窗口标题存在用户级变体（2026-08-29 用户反馈：部分用户是「接待台」而
+# 非「接待中心」），正则枚举两者；工作台 / 登录窗照旧。
 # 接待中心（会话窗口）标题形如 `tb940472610424-接待中心`，是真正带输入框的上框目标，
 # 必须显式声明，不能依赖 `-千牛工作台` 的巧合匹配。
-title_regexes = ["接待中心$", "千牛工作台", "千牛登录"]
+title_regexes = ["接待(中心|台)$", "千牛工作台", "千牛登录"]
 not_ready_title_regexes = ["千牛登录"]
+# 严格档：类名+标题必须同时命中。千牛所有普通 Qt 窗口共享 Qt5152QWindowIcon
+# 类名（Qt 按运行时版本命名），宽松档下优惠弹窗/活动窗会命中画像——真机实证
+# （2026-08-29）弹窗抢前台后静默顶替热目标，下次上框拉起的就是弹窗。严格档让
+# 标题成为会话窗口的身份门槛，弹窗不再匹配、不再进候选、不再可能被激活。
+require_title = true
 readiness = "uia_shallow"
 settle_ms = 120
 # 实测：CF_UNICODETEXT 与 CF_PNG 停在输入框；CF_HDROP 的结论按类别分叉——

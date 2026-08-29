@@ -179,6 +179,15 @@ pub struct Profile {
     pub class_names: Vec<String>,
     pub title_regexes: Vec<String>,
     pub not_ready_title_regexes: Vec<String>,
+    /// 严格档：类名+标题必须**同时**命中才认定匹配。
+    ///
+    /// 为什么需要它：Qt 应用的窗口类名按运行时版本生成，是**整个应用共享**的
+    /// （千牛所有普通 Qt 窗口都是 `Qt5152QWindowIcon`），默认的「类名或标题命中
+    /// 其一即可」会让优惠弹窗、活动窗等任意同应用 Qt 窗口命中画像——真机实证
+    /// （2026-08-29）：弹窗抢前台会静默顶替热目标，下次上框拉起的就是弹窗。
+    /// 严格档下标题正则成为会话窗口的身份门槛，弹窗（标题不含会话特征）不再匹配。
+    /// 微信**不启用**：其独立聊天窗口标题是联系人名，靠类名兜住才是合法目标。
+    pub require_title: bool,
     pub formats: FormatPolicy,
     /// 该目标上「粘贴即发送」的 (类别 × 格式) 组合：粘进去不会停在输入框，
     /// 而是直接发出消息。实测千牛接待中心对**视频**的 `CF_HDROP` 就是这个行为，
@@ -205,6 +214,7 @@ impl Profile {
             class_names: Vec::new(),
             title_regexes: Vec::new(),
             not_ready_title_regexes: Vec::new(),
+            require_title: false,
             formats: FormatPolicy::default(),
             paste_sends: SendPolicy::default(),
             readiness: ReadinessMode::P0Only,
@@ -295,6 +305,7 @@ struct ProfilePatch {
     class_names: Option<Vec<String>>,
     title_regexes: Option<Vec<String>>,
     not_ready_title_regexes: Option<Vec<String>>,
+    require_title: Option<bool>,
     formats: Option<FormatPolicy>,
     paste_sends: Option<SendPolicy>,
     readiness: Option<ReadinessMode>,
@@ -378,6 +389,9 @@ fn merge_patch(base: &mut ProfilePatch, overlay: ProfilePatch) {
     if overlay.not_ready_title_regexes.is_some() {
         base.not_ready_title_regexes = overlay.not_ready_title_regexes;
     }
+    if overlay.require_title.is_some() {
+        base.require_title = overlay.require_title;
+    }
     if overlay.formats.is_some() {
         base.formats = overlay.formats;
     }
@@ -431,6 +445,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         class_names: patch.class_names.unwrap_or_default(),
         title_regexes,
         not_ready_title_regexes,
+        require_title: patch.require_title.unwrap_or(false),
         formats: patch.formats.unwrap_or_default(),
         paste_sends: patch.paste_sends.unwrap_or_default(),
         readiness: patch.readiness.unwrap_or_default(),
@@ -486,6 +501,28 @@ title_regexes = ["微信.*"]
         assert_eq!(profile.exe_names, ["WeChat.exe"]);
         assert_eq!(profile.settle_ms, 140);
         assert_eq!(profile.title_regexes, ["微信.*"]);
+    }
+
+    /// 严格档（require_title）解析 + 用户画像可整字段覆盖。
+    #[test]
+    fn require_title_parses_and_user_can_override() {
+        let builtin = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+require_title = true
+"#;
+        let set = load_profiles(builtin, None).unwrap();
+        assert!(set.get(&TargetId::new("qianniu")).unwrap().require_title);
+        assert!(!Profile::generic().require_title, "缺省必须保持宽松档");
+
+        let user = r#"
+[[profiles]]
+id = "qianniu"
+require_title = false
+"#;
+        let set = load_profiles(builtin, Some(user)).unwrap();
+        assert!(!set.get(&TargetId::new("qianniu")).unwrap().require_title);
     }
 
     #[test]

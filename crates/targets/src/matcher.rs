@@ -24,7 +24,7 @@ pub fn resolve_snapshot(profiles: &ProfileSet, snapshot: &WindowSnapshot) -> Res
     resolve_eligible_snapshot(profiles, snapshot).unwrap_or_else(|| {
         let profile = profiles.generic().clone();
         ResolvedTarget {
-            binding: binding(&profile, snapshot, true),
+            binding: binding(&profile, snapshot, true, false),
             profile,
             score: 0,
         }
@@ -39,30 +39,30 @@ pub fn resolve_eligible_snapshot(
     profiles: &ProfileSet,
     snapshot: &WindowSnapshot,
 ) -> Option<ResolvedTarget> {
-    let mut best: Option<(&Profile, u16)> = None;
+    let mut best: Option<(&Profile, u16, bool)> = None;
     let mut ambiguous = false;
     for profile in profiles.profiles() {
-        let Some(score) = match_score(profile, snapshot) else {
+        let Some((score, session_window)) = match_score(profile, snapshot) else {
             continue;
         };
         match best {
             None => {
-                best = Some((profile, score));
+                best = Some((profile, score, session_window));
                 ambiguous = false;
             }
-            Some((_, best_score)) if score > best_score => {
-                best = Some((profile, score));
+            Some((_, best_score, _)) if score > best_score => {
+                best = Some((profile, score, session_window));
                 ambiguous = false;
             }
-            Some((_, best_score)) if score == best_score => ambiguous = true,
+            Some((_, best_score, _)) if score == best_score => ambiguous = true,
             Some(_) => {}
         }
     }
     if ambiguous {
         return None;
     }
-    best.map(|(profile, score)| ResolvedTarget {
-        binding: binding(profile, snapshot, false),
+    best.map(|(profile, score, session_window)| ResolvedTarget {
+        binding: binding(profile, snapshot, false, session_window),
         profile: profile.clone(),
         score,
     })
@@ -96,8 +96,8 @@ pub fn matching_profile_windows(
         .iter()
         .filter(|snapshot| snapshot.visible)
         .filter_map(|snapshot| {
-            match_score(profile, snapshot).map(|score| ResolvedTarget {
-                binding: binding(profile, snapshot, false),
+            match_score(profile, snapshot).map(|(score, session_window)| ResolvedTarget {
+                binding: binding(profile, snapshot, false, session_window),
                 profile: profile.clone(),
                 score,
             })
@@ -132,7 +132,12 @@ fn disambiguate_labels(matches: &mut [ResolvedTarget]) {
     }
 }
 
-fn binding(profile: &Profile, snapshot: &WindowSnapshot, fallback: bool) -> TargetBinding {
+fn binding(
+    profile: &Profile,
+    snapshot: &WindowSnapshot,
+    fallback: bool,
+    session_window: bool,
+) -> TargetBinding {
     TargetBinding {
         id: profile.id.clone(),
         hwnd: Some(snapshot.hwnd),
@@ -149,10 +154,13 @@ fn binding(profile: &Profile, snapshot: &WindowSnapshot, fallback: bool) -> Targ
         minimized: snapshot.minimized,
         visible: snapshot.visible,
         instance_id: format!("{}:{}", snapshot.exe_name, snapshot.process_id),
+        session_window,
     }
 }
 
-fn match_score(profile: &Profile, snapshot: &WindowSnapshot) -> Option<u16> {
+/// 匹配打分，返回 (分数, 标题是否命中)。标题命中即「会话窗口」证据，
+/// 随绑定携带，供热目标切换日志区分正常跟随与可疑顶替。
+fn match_score(profile: &Profile, snapshot: &WindowSnapshot) -> Option<(u16, bool)> {
     if profile.exe_names.is_empty()
         && profile.class_names.is_empty()
         && profile.title_regexes.is_empty()
@@ -178,6 +186,12 @@ fn match_score(profile: &Profile, snapshot: &WindowSnapshot) -> Option<u16> {
     {
         return None;
     }
+    // 严格档（require_title）：标题命中是会话窗口的身份门槛。Qt 应用所有普通
+    // 窗口共享同一个类名，只看类名会把优惠弹窗、活动窗一并放进候选——真机
+    // 实证（2026-08-29）它们抢到前台后会静默顶替热目标，下次上框拉起的就是弹窗。
+    if profile.require_title && !title_hit {
+        return None;
+    }
     if class_hit {
         score += 40;
     }
@@ -193,7 +207,7 @@ fn match_score(profile: &Profile, snapshot: &WindowSnapshot) -> Option<u16> {
     if snapshot.rect.has_area() {
         score += 1;
     }
-    Some(score)
+    Some((score, title_hit))
 }
 
 /// 窗口类名匹配。等值优先；另外允许「声明名 + `{GUID}`」这种真实存在的变体，
@@ -460,5 +474,54 @@ title_regexes = ["接待中心$"]
         let floating_bar =
             helper_snapshot(8, "AliWorkbench.exe", "Qt5152QWindowToolSaveBits", "悬浮条");
         assert!(match_score(profile, &floating_bar).is_none());
+    }
+
+    /// 严格档（require_title）：类名是整个应用共享的（Qt 按运行时版本命名），
+    /// 只看类名会把优惠弹窗一并放进候选——真机实证弹窗抢前台后会静默顶替热目标。
+    #[test]
+    fn require_title_rejects_class_only_popup_and_accepts_session_variants() {
+        let set = load_profiles(
+            r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+class_names = ["Qt5152QWindowIcon"]
+title_regexes = ["接待(中心|台)$", "千牛工作台"]
+require_title = true
+"#,
+            None,
+        )
+        .unwrap();
+        let profile = set.get(&"qianniu".into()).unwrap();
+
+        // 优惠弹窗：类名命中、标题不合会话特征 → 不匹配、不得自动成为热目标。
+        let popup = helper_snapshot(1, "AliWorkbench.exe", "Qt5152QWindowIcon", "限时特惠");
+        assert!(
+            match_score(profile, &popup).is_none(),
+            "严格档下类名命中不足以匹配"
+        );
+        assert!(
+            resolve_eligible_snapshot(&set, &popup).is_none(),
+            "弹窗不得自动成为热目标"
+        );
+
+        // 会话窗口及其用户级标题变体照常命中，且绑定携带会话窗证据。
+        for (index, title) in ["tb1-接待中心", "易软坊-接待台", "tb940472610424-千牛工作台"]
+            .into_iter()
+            .enumerate()
+        {
+            let session = helper_snapshot(
+                (index + 2) as isize,
+                "AliWorkbench.exe",
+                "Qt5152QWindowIcon",
+                title,
+            );
+            let (score, session_window) =
+                match_score(profile, &session).expect("会话窗口应命中");
+            assert!(score >= 140);
+            assert!(session_window, "标题命中必须标记会话窗: {title}");
+            assert!(resolve_eligible_snapshot(&set, &session).is_some());
+        }
     }
 }
