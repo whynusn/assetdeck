@@ -197,10 +197,12 @@ export component AppWindow inherits Window {
     callback empty-trash-requested();
     // 菜单动作回传（id 编码 0=复制..4=删除，与 selection::MenuAction 对齐）；
     // 移动到分类的两级目的地（现有分类名或新名，壳层校验）。
-    // D48 右键菜单：ContextMenuArea 原生承载（右键 + 键盘 Menu 键 + 无障碍
-    // 可达，手搓浮层三者皆无）。激活时带命中瓦片 id 与动作码，目标集在壳层
-    // 按选区∪命中重算。
-    callback context-activated(int, int);
+    callback tile-right-click(int, length, length);
+    in property <bool> context-menu-open: false;
+    in property <length> context-menu-x: 0px;
+    in property <length> context-menu-y: 0px;
+    in property <string> context-menu-title: ""; // 目标摘要（「3 项」或文件名）
+    callback menu-action(int);
     callback move-to-category(string);
     callback context-menu-dismissed();
     // 重命名弹窗确认（新名；壳层 trim 校验非空/无路径分隔）与取消。
@@ -415,7 +417,7 @@ export component AppWindow inherits Window {
                     scope-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: scope-chip.preferred-width + 24px;
-                        height: 26px;
+                        height: 30px;
 
                         scope-chip := Rectangle {
                             x: (parent.width - self.preferred-width) / 2;
@@ -499,7 +501,7 @@ export component AppWindow inherits Window {
                     target-chip := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: 268px;
-                        height: 32px;
+                        height: 30px;
                         border-radius: Theme.radius;
                         border-width: 1px;
                         border-color: root.target-mode == UiEnums.target-mode-choose ? Theme.accent
@@ -922,20 +924,6 @@ export component AppWindow inherits Window {
                             border-radius: Theme.radius-lg;
                             clip: true;
 
-                            // D48 迁移：右键菜单交给内建 ContextMenuArea（skill
-                            // 语义要求：右键 + Menu 键 + 无障碍；原生定位与收起）。
-                            ContextMenuArea {
-                                width: 100%;
-                                height: 100%;
-
-                                Menu {
-                                    MenuItem { title: "复制"; activated => { root.context-activated(tile.asset-id, 0); } }
-                                    MenuItem { title: "移动到分类"; activated => { root.context-activated(tile.asset-id, 1); } }
-                                    MenuItem { title: "重命名"; activated => { root.context-activated(tile.asset-id, 2); } }
-                                    MenuItem { title: "属性"; activated => { root.context-activated(tile.asset-id, 3); } }
-                                    MenuItem { title: "删除"; activated => { root.context-activated(tile.asset-id, 4); } }
-                                }
-
                             // 图像/视频：缩略图铺满（视频抽帧也走同一产物）。
                             if tile.kind == UiEnums.card-kind-image || tile.kind == UiEnums.card-kind-video: Image {
                                 width: 100%;
@@ -1091,12 +1079,18 @@ export component AppWindow inherits Window {
                                         root.double-clicked(tile.asset-id);
                                     }
                                 }
-                                // D47：带修饰的左键抬笔走 modified-click；无修饰左键
-                                // 仍由 clicked/double-clicked 承载（常态上框链路一字
-                                // 不动）。右键已上交 ContextMenuArea（见上）。
+                                // D47/D48：带修饰的左键抬笔走 modified-click、右键抬笔
+                                // 走 right-click；无修饰左键仍由 clicked/double-clicked
+                                // 承载（常态上框链路一字不动）。多选模式的普通单击
+                                // 由壳层在 tile-clicked 路径里判模式改走选区切换。
                                 pointer-event(event) => {
                                     if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                                         self.mod-on-down = event.modifiers.control || event.modifiers.shift;
+                                    }
+                                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right) {
+                                        root.tile-right-click(tile.asset-id,
+                                            self.absolute-position.x + self.mouse-x,
+                                            self.absolute-position.y + self.mouse-y);
                                     }
                                     if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
                                         self.mod-on-down = false;
@@ -1107,7 +1101,6 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            } // ContextMenuArea
                         }
                     }
                 }
@@ -1156,7 +1149,7 @@ export component AppWindow inherits Window {
         // （壳层在 overlay-dismissed 里按开合优先级逐个关）。
         if root.settings-open || root.import-menu-open
             || root.target-mode == UiEnums.target-mode-choose
-            || root.move-menu-open
+            || root.context-menu-open || root.move-menu-open
             || root.rename-open || root.properties-open
             || root.scope-menu-open || root.classify-open: TouchArea {
             width: 100%;
@@ -1445,6 +1438,73 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        // —— D48 右键菜单浮层：锚右键命中点，坐标由壳层夹取（贴边不越窗）——
+        if root.context-menu-open: Rectangle {
+            x: Math.min(root.context-menu-x, root.width - 220px);
+            y: Math.min(root.context-menu-y, root.height - 260px);
+            width: 220px;
+            height: menu-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            menu-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                if root.context-menu-title != "": Text {
+                    text: root.context-menu-title;
+                    color: Theme.text-3;
+                    font-size: 10px;
+                    x: 4px;
+                    width: parent.width - 8px;
+                    overflow: elide;
+                }
+
+                MenuItem {
+                    glyph: Glyph.paste;
+                    text: "复制";
+                    detail: "素材进剪贴板，绝不代发";
+                    clicked => {
+                        root.menu-action(0);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.folder;
+                    text: "移动到分类";
+                    clicked => {
+                        root.menu-action(1);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.file-text;
+                    text: "重命名";
+                    clicked => {
+                        root.menu-action(2);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.info;
+                    text: "属性";
+                    clicked => {
+                        root.menu-action(3);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.trash;
+                    text: "删除";
+                    detail: "进回收站，可恢复";
+                    clicked => {
+                        root.menu-action(4);
+                    }
+                }
+            }
+        }
+
         // —— 「移动到分类」弹层：现有分类逐条 + 输入新名新建（统一归入同款交互）——
         if root.move-menu-open: Rectangle {
             x: Math.max(0px, (root.width - 280px) / 2);

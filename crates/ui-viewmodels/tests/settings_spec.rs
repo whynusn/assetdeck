@@ -19,7 +19,10 @@ fn defaults_are_conservative() {
     let s = AppSettings::default();
     assert!(!s.activate_on_single_click, "默认双击触发");
     assert!(!s.send_after_paste, "默认不发送（红线）");
-    assert!(s.gpu_rendering, "默认 GPU 渲染，避开软件脏矩形黑块");
+    assert!(
+        !s.gpu_rendering,
+        "默认软件渲染（2026-08-29 翻转：femtovg resize 卡顿，目标用户为低配机）"
+    );
     assert!(!s.light_theme, "默认深色主题");
     assert!(s.ui_animations, "默认开界面动画");
     assert_eq!(s.sidebar_width, 212.0, "默认侧栏宽度 212");
@@ -68,7 +71,7 @@ fn partial_toml_fills_missing_fields() {
     let loaded = AppSettings::load(&path);
     assert!(loaded.activate_on_single_click);
     assert!(!loaded.send_after_paste, "缺字段回落默认 false");
-    assert!(loaded.gpu_rendering, "缺字段回落默认 GPU 渲染");
+    assert!(!loaded.gpu_rendering, "缺字段回落默认（软件渲染）");
     assert!(!loaded.light_theme, "缺字段回落默认 false");
     assert!(loaded.ui_animations, "缺字段回落默认开动画");
     assert_eq!(loaded.sidebar_width, 212.0, "缺字段回落默认侧栏宽度");

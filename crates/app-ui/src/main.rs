@@ -1350,6 +1350,50 @@ fn main() {
         });
     }
 
+    // D48 右键：命中后置菜单目标（选区∪命中）与菜单内容/位置。
+    {
+        let crud = crud.clone();
+        let menu_target = menu_target.clone();
+        app.on_tile_right_click(move |id, x, y| {
+            let id = AssetId(id.max(0) as u32);
+            let hit = {
+                let vm = crud.vm.borrow();
+                vm.context_menu(id)
+            };
+            if hit.targets.is_empty() {
+                return;
+            }
+            *menu_target.borrow_mut() = Some(id);
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let title = match hit.targets.len() {
+                1 => {
+                    let binding = crud.resolver.borrow();
+                    match binding
+                        .as_ref()
+                        .and_then(|r| r.meta_of(hit.targets[0]).ok().flatten())
+                    {
+                        Some(meta) => meta.file_name,
+                        None => "1 项".to_string(),
+                    }
+                }
+                n => format!("{n} 项"),
+            };
+            ui.set_context_menu_title(title.into());
+            ui.set_context_menu_x(x);
+            ui.set_context_menu_y(y);
+            ui.set_context_menu_open(true);
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        app.on_context_menu_dismissed(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_context_menu_open(false);
+            }
+        });
+    }
+
     // D53 旧三弹层入场：init 在首帧前跑（这正是旧「init 置 shown」无效的
     // 根因），只让它报数，翻转交给 16ms 单发 Timer（必然落在首帧后）；
     // 关动画时直接置 true（时长本就钳 0ms，无需 Timer）。
@@ -1490,7 +1534,9 @@ fn main() {
                 import_flow.close();
                 return;
             }
-            if ui.get_move_menu_open() {
+            if ui.get_context_menu_open() {
+                ui.set_context_menu_open(false);
+            } else if ui.get_move_menu_open() {
                 ui.set_move_menu_open(false);
             } else if ui.get_rename_open() {
                 ui.set_rename_open(false);
@@ -1504,27 +1550,24 @@ fn main() {
         });
     }
 
-    // D48 菜单五项 → 动作派发（R10/R11）。ContextMenuArea 原生承载菜单
-    // （右键 + Menu 键 + 无障碍），激活回调带命中瓦片 id；目标集 =
-    // 选区∪命中，在壳层重算（vm.context_menu 的同一语义）。
+    // D48 菜单五项 → 动作派发（R10/R11：目标=选区∪命中，右键时已记
+    // menu_target）。Context：手搓浮层（ContextMenuArea 在 1.17.1 Windows
+    // 上被瓦片 TouchArea 的 GrabMouse 阻断，回退记 design/archives）。
     {
         let crud = crud.clone();
         let menu_target = menu_target.clone();
         let routing = routing.clone();
-        app.on_context_activated(move |hit, action_id| {
-            let Some(action) = ui_enums::menu_action(action_id) else {
+        app.on_menu_action(move |id| {
+            let Some(action) = ui_enums::menu_action(id) else {
                 return;
             };
-            let hit_id = AssetId(hit.max(0) as u32);
-            let targets = {
-                let vm = crud.vm.borrow();
-                let spec = vm.context_menu(hit_id);
-                spec.targets
-            };
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_context_menu_open(false);
+            }
+            let targets = crud.action_targets(*menu_target.borrow());
             if targets.is_empty() {
                 return;
             }
-            *menu_target.borrow_mut() = Some(hit_id);
             match action {
                 MenuAction::Copy => {
                     let Some(ui) = crud.ui.upgrade() else { return };
@@ -2236,6 +2279,7 @@ fn main() {
             ui.set_scope_menu_shown(false);
             ui.set_scope_menu_open(false);
             // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
+            ui.set_context_menu_open(false);
             import_flow.close();
             ui.set_move_menu_open(false);
             ui.set_rename_open(false);

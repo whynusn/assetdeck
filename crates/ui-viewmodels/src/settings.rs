@@ -27,11 +27,13 @@ pub struct AppSettings {
     /// 上框后是否立即发送。默认 false，且 v1 为受控占位（不接真实发送）。
     #[serde(default)]
     pub send_after_paste: bool,
-    /// 渲染后端：true（默认）= GPU（femtovg/OpenGL）；false = CPU 软件渲染。
+    /// 渲染后端：false（默认）= CPU 软件渲染；true = GPU（femtovg/OpenGL）。
     ///
-    /// Windows 软件渲染路径依赖 softbuffer 脏矩形提交，异步缩略图/属性更新
-    /// 容易留下未刷新黑块；GPU 路径整帧绘制，默认开启以保证画面完整。此选项
-    /// 只在启动时读一次（后端仅能在建窗前选定），改动需重启才生效。
+    /// 默认翻转（2026-08-29 用户实测）：femtovg 在窗口 resize 时逐帧重建
+    /// 渲染面，低配机/远程桌面拖拽窗口明显卡顿——而目标用户正是低配机
+    /// （D40–D45 全部来自低配机实测）。软件档渲染完整（software-renderer-path
+    /// 已修矢量图标缺失），window-resize 平滑。此选项只在启动时读一次
+    /// （后端仅能在建窗前选定），改动需重启才生效。
     #[serde(default = "default_gpu_rendering")]
     pub gpu_rendering: bool,
     /// 浅色主题。默认 false = 深色。
@@ -137,7 +139,7 @@ impl AppSettings {
 }
 
 fn default_gpu_rendering() -> bool {
-    true
+    false
 }
 
 impl Default for AppSettings {
@@ -145,7 +147,7 @@ impl Default for AppSettings {
         Self {
             activate_on_single_click: false,
             send_after_paste: false,
-            gpu_rendering: true,
+            gpu_rendering: default_gpu_rendering(),
             light_theme: false,
             ui_animations: true,
             sidebar_width: default_sidebar_width(),
@@ -231,7 +233,7 @@ impl AppSettings {
         match key {
             "activate_on_single_click" => "开启：单击素材即进入输入框；关闭：需双击才上框。",
             "send_after_paste" => "即将支持：当前上框只会粘贴到输入框，不会自动发送。",
-            "gpu_rendering" => "重启后生效。默认开启，避免 Windows 软件渲染局部刷新留下黑块。",
+            "gpu_rendering" => "重启后生效。默认关闭：GPU 档拖拽窗口尺寸时明显卡顿（femtovg 逐帧重建）；显卡好的机器可开启。",
             "light_theme" => {
                 "立即生效：自绘层与控件（输入框/按钮/进度条）一并切换明暗，无需重启。"
             }

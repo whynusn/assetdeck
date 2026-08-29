@@ -537,13 +537,15 @@ if (click_count % 2) == 1 {
 
 **落地（2026-08-28）**：菜单五项常量入 VM 层（穷举测试锁文案）；目标集 = 命中在选区内则整份选区、否则收窄到命中张。「复制」为独立缝合层 `copy_to_clipboard`（negotiate_detailed 后只写剪贴板，绝不 activate/注入——与上框链路共享格式协商、隔离注入面）；重命名/归类校验在壳层（Slint 无 trim 内建，spike 结论）；属性弹窗四字段 + explorer /select 定位。
 
-**实测事故与修正（2026-08-29，用户真机冒烟发现）**：①「移动/重命名」卡退、「删除」后回收站空——同一根因：`apply_filter` 实参里内联 `filter_label.borrow().clone()`，Ref 卫队活到整条语句结束、横跨调用体内的 `borrow_mut` → BorrowMutError。移动/重命名在子命令**收尾重载**时炸（写入已落库，重启后行为“已生效”）；删除在**起子进程之前**炸（素材从未进库，用户视角=「回收站没加上」）。修正 = label 先落本地再传 + deps_guard 源码扫描守卫（apply_filter 实参禁 `.borrow()`）。②右键菜单从手搓浮层迁内建 `ContextMenuArea`（skill 语义要求：右键 + 键盘 Menu 键 + 无障碍可达、原生定位/收起；手搓浮层三者皆无），菜单五项标题入 slint 静态 Menu，激活回调带命中瓦片 id、目标集在壳层按选区∪命中重算。③操作条标签回归计数本位（「回收站 · 已选 N 项」），教学句移交回收站空态视图（长句曾把「清空回收站」按钮挤出 560px 条外）；文案 elide 兜底；张/项统一为「项」。
+**实测事故与修正（2026-08-29，用户真机冒烟发现）**：①「移动/重命名」卡退、「删除」后回收站空——同一根因：`apply_filter` 实参里内联 `filter_label.borrow().clone()`，Ref 卫队活到整条语句结束、横跨调用体内的 `borrow_mut` → BorrowMutError。移动/重命名在子命令**收尾重载**时炸（写入已落库，重启后行为“已生效”）；删除在**起子进程之前**炸（素材从未进库，用户视角=「回收站没加上」）。修正 = label 先落本地再传 + deps_guard 源码扫描守卫（apply_filter 实参禁 `.borrow()`）。②右键菜单曾迁内建 `ContextMenuArea`（skill 语义要求），**实测回退**：Slint 1.17.1 Windows 上瓦片内 TouchArea 对任何按钮按下都 `GrabMouse`（core items/input_items.rs，press 事件只投 top item），ContextMenuArea 的内建右键捕获被短路；`show()` 程序化唤出实测同样无效（debug 探针未触达 Up 分支，疑似 winit→slint 右键事件链在 grab 之后断裂）。手搓浮层回退（用户第一轮真机截图实测可弹），`ContextMenuArea` 迁移记为 Slint 升级后的待办。③操作条标签回归计数本位（「回收站 · 已选 N 项」），教学句移交回收站空态视图（长句曾把「清空回收站」按钮挤出 560px 条外）；文案 elide 兜底；张/项统一为「项」。
 
 ### D49 通用导入：混选 + 拖拽（2026-08-28）
 
 **内容**：导入入口统一——文件对话框支持多选（素材文件与 .emo 混选），保留「导入文件夹」入口，新增**窗口拖拽导入**（文件或文件夹丢到窗口任意位置即导入）。单文件导入 = 收集层小改；管线层 D24 包注册表已就绪。
 
 **⚠️ 前置 spike**：Slint 1.17 对原生文件拖入（OS 级 drag-drop 取路径）的支持未查证；若无现成支持则 platform 层 `RegisterDragDrop` 兜底（D16 装配边界不变）。
+
+**连带修订（2026-08-29，用户实测）**：D37 的 `gpu_rendering` **默认值翻转为 false（软件渲染）**——femtovg 在窗口 resize 时逐帧重建渲染面，拖拽尺寸明显卡顿（用户真机实测），而目标用户正是低配机（D40–D45）；软件档渲染完整（software-renderer-path 已修图标）。另查明用户所报「切换无效」直接根因：安装版 exe 为 1d5ab6a（程序化 selector）之前的旧构建，旧代码连写名 `winit-femtovg` 静默回落默认渲染器——新代码 backend_name+renderer_name 分传已修，重启后切换生效。
 
 **落地（2026-08-28，批1-import）**：spike S1 源码查证定论——Slint 1.17.1 **无 OS 文件拖入**（DragArea/DropArea 仅应用内 DnD；winit 后端对 `WindowEvent::DroppedFile` 零处理；Slint 自身未注册 drop 处理器，故无共存冲突），走兜底路线：platform `win32::dragdrop` 模块 `#[implement(IDropTarget)]` + `RegisterDragDrop`（Drop 取 CF_HDROP → DragQueryFileW 路径 → FileDropSink trait），OleInitialize 幂等；HWND 经 slint 的 raw-window-handle-06 提取（deps_guard 白名单扩一项，纯 trait 定义零逻辑）。主导入按钮升级为 `pick_open_files` 多选混选（FOS_ALLOWMULTISELECT），三入口全部汇流归类弹窗（R2 保留原入口语义）。
 
