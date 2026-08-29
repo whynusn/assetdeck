@@ -4,7 +4,7 @@
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
 import { Button, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox, CheckBox } from "std-widgets.slint";
-import { Theme, Icon, Glyph, IconButton, DangerButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
+import { Theme, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
 // 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
@@ -59,11 +59,16 @@ export struct SettingRowData {
     detail: string,
     checked: bool,
     enabled: bool,
+    // true = 分区标题行（title 承载组名，如「上框行为」），不渲染开关。
+    // 由壳层按 SETTING_SPECS 的 section 字段插入，视图侧不做分组推断。
+    header: bool,
 }
 
 export struct TargetChoiceData {
     selection-key: string,
     label: string,
+    // 别名覆盖前的默认标签（profile · 窗口标题），重命名弹层的标题行回显用。
+    default-label: string,
     status: string,
     health-color: color,
     available: bool,
@@ -106,11 +111,19 @@ export component AppWindow inherits Window {
     // 空态文案：由壳层按「库空 / 检索无结果 / 分类为空」分别填。
     in property <string> empty-title: "";
     in property <string> empty-hint: "";
-    in property <string> target-label: "未识别目标";
+    in property <string> target-label: "点击选择聊天窗口";
     in property <color> target-health-color: #777b80;
     in property <bool> target-pinned: false;
     in property <int> target-mode: 0;
     in property <[TargetChoiceData]> target-choices;
+    // 目标实例重命名弹层（右键 picker 行触发）：别名写进 targets.json，
+    // chip 与 picker 同步显示；留空保存 = 恢复默认名。
+    in property <bool> target-rename-open: false;
+    in property <string> target-rename-default: "";
+    in-out property <string> target-rename-text: "";
+    callback target-rename-requested(string);
+    callback target-rename-confirmed(string);
+    callback target-rename-cancelled();
     in property <string> notice-text: "";
     in property <int> notice-tone: 0;
     // notice-text 设成 in-out：壳层负责写入提示，视图侧的自动消隐 Timer 与关闭按钮
@@ -139,7 +152,8 @@ export component AppWindow inherits Window {
 
     // —— D47/D48 选区、菜单与弹窗状态（全部壳层驱动，视图无业务）——
     in property <int> selection-bar: 0; // UiEnums.bar-*
-    in property <string> selection-text: ""; // 「已选 N 张」
+    in property <int> selection-count: 0; // 操作条按钮的可用性：0 选禁用批量动作
+    in property <string> selection-text: ""; // 「已选 N 项」/ 0 选时的操作指引
     in property <bool> select-mode-active: false; // 顶栏按钮高亮
     in property <int> trash-count: 0; // 侧栏回收站角标（0 隐藏数字）
     in property <bool> rename-open: false;
@@ -248,7 +262,6 @@ export component AppWindow inherits Window {
     // OS 拖入文件（IDropTarget 兜底，platform::win32::dragdrop 注册）：
     // 路径列表进同一归类弹窗；不支持类型由 VM 过滤（R4）。
     callback files-dropped([string]);
-    callback import-emo-requested();
     callback import-menu-toggled();
     callback sidebar-resize-ended(length);
     callback clear-library-requested();
@@ -263,13 +276,35 @@ export component AppWindow inherits Window {
     // D38：设置面板底部「打开日志目录」。
     callback open-logs-requested();
 
-    // 目标条右侧提示：告诉用户「现在能不能上框、下一步该点哪里」，
-    // 而不是仅陈述内部状态名。
+    // —— D56 更新检查 ——
+    // app-version 是壳层注入的当前版本（"v0.1.0"）；status-text 是设置面板
+    // 「关于」区状态行（danger 决定是否着错误色）；badge 是设置齿轮上的
+    // 未处理更新点。弹窗 open/shown 两段式（同 classify），内容由壳层回填。
+    in property <string> app-version: "";
+    in property <bool> update-checking: false;
+    in property <string> update-status-text: "";
+    in property <bool> update-status-danger: false;
+    in property <bool> update-badge: false;
+    in property <bool> update-open: false;
+    in property <bool> update-shown: false;
+    in property <string> update-version: "";
+    in property <string> update-notes: "";
+    in property <string> update-url: "";
+    callback update-check-requested();
+    callback update-open-release-page();
+    callback update-later();
+    callback update-skip-version();
+
+    // 目标条右侧提示：讲「现在能不能上框、下一步该点哪里」，不说内部状态名
+    // （旧文案「就绪/需确认/未选择目标」与 chip 的「未识别目标」三词一义，
+    // 用户无从对应）。每档都落在一个可执行的下一步上。
     property <string> target-hint: root.target-mode == UiEnums.target-mode-ready
-        ? "就绪"
-        : root.target-mode == UiEnums.target-mode-needs-confirmation ? "需确认"
-        : root.target-mode == UiEnums.target-mode-choose ? "选择窗口"
-        : "未选择目标";
+        ? "就绪 · 双击素材即可上框"
+        : root.target-mode == UiEnums.target-mode-needs-confirmation
+            ? "通用目标 · 首次上框需确认"
+            : root.target-mode == UiEnums.target-mode-choose
+                ? "点选列表中的聊天窗口"
+                : "选择聊天窗口后，双击素材即可上框";
 
     changed content-y => {
         root.scroll-changed(root.content-y);
@@ -334,6 +369,8 @@ export component AppWindow inherits Window {
 
                     // 顶栏不再重复窗口标题「素材管理器」，改成当前库视图的读数：
                     // 「共 N 项」为主，当前分类/检索范围为次，一眼看清「现在在看什么」。
+                    // 视图标签做成 chip（描边胶囊）：与计数是两类信息（多少 vs 在哪看），
+                    // 黏排会被误读成一句话（「共 10 项全部」）。
                     Text {
                         text: root.total-text;
                         vertical-alignment: center;
@@ -342,11 +379,28 @@ export component AppWindow inherits Window {
                         font-weight: 600;
                     }
 
-                    Text {
-                        text: root.filter-label;
-                        vertical-alignment: center;
-                        color: Theme.text-3;
-                        font-size: 11px;
+                    view-chip := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 22px;
+                        border-radius: 11px;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        background: Theme.bg-raised;
+                        width: Math.min(view-chip-text.preferred-width + 16px, 280px);
+
+                        view-chip-text := Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: root.filter-label;
+                            vertical-alignment: center;
+                            color: Theme.text-2;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+
+                        Tooltip {
+                            text: @markdown("当前视图：分类、回收站或检索结果");
+                        }
                     }
 
                     // 弹性占位，把检索器与设置推到最右。
@@ -455,11 +509,20 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // 检索器：对分类名/标签名做模糊匹配，placeholder 直接说明范围。
+                    // 检索器：对分类名/标签名做模糊匹配。高度必须显式钉 30px——
+                    // 不钉会被 HorizontalLayout 纵向拉满整行（48px），比同排控件
+                    // 高一圈还顶进标题栏（真机截图教训）；宽度自适应 150–320px，
+                    // 窄窗口先压缩检索框而不是互相叠压。
                     search-input := LineEdit {
                         y: (parent.height - self.height) / 2;
-                        width: 260px;
-                        placeholder-text: "搜索名称、分类或标签";
+                        height: 30px;
+                        min-width: 150px;
+                        max-width: 320px;
+                        horizontal-stretch: 1;
+                        placeholder-text: root.search-scope == 1 ? "搜索文件名"
+                            : root.search-scope == 2 ? "搜索分类名"
+                            : root.search-scope == 3 ? "搜索标签名"
+                            : "搜索名称、分类或标签";
                         text <=> root.search-text;
                         edited(value) => {
                             root.search-changed(value);
@@ -479,6 +542,19 @@ export component AppWindow inherits Window {
                                 root.settings-toggled();
                             }
                         }
+
+                        // D56 未处理更新角标：红点压齿轮右上角，开面板看详情。
+                        // 8px 是「余光可辨」的下限——再小就在高亮描边旁隐身了。
+                        if root.update-badge: Rectangle {
+                            x: parent.width - 9px;
+                            y: 1px;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.danger;
+                            border-width: 1px;
+                            border-color: Theme.bg-bar;
+                        }
                     }
                 }
             }
@@ -495,7 +571,7 @@ export component AppWindow inherits Window {
                     spacing: 10px;
 
                     SectionLabel {
-                        text: "上框到";
+                        text: "上框目标";
                     }
 
                     target-chip := Rectangle {
@@ -821,10 +897,10 @@ export component AppWindow inherits Window {
                                 text: "素材库";
                             }
 
-                            // 导入单入口：一个按钮弹出菜单，二选一「文件夹 / .emo 素材包」。
-                            // 两类来源走不同原生对话框（FOS_PICKFOLDERS 里 .emo 文件不可见，
-                            // 文件选择器又选不了目录），菜单选中后仍走同一条子进程导入管线
-                            //（D11/D24 包注册表按扩展名分发）。
+                            // 导入单入口：一个按钮弹出菜单，按来源二选一「文件 / 文件夹」。
+                            // 两类来源走不同原生对话框（文件选择器选不了目录），菜单
+                            // 选中后仍走同一条子进程导入管线（D11/D24 包注册表按扩展名
+                            // 分发；.emo 素材包从文件入口混选，不再单列）。
                             import-anchor := Rectangle {
                                 height: 30px;
 
@@ -839,11 +915,21 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // 高度必须显式钉死：裸 std Button 会参与纵向布局的
+                            // 剩余空间分配，被拉成一百多 px 的高块（渲染实测）。
                             Button {
+                                height: 30px;
                                 text: "导出为 .emo…";
                                 clicked => {
                                     root.export-emo-requested();
                                 }
+                            }
+
+                            // 危险隔离线：清空素材库是不可逆操作，与常规导入/导出
+                            // 拉开一组，降低顺手误触（与回收站清空同款二段确认兜底）。
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.line;
                             }
 
                             // armed：壳层把文案改成确认提示时，按钮转为实心红。
@@ -1151,7 +1237,9 @@ export component AppWindow inherits Window {
             || root.target-mode == UiEnums.target-mode-choose
             || root.context-menu-open || root.move-menu-open
             || root.rename-open || root.properties-open
-            || root.scope-menu-open || root.classify-open: TouchArea {
+            || root.scope-menu-open || root.classify-open
+            || root.target-rename-open
+            || root.update-open: TouchArea {
             width: 100%;
             height: 100%;
             clicked => {
@@ -1198,7 +1286,7 @@ export component AppWindow inherits Window {
                         spacing: 4px;
 
                         Text {
-                            text: "没有检测到运行中的 IM 窗口";
+                            text: "没有检测到运行中的聊天窗口";
                             color: Theme.text-2;
                             font-size: 12px;
                         }
@@ -1263,6 +1351,72 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.target-choice-selected(choice.selection-key);
                         }
+                        // 右键 = 重命名该实例（D59 别名册的 UI 入口）。判定在 Down，
+                        // 与左键 clicked（Up）互不干扰。
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.right
+                                && event.kind == PointerEventKind.down {
+                                root.target-rename-requested(choice.selection-key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 目标实例重命名：别名写进 targets.json，chip 与 picker 同步显示。
+        // 留空保存 = 恢复默认名（默认名回显在标题行）。
+        if root.target-rename-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: target-rename-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            target-rename-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: "重命名目标窗口";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.target-rename-default;
+                    color: Theme.text-3;
+                    font-size: 10px;
+                    overflow: elide;
+                }
+
+                target-rename-input := LineEdit {
+                    text: root.target-rename-text;
+                    placeholder-text: "别名（留空保存 = 恢复默认名）";
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "取消";
+                        clicked => {
+                            root.target-rename-cancelled();
+                        }
+                    }
+                    Button {
+                        text: "保存";
+                        primary: true;
+                        clicked => {
+                            root.target-rename-confirmed(target-rename-input.text);
+                        }
                     }
                 }
             }
@@ -1294,10 +1448,13 @@ export component AppWindow inherits Window {
                 padding: 6px;
                 spacing: 4px;
 
+                // 命名与「导入素材…」按钮错开：按钮是入口（弹本菜单），两项按
+                // 来源命名（文件/文件夹）。.emo 不再单列：文件入口本就混选
+                // .emo 素材包（D49），单独入口是与它语义重复的 D34 遗留。
                 MenuItem {
                     glyph: Glyph.import;
-                    text: "导入素材…";
-                    detail: "混选图片 / 视频 / 文本与 .emo 素材包";
+                    text: "从文件导入…";
+                    detail: "混选图片、视频、文本与 .emo 素材包";
                     clicked => {
                         root.import-files-requested();
                     }
@@ -1305,19 +1462,10 @@ export component AppWindow inherits Window {
 
                 MenuItem {
                     glyph: Glyph.folder;
-                    text: "导入文件夹…";
-                    detail: "图片 / 视频 / 文本等素材文件";
+                    text: "从文件夹导入…";
+                    detail: "整个文件夹一次导入，按文件夹名归类";
                     clicked => {
                         root.import-requested();
-                    }
-                }
-
-                MenuItem {
-                    glyph: Glyph.package;
-                    text: "导入 .emo 素材包…";
-                    detail: "兼容千牛导出的素材包格式";
-                    clicked => {
-                        root.import-emo-requested();
                     }
                 }
             }
@@ -1374,18 +1522,21 @@ export component AppWindow inherits Window {
             }
         }
 
-        // 设置面板：右对齐锚在设置按钮下方。
+        // 设置面板：右对齐锚在设置按钮下方。高度上限 = 锚点下缘到窗底——
+        // 矮窗口不再把面板底部截断或压到底部操作条后面，超出部分面板内滚动。
         if root.settings-open: Rectangle {
             property <bool> shown: root.settings-shown;
+            property <length> panel-top: settings-anchor.absolute-position.y + settings-anchor.height + 6px;
             init => {
                 root.overlay-mounted(2);
             }
 
             opacity: shown ? 1.0 : 0.0;
             x: Math.max(12px, settings-anchor.absolute-position.x + settings-anchor.width - self.width);
-            y: settings-anchor.absolute-position.y + settings-anchor.height + 6px + (shown ? 0px : -6px);
+            y: panel-top + (shown ? 0px : -6px);
             width: 316px;
-            height: settings-layout.preferred-height;
+            height: Math.min(settings-scroll-col.preferred-height + 24px,
+                root.height - panel-top - 12px);
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: Theme.line-strong;
@@ -1396,43 +1547,92 @@ export component AppWindow inherits Window {
 
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
-            settings-layout := VerticalLayout {
-                padding: 14px;
-                spacing: 14px;
+            VerticalLayout {
+                padding: 12px;
 
-                SectionLabel {
-                    height: 14px;
-                    text: "设置";
-                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    viewport-height: settings-scroll-col.preferred-height;
 
-                // 通用渲染：行数据全部来自壳层的 SettingRowData 模型，
-                // 新增设置项只改 Rust 侧描述（SettingSpec），不再手写 slint。
-                for setting in root.settings: SettingRow {
-                    title: setting.title;
-                    detail: setting.detail;
-                    checked: setting.checked;
-                    enabled: setting.enabled;
-                    toggled => {
-                        root.setting-toggled(setting.key);
-                    }
-                }
+                    settings-scroll-col := VerticalLayout {
+                        spacing: 10px;
 
-                // D38：一键打开日志目录（全部子进程日志同目录，导出=拷贝该目录）。
-                log-folder-touch := TouchArea {
-                    height: 30px;
-                    mouse-cursor: MouseCursor.pointer;
-                    clicked => { root.open-logs-requested(); }
-                    Rectangle {
-                        background: log-folder-touch.pressed ? Theme.bg-raised-press
-                            : log-folder-touch.has-hover ? Theme.bg-raised-hover
-                            : Theme.bg-raised;
-                        border-radius: Theme.radius;
-                        Text {
+                        SectionLabel {
+                            height: 14px;
+                            text: "设置";
+                        }
+
+                        // 通用渲染：行数据全部来自壳层的 SettingRowData 模型（含
+                        // 分区标题行），新增设置项只改 Rust 侧描述（SettingSpec）。
+                        // 包裹层必须用 VerticalLayout：裸 Rectangle 不向布局上报
+                        // 子内容的首选高度，整列 preferred 塌成 0、面板压缩叠行
+                        // （渲染实测）；布局元素才传播子项 layout info。
+                        for setting in root.settings: VerticalLayout {
+                            if setting.header: SectionLabel {
+                                height: 16px;
+                                text: setting.title;
+                            }
+                            if !setting.header: SettingRow {
+                                title: setting.title;
+                                detail: setting.detail;
+                                checked: setting.checked;
+                                enabled: setting.enabled;
+                                toggled => {
+                                    root.setting-toggled(setting.key);
+                                }
+                            }
+                        }
+
+                        // D38：一键打开日志目录（全部子进程日志同目录，导出=拷贝该目录）。
+                        // 归入「高级」组末尾（模型里最后一组是高级），样式走通用 FlatButton。
+                        FlatButton {
                             text: "打开日志目录";
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            color: Theme.text-2;
-                            font-size: 12px;
+                            glyph: Glyph.folder-search;
+                            tip: "全部进程的日志都在这里，导出问题反馈时拷贝整个目录";
+                            clicked => { root.open-logs-requested(); }
+                        }
+
+                        // D56「关于」：版本读数 + 手动检查 + 状态行。文案跟着
+                        // VM 状态走（检查中/已是最新/发现新版本/失败原因），
+                        // 失败才着 danger 色——设置面板不搞情绪化大字。
+                        VerticalLayout {
+                            spacing: 5px;
+
+                            SectionLabel {
+                                height: 14px;
+                                text: "关于";
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 1px;
+
+                                    Text {
+                                        text: "素材管理器 \{root.app-version}";
+                                        color: Theme.text-2;
+                                        font-size: 11px;
+                                    }
+                                }
+
+                                FlatButton {
+                                    text: root.update-checking ? "检查中…" : "检查更新";
+                                    enabled: !root.update-checking;
+                                    tip: "连到发布源核对有没有新版本（约几秒）";
+                                    clicked => { root.update-check-requested(); }
+                                }
+                            }
+
+                            Text {
+                                text: root.update-status-text;
+                                color: root.update-status-danger ? Theme.danger : Theme.text-3;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }
@@ -1531,34 +1731,43 @@ export component AppWindow inherits Window {
                 }
 
                 // 现有分类：横向滚动太挤，直接纵向列（分类数量级 <20）。
+                // 高度必须显式钉值：内建 ScrollView 的 preferred 是 100%，在
+                // 「弹层高度 = 布局 preferred」的弹层里循环依赖，会塌到内建
+                // min-height(50px) 附近，列表只剩一条缝；钉 min(200px, 内容高)
+                // 才能按内容展开、超过 200px 出滚动条。
                 ScrollView {
-                    max-height: 200px;
+                    height: Math.min(200px, move-cats.preferred-height);
                     viewport-width: self.visible-width;
                     viewport-height: move-cats.preferred-height;
 
                     move-cats := VerticalLayout {
                         spacing: 4px;
-                        for name[i] in root.categories: Rectangle {
-                            visible: i > 0; // 「全部」不是目的地
-                            height: 30px;
-                            border-radius: Theme.radius;
-                            border-width: 1px;
-                            border-color: move-cat-touch.has-hover ? Theme.accent : Theme.line;
-                            background: move-cat-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
+                        // 「全部」不是目的地，直接不实例化——visible:false 在
+                        // Slint 布局里仍占一格（只藏不缩），会在视口顶端留空行。
+                        // for 体不能直接接 if（parse error），包一层布局才上报
+                        // preferred（裸包裹层会让整列 preferred 塌成 0）。
+                        for name[i] in root.categories: VerticalLayout {
+                            if i > 0: Rectangle {
+                                height: 30px;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                border-color: move-cat-touch.has-hover ? Theme.accent : Theme.line;
+                                background: move-cat-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
 
-                            Text {
-                                x: 10px;
-                                text: name;
-                                color: Theme.text-2;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
+                                Text {
+                                    x: 10px;
+                                    text: name;
+                                    color: Theme.text-2;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
 
-                            move-cat-touch := TouchArea {
-                                mouse-cursor: MouseCursor.pointer;
-                                clicked => {
-                                    root.move-to-category(name);
+                                move-cat-touch := TouchArea {
+                                    mouse-cursor: MouseCursor.pointer;
+                                    clicked => {
+                                        root.move-to-category(name);
+                                    }
                                 }
                             }
                         }
@@ -1590,10 +1799,11 @@ export component AppWindow inherits Window {
         }
 
         // —— D47/D46 底部操作条：多选与回收站两种形态 ——
+        // 宽度自适应：窄窗口夹到窗宽-32px，按钮不再被挤出条外（D48 教训的补全）。
         if root.selection-bar != UiEnums.bar-hidden: Rectangle {
             y: root.height - self.height - 16px;
             x: (root.width - self.width) / 2;
-            width: 560px;
+            width: Math.min(560px, root.width - 32px);
             height: 48px;
             border-radius: Theme.radius-lg;
             border-width: 1px;
@@ -1623,37 +1833,50 @@ export component AppWindow inherits Window {
                     horizontal-stretch: 1;
                 }
 
-                // 条件子项直接进布局：按钮自带 preferred 宽，无需再包一层。
+                // 高度统一钉 30px（与顶栏/侧栏控件同一档）；批量动作 0 选禁用——
+                // 「已选 0 项」时可点删除只会得到一次空操作报错，禁用即说明。
                 if root.selection-bar == UiEnums.bar-multi: Button {
+                    height: 30px;
                     text: "全选";
                     clicked => { root.select-all-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-multi: Button {
+                    height: 30px;
+                    enabled: root.selection-count > 0;
                     text: "移动到分类";
                     clicked => { root.move-selection-requested(); }
                 }
-                if root.selection-bar == UiEnums.bar-multi: Button {
+                if root.selection-bar == UiEnums.bar-multi: DangerButton {
+                    height: 30px;
+                    enabled: root.selection-count > 0;
                     text: "删除";
                     clicked => { root.delete-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-multi: Button {
+                    height: 30px;
                     text: "取消";
                     clicked => { root.select-mode-toggled(); }
                 }
 
                 if root.selection-bar == UiEnums.bar-trash: Button {
+                    height: 30px;
                     text: "全选";
                     clicked => { root.select-all-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-trash: Button {
+                    height: 30px;
+                    enabled: root.selection-count > 0;
                     text: "恢复";
                     clicked => { root.restore-selection-requested(); }
                 }
-                if root.selection-bar == UiEnums.bar-trash: Button {
+                if root.selection-bar == UiEnums.bar-trash: DangerButton {
+                    height: 30px;
+                    enabled: root.selection-count > 0;
                     text: "彻底删除";
                     clicked => { root.purge-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-trash: DangerButton {
+                    height: 30px;
                     text: root.empty-trash-text;
                     armed: root.empty-trash-armed;
                     clicked => { root.empty-trash-requested(); }
@@ -1781,6 +2004,104 @@ export component AppWindow inherits Window {
                     Button { text: "打开所在文件夹"; clicked => { root.properties-folder-requested(); } }
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "关闭"; clicked => { root.properties-closed(); } }
+                }
+            }
+        }
+
+        // —— D56 新版本弹窗：命中动作是「打开发布页」，应用内下载安装明确
+        // 推迟（签名校验/安装器自更新是独立大项目，D56）。两段式入场（同
+        // classify）；Esc / 点外部 = 以后再说，跳过此版本单独走回调。
+        if root.update-open: Rectangle {
+            property <bool> shown: root.update-shown;
+
+            opacity: shown ? 1.0 : 0.0;
+            x: (root.width - 400px) / 2;
+            y: 130px + (shown ? 0px : 8px);
+            width: 400px;
+            height: update-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            update-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        commands: Glyph.export;
+                        tint: Theme.accent;
+                        width: 16px;
+                        height: 16px;
+                    }
+
+                    Text {
+                        text: "发现新版本 \{root.update-version}";
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text {
+                    text: "当前版本 \{root.app-version} · 下载安装请前往发布页";
+                    color: Theme.text-3;
+                    font-size: 10px;
+                }
+
+                // notes 滚动区：高度钉 min(200px, 内容高)——不钉会塌成 ScrollView
+                // 内建 min-height（「移动到分类」弹层同款坑，D48）；Text 包在
+                // VerticalLayout 里让换行宽度跟随视口（裸 Text 在 ScrollView 里按
+                // preferred 展开成单行）。
+                if root.update-notes != "": ScrollView {
+                    height: Math.min(200px, update-notes-col.preferred-height);
+                    viewport-width: self.visible-width;
+                    viewport-height: update-notes-col.preferred-height;
+
+                    update-notes-col := VerticalLayout {
+                        Text {
+                            text: root.update-notes;
+                            color: Theme.text-2;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    FlatButton {
+                        text: "跳过此版本";
+                        tip: "以后启动不再提醒这个版本；手动检查仍会显示";
+                        clicked => { root.update-skip-version(); }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Button {
+                        text: "以后再说";
+                        clicked => { root.update-later(); }
+                    }
+
+                    Button {
+                        text: "打开发布页";
+                        primary: true;
+                        enabled: root.update-url != "";
+                        clicked => { root.update-open-release-page(); }
+                    }
                 }
             }
         }
@@ -1940,15 +2261,20 @@ export component AppWindow inherits Window {
 
                         // 统一归入展开：自由文本（新名即新建）+ 现有分类下拉回填
                         // （S2 结论：ComboBox 不吃自由文本，LineEdit+下拉组合）。
+                        // 两个控件必须显式钉高：Slint 1.17.1 中「if 条件布局子项 + ComboBox」
+                        // 组合会令外层 VerticalLayout preferred-height 膨胀数百 px
+                        // （slint-viewer 最小复现证实；去 if 或去 ComboBox 均不复现）。
                         if row.chosen-mode == 1: HorizontalLayout {
                             spacing: 6px;
                             LineEdit {
+                                height: 30px;
                                 text: row.unified-name;
                                 placeholder-text: "分类名（留空 = 待分类）";
                                 edited(text) => { root.classify-row-name-changed(i, text); }
                                 accepted(text) => { root.classify-row-name-changed(i, text); }
                             }
                             ComboBox {
+                                height: 30px;
                                 width: 132px;
                                 model: root.classify-categories;
                                 current-value: "现有分类";

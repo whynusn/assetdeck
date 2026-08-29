@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
+use platform::UrlOpener;
 use ui_viewmodels::classify::{self, EntryKind, GroupKind, GroupMode, ImportEntry, SourceGroup};
 use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
@@ -33,6 +34,19 @@ thread_local! {
     // D50 弹窗两段式动效的单发定时器：入场下一帧翻转 / 出场播完再卸载。
     static CLASSIFY_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     static NOTICE_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
+    /// D56 更新弹窗两段式入场（同 CLASSIFY_ANIM_TIMER 模式）。
+    static UPDATE_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
+    /// D56 更新检查的 UI 线程装配句柄。worker 线程经 invoke_from_event_loop
+    /// 弹回 UI 线程后从这里取回 VM/设置 Rc——Rc 非 Send，不能跨线程携带；
+    /// 收尾闭包只带 Weak + 纯数据（Send），Rc 在 UI 线程侧取。
+    static UPDATE_WIRING: RefCell<Option<UpdateWiring>> = const { RefCell::new(None) };
+}
+
+/// D56 更新检查在 UI 线程持有的共享件（见 [`UPDATE_WIRING`]）。
+struct UpdateWiring {
+    vm: Rc<RefCell<ui_viewmodels::UpdateCheckVm>>,
+    settings: Rc<RefCell<AppSettings>>,
+    settings_path: Rc<std::path::PathBuf>,
 }
 
 /// 演示数据规模：无真实库环境时的合成资产。
@@ -112,6 +126,7 @@ fn sync_target_bar(
                 TargetChoiceData {
                     selection_key: choice.selection_key().into(),
                     label: choice.binding.label.into(),
+                    default_label: choice.base_label.into(),
                     status: if available {
                         if choice.binding.visible {
                             "运行中 · 可选择".into()
@@ -127,6 +142,17 @@ fn sync_target_bar(
             })
             .collect::<Vec<_>>(),
     );
+}
+
+/// 原子写入：先写同目录 tmp 再 rename 覆盖，避免半写坏文件（与 settings 保存同一模式）。
+fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all().ok();
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 fn show_notice(ui: &AppWindow, tone: TargetNoticeTone, text: String) {
@@ -263,8 +289,10 @@ impl CrudCtx {
         } else {
             ui_enums::BAR_HIDDEN
         });
+        ui.set_selection_count(count as i32);
         // 操作条标签只报状态（教学句移交空态视图：长句曾把按钮挤出条外）。
         // 张/项统一为「项」：回收站与多选都可能含视频/文本。
+        // 0 选时给操作指引而非「已选 0 项」的空读数——此刻该做的是去点素材。
         ui.set_selection_text(
             if trash {
                 if count > 0 {
@@ -272,8 +300,10 @@ impl CrudCtx {
                 } else {
                     "回收站".to_string()
                 }
-            } else {
+            } else if count > 0 {
                 format!("已选 {count} 项")
+            } else {
+                "点击素材选择，Esc 退出".to_string()
             }
             .into(),
         );
@@ -614,7 +644,14 @@ impl ImportFlow {
     /// 全部 probe 就绪：D50 表分组 → 记忆预填 → 全记忆直通 / 弹窗。
     fn finalize(self: &Rc<Self>) {
         let groups = classify::plan_groups(&self.entries.borrow());
+        let groups_len = groups.len();
+        logging::info!(
+            "导入 finalize：entries={} groups={} ",
+            self.entries.borrow().len(),
+            groups_len
+        );
         if groups.is_empty() {
+            logging::warn!("plan_groups 为空（全部条目被过滤？），不弹窗");
             return;
         }
         let (ask, memories) = {
@@ -626,6 +663,7 @@ impl ImportFlow {
         };
         if !ask && memories.iter().all(Option::is_some) {
             // R8：全部组有记忆 → 不弹窗直接套用。
+            logging::info!("R8 记忆直通：跳过弹窗直接导入 {} 组", groups.len());
             let decisions: Vec<(GroupMode, Option<String>)> = memories
                 .iter()
                 .map(|m| m.clone().expect("all Some 已判"))
@@ -676,6 +714,7 @@ impl ImportFlow {
             .collect();
         ui.set_classify_categories(slint::ModelRc::from(Rc::new(VecModel::from(candidates))));
         ui.set_classify_open(true);
+        logging::info!("归类弹窗已置位 classify_open（rows={groups_len}）");
         // 入场动效下一帧翻转（D53 结论：init 技巧无效，首帧前置位不触发过渡）。
         let weak = self.ui.clone();
         CLASSIFY_ANIM_TIMER.with(|slot| {
@@ -1096,7 +1135,8 @@ fn apply_color_scheme(ui: &AppWindow, light_theme: bool) {
     });
 }
 
-/// 设置面板模型：从 [`AppSettings::describe`] 铺成 slint 的 SettingRowData 列表。
+/// 设置面板模型：从 [`AppSettings::describe`] 铺成 slint 的 SettingRowData 列表
+/// （含分区标题行，header=true 的行 key 为空、面板侧只渲染组名）。
 fn sync_settings(ui: &AppWindow, settings: &AppSettings) {
     let rows: Vec<SettingRowData> = settings
         .describe()
@@ -1107,9 +1147,119 @@ fn sync_settings(ui: &AppWindow, settings: &AppSettings) {
             detail: view.detail.into(),
             checked: view.checked,
             enabled: view.enabled,
+            header: view.header,
         })
         .collect();
     ui.set_settings(ModelRc::from(Rc::new(VecModel::from(rows))));
+}
+
+/// 发起一次更新检查（D56）：网络在后台线程（独立 WinHTTP 会话，UI 线程零
+/// 阻塞），收尾经 `invoke_from_event_loop` 回 UI 线程统一改 VM 与设置——
+/// 设置写盘只发生在 UI 线程，与其它写入点互不竞态。须在 UI 线程调用
+/// （[`UPDATE_WIRING`] 与 Slint 状态都是线程局部的）。
+/// `silent`：启动静默档（失败零打扰，只记日志）；false = 手动档（面板可见）。
+fn spawn_update_check(ui: slint::Weak<AppWindow>, feeds_path: std::path::PathBuf, silent: bool) {
+    let (vm, settings) = UPDATE_WIRING.with(|slot| {
+        let guard = slot.borrow();
+        let wiring = guard.as_ref().expect("更新装配未初始化");
+        (wiring.vm.clone(), wiring.settings.clone())
+    });
+    // 检查态立刻可见：按钮进「检查中…」，状态行先落到「正在检查更新…」。
+    vm.borrow_mut().begin_check();
+    if let Some(app) = ui.upgrade() {
+        app.set_update_checking(true);
+        let status = vm
+            .borrow()
+            .status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs());
+        app.set_update_status_text(status.into());
+        app.set_update_status_danger(false);
+    }
+    let feeds = ui_viewmodels::load_feeds(&feeds_path);
+    if !silent {
+        logging::info!("手动检查更新（{} 个源）", feeds.len());
+    }
+    std::thread::spawn(move || {
+        let started_unix = ui_viewmodels::unix_now_secs();
+        let outcome = ui_viewmodels::check_update(
+            &platform::win32::Win32HttpFetcher,
+            &feeds,
+            env!("CARGO_PKG_VERSION"),
+        );
+        // 闭包只带 Weak + 纯数据（Send）；Rc 装配件在 UI 线程侧经槽位取回。
+        let _ = slint::invoke_from_event_loop(move || {
+            apply_update_outcome(&ui, outcome, started_unix, silent);
+        });
+    });
+}
+
+/// 更新检查收尾（UI 线程）：VM 裁决动作 → 回填面板状态/弹窗数据/角标 →
+/// 按需弹窗（两段式入场）。弹窗动作决策（静默失败不弹、跳过版本静默不弹）
+/// 在 VM 里，这里只做属性回填。
+fn apply_update_outcome(
+    ui: &slint::Weak<AppWindow>,
+    outcome: ui_viewmodels::CheckOutcome,
+    started_unix: u64,
+    silent: bool,
+) {
+    let Some(app) = ui.upgrade() else {
+        return;
+    };
+    let (update_vm, settings, settings_path) = UPDATE_WIRING.with(|slot| {
+        let guard = slot.borrow();
+        let wiring = guard.as_ref().expect("更新装配未初始化");
+        (
+            wiring.vm.clone(),
+            wiring.settings.clone(),
+            wiring.settings_path.clone(),
+        )
+    });
+    if let ui_viewmodels::CheckOutcome::Failed(message) = &outcome {
+        // 静默档失败不进面板，但要留痕——否则「从没弹过窗」无从排查。
+        if silent {
+            logging::warn!("静默检查更新失败: {message}");
+        }
+    }
+    let action = update_vm.borrow_mut().finish(outcome, silent);
+    // 检查时刻落盘（成败皆记：静默节流按「发起过」计）。
+    {
+        let mut stored = settings.borrow_mut();
+        stored.last_check_unix = started_unix;
+        if let Err(error) = stored.save(&settings_path) {
+            logging::warn!("保存设置失败: {error}");
+        }
+    }
+    app.set_update_checking(false);
+    {
+        let vm = update_vm.borrow();
+        app.set_update_status_text(
+            vm.status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs())
+                .into(),
+        );
+        app.set_update_status_danger(vm.status_is_error());
+        app.set_update_badge(vm.badge_visible());
+        if let Some(release) = vm.available() {
+            app.set_update_version(release.version.clone().into());
+            app.set_update_notes(release.notes.clone().into());
+            app.set_update_url(release.url.clone().into());
+        }
+    }
+    if action == ui_viewmodels::UpdateUiAction::OpenDialog {
+        app.set_update_open(true);
+        // 两段式入场（D53）：下一帧再翻 shown，首帧前置位不触发过渡。
+        let weak = app.as_weak();
+        UPDATE_ANIM_TIMER.with(|slot| {
+            slot.borrow().start(
+                TimerMode::SingleShot,
+                std::time::Duration::from_millis(16),
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_shown(true);
+                    }
+                },
+            );
+        });
+    }
+    logging::info!("更新检查收尾 silent={silent} action={action:?}");
 }
 
 fn main() {
@@ -1156,6 +1306,18 @@ fn main() {
         ui_viewmodels::settings_path(library_root.as_deref().map(std::path::Path::new));
     let settings = Rc::new(RefCell::new(AppSettings::load(&settings_path)));
     let settings_path = Rc::new(settings_path);
+
+    // D59 目标配置双通道：用户画像 profiles.user.toml（同 id 覆盖内置）与实例
+    // 别名册 targets.json。与设置同目录约定（库根优先，回退 exe 旁）。
+    let target_config_dir = settings_path
+        .parent()
+        .map(ToOwned::to_owned)
+        .unwrap_or_default();
+    let profiles_user_path = target_config_dir.join("profiles.user.toml");
+    let targets_json_path = target_config_dir.join("targets.json");
+    // D56 更新源清单：与 settings.toml 同目录（库根优先，回退 exe 旁）。
+    // 缺省用内置 GitHub 主源；国内镜像顺序回落经此文件配置。
+    let feeds_path = target_config_dir.join("update_feeds.toml");
 
     // 渲染后端选择：ASSETDECK_FORCE_SOFTWARE > SLINT_BACKEND > gpu_rendering > 软件渲染。
     // 关键：BackendSelector 的 backend 与 renderer 必须分开传——"winit-femtovg" 这种
@@ -1207,6 +1369,19 @@ fn main() {
     app.set_animations_enabled(settings.borrow().ui_animations);
     app.set_sidebar_width(settings.borrow().sidebar_width);
     sync_settings(&app, &settings.borrow());
+    // D56 更新检查：VM 初始化（带回「跳过此版本」的记忆）+ 版本读数注入。
+    let update_vm = Rc::new(RefCell::new(ui_viewmodels::UpdateCheckVm::new(
+        settings.borrow().dismissed_version.clone(),
+    )));
+    app.set_app_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
+    // 装配句柄进 UI 线程槽：worker 收尾闭包（只带 Send 数据）回 UI 后取用。
+    UPDATE_WIRING.with(|slot| {
+        *slot.borrow_mut() = Some(UpdateWiring {
+            vm: update_vm.clone(),
+            settings: settings.clone(),
+            settings_path: settings_path.clone(),
+        })
+    });
     // 单击触发模式的热读取，供瓦片单击回调判断是否上框。
     let single_click = Rc::new(Cell::new(settings.borrow().activate_on_single_click));
     // 当前分类过滤，清空检索时回落到它。
@@ -1267,10 +1442,33 @@ fn main() {
         thumb_cache.clone(),
     ));
 
+    // 用户画像损坏不得拖垮主程序：退回内置画像并留痕（内置画像有编译期测试兜底）。
+    let profiles_user = std::fs::read_to_string(&profiles_user_path);
+    let profiles_user = match profiles_user {
+        Ok(content) => match ui_viewmodels::TargetRoutingRuntime::profile_load_check(
+            BUILTIN_PROFILES,
+            Some(&content),
+        ) {
+            Ok(()) => Some(content),
+            Err(error) => {
+                logging::error!(
+                    "用户画像 {} 解析失败，本次退回内置画像: {error}",
+                    profiles_user_path.display()
+                );
+                None
+            }
+        },
+        Err(_) => None,
+    };
     let routing = Rc::new(RefCell::new(
-        TargetRoutingRuntime::new(BUILTIN_PROFILES, None, win32_runtime_deps())
+        TargetRoutingRuntime::new(BUILTIN_PROFILES, profiles_user.as_deref(), win32_runtime_deps())
             .expect("目标画像加载失败"),
     ));
+    // 实例别名册：坏文件按空册处理（装饰性数据不阻断目标功能）。
+    match std::fs::read_to_string(&targets_json_path) {
+        Ok(content) => routing.borrow_mut().set_aliases(ui_viewmodels::AliasMap::parse(&content)),
+        Err(_) => {}
+    }
     let target_choices: Rc<VecModel<TargetChoiceData>> = Rc::new(VecModel::default());
     app.set_target_choices(ModelRc::from(target_choices.clone()));
     sync_target_bar(&app, &target_choices, routing.borrow().snapshot());
@@ -1514,6 +1712,12 @@ fn main() {
             // 归类弹窗是模态最上层，Esc = 取消本次导入。
             if ui.get_classify_open() {
                 import_flow.close();
+                return;
+            }
+            // D56 新版本弹窗：Esc = 以后再说（不改「跳过」状态）。
+            if ui.get_update_open() {
+                ui.set_update_open(false);
+                ui.set_update_shown(false);
                 return;
             }
             if ui.get_context_menu_open() {
@@ -1836,6 +2040,72 @@ fn main() {
         });
     }
 
+    // D59 目标实例重命名：右键 picker 行 → 弹层 → 保存进 targets.json（原子写）。
+    // pending 键在弹层存续期间持有 selection_key；取消/点外部只关弹层不落数据。
+    let pending_target_rename: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        let pending = pending_target_rename.clone();
+        app.on_target_rename_requested(move |selection_key| {
+            let ui = ui.unwrap();
+            let routing = routing.borrow_mut();
+            // 别名键在 instance_id（exe:pid）上，休眠占位（空 instance_id）不可命名。
+            let Some(choice) = routing
+                .snapshot()
+                .choices
+                .into_iter()
+                .find(|choice| choice.selection_key() == selection_key.as_str())
+                .filter(|choice| !choice.binding.instance_id.is_empty())
+            else {
+                return;
+            };
+            pending.replace(Some(selection_key.to_string()));
+            ui.set_target_rename_default(choice.base_label.clone().into());
+            ui.set_target_rename_text(choice.binding.label.clone().into());
+            ui.set_target_rename_open(true);
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        let target_choices = target_choices.clone();
+        let pending = pending_target_rename.clone();
+        let targets_json = targets_json_path.clone();
+        app.on_target_rename_confirmed(move |alias| {
+            let ui = ui.unwrap();
+            let Some(key) = pending.replace(None) else {
+                ui.set_target_rename_open(false);
+                return;
+            };
+            let mut routing = routing.borrow_mut();
+            if !routing.rename_target(key.as_str(), Some(alias.as_str())) {
+                ui.set_target_rename_open(false);
+                return;
+            }
+            let json = routing.aliases().to_json();
+            if let Err(error) = atomic_write(&targets_json, &json) {
+                logging::error!("别名册 {} 保存失败: {error}", targets_json.display());
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Error,
+                    format!("别名保存失败: {error}"),
+                );
+            }
+            ui.set_target_rename_open(false);
+            sync_target_bar(&ui, &target_choices, routing.snapshot());
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let pending = pending_target_rename.clone();
+        app.on_target_rename_cancelled(move || {
+            let ui = ui.unwrap();
+            pending.replace(None);
+            ui.set_target_rename_open(false);
+        });
+    }
+
     {
         let ui = app.as_weak();
         let routing = routing.clone();
@@ -1949,22 +2219,40 @@ fn main() {
                 if let ui_viewmodels::VmEvent::OpenAsset(asset_id) = event {
                     logging::info!("上框请求 asset_id={}", asset_id.0);
                     if let Some(resolver) = resolver.borrow().as_ref() {
-                        if let Ok(Some(materialized)) = resolver.materialize(asset_id) {
-                            let payload = materialized.as_payload();
-                            let notice = routing.borrow_mut().paste(&payload);
-                            logging::info!(
-                                "上框完成 asset_id={} tone={:?} text={}",
-                                asset_id.0,
-                                notice.tone,
-                                notice.text
-                            );
-                            show_notice(ui, notice.tone, notice.text);
-                        } else {
-                            show_notice(
-                                ui,
-                                TargetNoticeTone::Warning,
-                                "真实素材读取失败，请检查库文件".to_string(),
-                            );
+                        match resolver.materialize(asset_id) {
+                            Ok(Some(materialized)) => {
+                                let payload = materialized.as_payload();
+                                let notice = routing.borrow_mut().paste(&payload);
+                                logging::info!(
+                                    "上框完成 asset_id={} tone={:?} text={}",
+                                    asset_id.0,
+                                    notice.tone,
+                                    notice.text
+                                );
+                                show_notice(ui, notice.tone, notice.text);
+                            }
+                            // 物化落空/出错必须留痕：此分支曾零日志，排障时
+                            // 「上框请求后无下文」在日志里无迹可循（实测两类：
+                            // 非入库素材被点击、文本素材编码读取失败）。
+                            Ok(None) => {
+                                logging::warn!(
+                                    "上框物化落空 asset_id={}：素材不在当前库索引",
+                                    asset_id.0
+                                );
+                                show_notice(
+                                    ui,
+                                    TargetNoticeTone::Warning,
+                                    "真实素材读取失败，请检查库文件".to_string(),
+                                );
+                            }
+                            Err(error) => {
+                                logging::warn!("上框物化出错 asset_id={}：{error}", asset_id.0);
+                                show_notice(
+                                    ui,
+                                    TargetNoticeTone::Warning,
+                                    "真实素材读取失败，请检查库文件".to_string(),
+                                );
+                            }
                         }
                     } else {
                         let payload = AssetPayload {
@@ -2266,6 +2554,12 @@ fn main() {
             ui.set_move_menu_open(false);
             ui.set_rename_open(false);
             ui.set_properties_open(false);
+            // D59 目标重命名弹层同吃 dismiss；只关弹层，别名不落盘。
+            pending_target_rename.replace(None);
+            ui.set_target_rename_open(false);
+            // D56 更新弹窗：点外部 = 以后再说（不改「跳过」状态，角标保留）。
+            ui.set_update_open(false);
+            ui.set_update_shown(false);
             if ui.get_target_mode() == ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
                 let mut routing = routing.borrow_mut();
                 routing.toggle_picker();
@@ -2300,6 +2594,80 @@ fn main() {
                     "日志尚未初始化（本次运行未生成日志文件）".to_string(),
                 ),
             }
+        });
+    }
+
+    // D56 手动检查更新：设置面板「关于」区按钮。在途时按钮已禁用，这里兜底防抖。
+    {
+        let ui = app.as_weak();
+        let update_vm = update_vm.clone();
+        let feeds_path = feeds_path.clone();
+        app.on_update_check_requested(move || {
+            if update_vm.borrow().is_checking() {
+                return;
+            }
+            spawn_update_check(ui.clone(), feeds_path.clone(), false);
+        });
+    }
+
+    // D56 新版本弹窗三动作：打开发布页（系统默认浏览器）/ 以后再说 / 跳过此版本。
+    {
+        let ui = app.as_weak();
+        app.on_update_open_release_page(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let url = ui.get_update_url().to_string();
+            if url.is_empty() {
+                return;
+            }
+            match platform::win32::Win32UrlOpener.open_url(&url) {
+                Ok(()) => {
+                    ui.set_update_open(false);
+                    ui.set_update_shown(false);
+                    logging::info!("已打开发布页 {url}");
+                }
+                Err(error) => show_notice(
+                    &ui,
+                    TargetNoticeTone::Error,
+                    format!("无法打开发布页: {error}"),
+                ),
+            }
+        });
+    }
+    {
+        let ui = app.as_weak();
+        app.on_update_later(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            ui.set_update_open(false);
+            ui.set_update_shown(false);
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let update_vm = update_vm.clone();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        app.on_update_skip_version(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let Some(version) = update_vm.borrow_mut().skip_version() else {
+                return; // 无命中更新时跳过无意义
+            };
+            {
+                let mut stored = settings.borrow_mut();
+                stored.dismissed_version = version.clone();
+                if let Err(error) = stored.save(&settings_path) {
+                    logging::warn!("保存设置失败: {error}");
+                }
+            }
+            ui.set_update_open(false);
+            ui.set_update_shown(false);
+            ui.set_update_badge(update_vm.borrow().badge_visible());
+            ui.set_update_status_text(
+                update_vm
+                    .borrow()
+                    .status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs())
+                    .into(),
+            );
+            logging::info!("已跳过版本 {version}");
         });
     }
 
@@ -2733,68 +3101,6 @@ fn main() {
         });
     }
 
-    // 导入 .emo 素材包：文件模式选择器（*.emo 过滤；D34 的「选文件」侧入口）→
-    // 与文件夹导入共用的子进程管线（D24 包注册表按扩展名分发到 EmoReader）。
-    // 为什么单独一个按钮：文件夹选择器（FOS_PICKFOLDERS）只列目录，.emo 这类
-    // 文件根本不可见——实测用户反馈「弹出的文件选择器无法看见 .emo 文件」。
-    {
-        let ui = app.as_weak();
-        let routing = routing.clone();
-        let importing = importing.clone();
-        let import_flow = import_flow.clone();
-        app.on_import_emo_requested(move || {
-            let ui = ui.unwrap();
-            // 菜单项已选中：先收起弹层，再弹原生文件对话框。
-            ui.set_import_menu_open(false);
-            ui.set_import_menu_shown(false);
-            if importing.load(Ordering::SeqCst) {
-                show_notice(
-                    &ui,
-                    TargetNoticeTone::Warning,
-                    "已经在导入素材，请等进度条结束后再操作".to_string(),
-                );
-                return;
-            }
-
-            let package = match routing.borrow_mut().dialogs().pick_open_file(
-                "选择要导入的 .emo 素材包",
-                "千牛素材包 (*.emo)|*.emo|所有文件 (*.*)|*.*",
-            ) {
-                Ok(Some(path)) => path,
-                Ok(None) => return, // 用户取消
-                Err(error) => {
-                    show_notice(
-                        &ui,
-                        TargetNoticeTone::Error,
-                        format!("无法打开文件选择器: {error}"),
-                    );
-                    return;
-                }
-            };
-
-            // 「所有文件」放开了扩展名限制；非 .emo 在这里挡回并指路正确入口，
-            // 免得子进程报出费解的「不支持导入的来源」。
-            let is_emo = package
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("emo"));
-            if !is_emo {
-                show_notice(
-                    &ui,
-                    TargetNoticeTone::Warning,
-                    format!(
-                        "不是 .emo 素材包：{}。普通素材请用「导入素材… → 导入文件夹」",
-                        package.display()
-                    ),
-                );
-                return;
-            }
-
-            // R2：.emo 入口同样汇流归类弹窗（默认「按包内分类」）。
-            import_flow.open(vec![package]);
-        });
-    }
-
     // 导入素材：原生文件夹选择器（Win32 IFileOpenDialog，消除 3 秒 PowerShell 冷启动）
     // → sample-library 后台导入 → derive-thumbs 后台派生缩略图（ChildTaskRunner 编排）。
     {
@@ -2837,6 +3143,25 @@ fn main() {
             // R2：文件夹入口汇流归类弹窗（每批一次、确认才进管线）。
             import_flow.open(vec![dir]);
         });
+    }
+
+    // D56 静默检查：开关开启且距上次 ≥24h 才发起。后台线程跑网络，结果经
+    // 事件循环回 UI——失败只记日志（VM 静默档），不打扰启动过程。
+    {
+        let stored = settings.borrow();
+        let now = ui_viewmodels::unix_now_secs();
+        if stored
+            .last_check_unix
+            .saturating_add(ui_viewmodels::CHECK_INTERVAL_SECS)
+            <= now
+            && stored.auto_update_check
+        {
+            logging::info!(
+                "静默检查更新（上次检查 {} 秒前）",
+                now - stored.last_check_unix
+            );
+            spawn_update_check(app.as_weak(), feeds_path.clone(), true);
+        }
     }
 
     grid.sync();
@@ -2956,6 +3281,9 @@ fn spawn_import_pipeline(
             .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
             .with_env("DSH_LOG_LEVEL", log_level_arg);
     }
+    // worker stdout 的非协议行（imported/duplicate/failed/done/timing）落日志：
+    // duplicate/failed 是「素材为什么没出现」的唯一现场记录。
+    phase1_task = phase1_task.with_line(move |line| logging::info!("sample-library: {line}"));
     let _ = phase1_task
         .with_progress(move |done, total| {
             let weak = weak_progress.clone();
@@ -3043,6 +3371,7 @@ fn spawn_import_pipeline(
                     .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
                     .with_env("DSH_LOG_LEVEL", log_level_arg);
             }
+            phase2_task = phase2_task.with_line(move |line| logging::info!("derive-thumbs: {line}"));
             let _ = phase2_task
                 .with_progress(move |done, total| {
                     let weak = weak_derived_progress.clone();
@@ -3112,11 +3441,26 @@ fn normalize_library_root_value(value: &str) -> Option<String> {
     }
 }
 
+/// 缺省库根：`%LOCALAPPDATA%\asset-manager\library`（与 logs 的平台缺省目录
+/// 同一数据根）。库根绝不跟 exe 走——exe 同目录库会让每个副本分裂出独立库
+/// （互不可见、互不去重），且安装目录里的库会被重装/验证流程清空（2026-08-29
+/// 实测：重装安装版清掉用户当天导入的全部素材）。开发/便携隔离用
+/// `--library-root` 显式指定。
 fn default_library_root() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("library")))
-        .unwrap_or_else(|| std::path::PathBuf::from("library"))
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(base) if !base.is_empty() => {
+            std::path::PathBuf::from(base)
+                .join("asset-manager")
+                .join("library")
+        }
+        _ => {
+            logging::warn!("LOCALAPPDATA 未设置，库根回落 exe 同目录（多副本将各自分裂）");
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("library")))
+                .unwrap_or_else(|| std::path::PathBuf::from("library"))
+        }
+    }
 }
 
 fn helper_exe(name: &str) -> std::path::PathBuf {

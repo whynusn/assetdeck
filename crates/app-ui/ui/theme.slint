@@ -99,8 +99,6 @@ export global Glyph {
     out property <string> file-text: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5M9 12H15.5M9 15.5H15.5M9 19H12.5";
     out property <string> film: "M4.5 4.5H19.5V19.5H4.5ZM7 4.5V19.5M17 4.5V19.5M7 9.5H4.5M7 14.5H4.5M19.5 9.5H17M19.5 14.5H17";
     out property <string> file: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5";
-    // 素材包（lucide package 几何）：导入菜单里的 .emo 包入口。
-    out property <string> package: "M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4zM12 22V12M3.29 7L12 12L20.71 7M7.5 4.2L16.5 9.2";
 }
 
 // 图标按钮：无文字的方形按钮，语义交给 Tooltip，界面上不再堆说明文本。
@@ -153,42 +151,49 @@ export component IconButton inherits Rectangle {
 }
 
 // 危险操作按钮：与普通 Button 拉开视觉层级（描边红 → 待确认时填充红）。
+// enabled=false 时整枚降灰（批量动作 0 选禁用的视觉语义与普通按钮一致）。
 export component DangerButton inherits Rectangle {
     in property <string> text;
     in property <bool> armed: false;
+    in property <bool> enabled: true;
     callback clicked();
 
     height: 30px;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: root.armed ? Theme.danger : (touch.has-hover ? Theme.danger : Theme.line);
-    background: root.armed
-        ? (touch.pressed ? Theme.danger-press : Theme.danger-soft)
-        : (touch.pressed ? Theme.danger-press : touch.has-hover ? Theme.danger-soft : transparent);
+    border-color: !root.enabled ? Theme.line
+        : root.armed || touch.has-hover ? Theme.danger : Theme.line;
+    background: !root.enabled ? transparent
+        : root.armed
+            ? (touch.pressed ? Theme.danger-press : Theme.danger-soft)
+            : (touch.pressed ? Theme.danger-press : touch.has-hover ? Theme.danger-soft : transparent);
 
     animate background, border-color { duration: 120ms; }
 
     HorizontalLayout {
         alignment: center;
+        padding-left: 10px;
+        padding-right: 10px;
         spacing: 6px;
 
         Icon {
             y: (parent.height - self.height) / 2;
             commands: Glyph.trash;
-            tint: Theme.danger;
+            tint: root.enabled ? Theme.danger : Theme.text-3;
             width: 14px;
             height: 14px;
         }
 
         Text {
             text: root.text;
-            color: Theme.danger;
+            color: root.enabled ? Theme.danger : Theme.text-3;
             font-size: 12px;
             vertical-alignment: center;
         }
     }
 
     touch := TouchArea {
+        enabled: root.enabled;
         mouse-cursor: MouseCursor.pointer;
         clicked => {
             root.clicked();
@@ -296,8 +301,8 @@ export component Toggle inherits Rectangle {
     }
 }
 
-// 菜单行：弹层里的单条动作（图标 + 标题 + 次要说明），hover/按压反馈与
-// IconButton 同一色系；受控无状态，点击只转发 clicked。
+// 菜单行：弹层里的单条动作（图标 + 标题 + 次要说明）。无边框、悬停铺淡底——
+// 菜单的视觉语义是「一列可点的行」，带描边会被读成三个独立按钮（真机截图教训）。
 export component MenuItem inherits Rectangle {
     in property <string> glyph;
     in property <string> text;
@@ -306,13 +311,11 @@ export component MenuItem inherits Rectangle {
 
     height: 46px;
     border-radius: Theme.radius;
-    border-width: 1px;
-    border-color: touch.has-hover ? Theme.accent : Theme.line;
     background: touch.pressed ? Theme.bg-raised-press
         : touch.has-hover ? Theme.bg-raised-hover
-        : Theme.bg-raised;
+        : transparent;
 
-    animate background, border-color { duration: 100ms; }
+    animate background { duration: 100ms; }
 
     HorizontalLayout {
         padding-left: 10px;
