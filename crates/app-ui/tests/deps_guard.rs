@@ -114,3 +114,41 @@ fn deny_toml_bans_required_vector_entries() {
         );
     }
 }
+
+/// D48 卡退回归守卫：`apply_filter` 内部对 current_filter/filter_label 做
+/// `borrow_mut`。若调用方把 `.borrow().clone()` **内联进实参**，Ref 卫队会
+/// 活到整条语句结束、横跨整个调用 → BorrowMutError panic。实测后果：移动/
+/// 重命名在子命令收尾整库重载时卡退（写入已落库，重启后行为“已生效”）、
+/// 删除在起子进程前就崩（素材从未进回收站，用户视角=「回收站没加上」）。
+/// 守卫：apply_filter 的实参列表里禁止出现 `.borrow()`——label 必须先落
+/// 本地再传。
+#[test]
+fn apply_filter_args_never_hold_refcell_guards() {
+    let source = read_repo_file("src/main.rs");
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while let Some(offset) = source[cursor..].find("apply_filter(") {
+        let call_start = cursor + offset;
+        let mut depth = 0usize;
+        let mut call_end = call_start;
+        for (i, &b) in bytes.iter().enumerate().skip(call_start) {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        call_end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let args = &source[call_start..=call_end];
+        assert!(
+            !args.contains(".borrow()"),
+            "apply_filter 实参内联了 RefCell 卫队（跨语句借用 → BorrowMutError 卡退）：{args}"
+        );
+        cursor = call_end;
+    }
+}

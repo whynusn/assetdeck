@@ -237,6 +237,11 @@ impl CrudCtx {
         ui.set_content_y(0.0);
         sync_counts(&ui, total, self.resolver.borrow().is_some());
         ui.set_trash_count(trash_count as i32);
+        // 回收站空视图专属教学句（操作条不再承载长提示，见 sync_selection）。
+        if self.is_trash_view() && total == 0 {
+            ui.set_empty_title("回收站是空的".into());
+            ui.set_empty_hint("删除的素材会出现在这里，可恢复或彻底删除".into());
+        }
         self.grid.sync();
         self.sync_selection();
     }
@@ -258,15 +263,17 @@ impl CrudCtx {
         } else {
             ui_enums::BAR_HIDDEN
         });
+        // 操作条标签只报状态（教学句移交空态视图：长句曾把按钮挤出条外）。
+        // 张/项统一为「项」：回收站与多选都可能含视频/文本。
         ui.set_selection_text(
             if trash {
                 if count > 0 {
-                    format!("回收站 · 已选 {count} 张")
+                    format!("回收站 · 已选 {count} 项")
                 } else {
-                    "回收站（删除的素材在这里，可恢复或彻底删除）".to_string()
+                    "回收站".to_string()
                 }
             } else {
-                format!("已选 {count} 张")
+                format!("已选 {count} 项")
             }
             .into(),
         );
@@ -403,7 +410,11 @@ impl CrudCtx {
                 *self.resolver.borrow_mut() = Some(resolver);
                 self.thumb_cache.borrow_mut().clear();
                 // apply_categories 把高亮拍回「全部」，按当前过滤器重钉。
-                self.apply_filter(self.filter(), self.filter_label.borrow().clone());
+                // label 必须先落本地：`.borrow().clone()` 内联进实参时 Ref 卫队
+                // 活到整条语句结束，apply_filter 内部的 borrow_mut 立即
+                // BorrowMutError（D48 卡退根因，守卫测试锁定，勿回退）。
+                let label = self.filter_label.borrow().clone();
+                self.apply_filter(self.filter(), label);
             }
             Err(error) => {
                 show_notice(&ui, TargetNoticeTone::Error, format!("库刷新失败: {error}"));
@@ -1339,51 +1350,6 @@ fn main() {
         });
     }
 
-    // D48 右键：先过 VM 层菜单请求校验，命中后置菜单内容/位置。
-    {
-        let crud = crud.clone();
-        let menu_target = menu_target.clone();
-        app.on_tile_right_click(move |id, x, y| {
-            let id = AssetId(id.max(0) as u32);
-            let hit = {
-                let vm = crud.vm.borrow();
-                vm.context_menu(id)
-            };
-            // 菜单目标：选区 ∪ 命中（context_menu 已算好，targets 非空即合法）。
-            if hit.targets.is_empty() {
-                return;
-            }
-            *menu_target.borrow_mut() = Some(id);
-            let Some(ui) = crud.ui.upgrade() else { return };
-            let title = match hit.targets.len() {
-                1 => {
-                    let binding = crud.resolver.borrow();
-                    match binding
-                        .as_ref()
-                        .and_then(|r| r.meta_of(hit.targets[0]).ok().flatten())
-                    {
-                        Some(meta) => meta.file_name,
-                        None => "1 项".to_string(),
-                    }
-                }
-                n => format!("{n} 项"),
-            };
-            ui.set_context_menu_title(title.into());
-            ui.set_context_menu_x(x);
-            ui.set_context_menu_y(y);
-            ui.set_context_menu_open(true);
-        });
-    }
-
-    {
-        let crud = crud.clone();
-        app.on_context_menu_dismissed(move || {
-            if let Some(ui) = crud.ui.upgrade() {
-                ui.set_context_menu_open(false);
-            }
-        });
-    }
-
     // D53 旧三弹层入场：init 在首帧前跑（这正是旧「init 置 shown」无效的
     // 根因），只让它报数，翻转交给 16ms 单发 Timer（必然落在首帧后）；
     // 关动画时直接置 true（时长本就钳 0ms，无需 Timer）。
@@ -1524,9 +1490,7 @@ fn main() {
                 import_flow.close();
                 return;
             }
-            if ui.get_context_menu_open() {
-                ui.set_context_menu_open(false);
-            } else if ui.get_move_menu_open() {
+            if ui.get_move_menu_open() {
                 ui.set_move_menu_open(false);
             } else if ui.get_rename_open() {
                 ui.set_rename_open(false);
@@ -1540,22 +1504,27 @@ fn main() {
         });
     }
 
-    // D48 菜单五项 → 动作派发（R10/R11：目标=选区∪命中）。
+    // D48 菜单五项 → 动作派发（R10/R11）。ContextMenuArea 原生承载菜单
+    // （右键 + Menu 键 + 无障碍），激活回调带命中瓦片 id；目标集 =
+    // 选区∪命中，在壳层重算（vm.context_menu 的同一语义）。
     {
         let crud = crud.clone();
         let menu_target = menu_target.clone();
         let routing = routing.clone();
-        app.on_menu_action(move |id| {
-            let Some(action) = ui_enums::menu_action(id) else {
+        app.on_context_activated(move |hit, action_id| {
+            let Some(action) = ui_enums::menu_action(action_id) else {
                 return;
             };
-            if let Some(ui) = crud.ui.upgrade() {
-                ui.set_context_menu_open(false);
-            }
-            let targets = crud.action_targets(*menu_target.borrow());
+            let hit_id = AssetId(hit.max(0) as u32);
+            let targets = {
+                let vm = crud.vm.borrow();
+                let spec = vm.context_menu(hit_id);
+                spec.targets
+            };
             if targets.is_empty() {
                 return;
             }
+            *menu_target.borrow_mut() = Some(hit_id);
             match action {
                 MenuAction::Copy => {
                     let Some(ui) = crud.ui.upgrade() else { return };
@@ -1629,7 +1598,11 @@ fn main() {
                 MenuAction::Delete => {
                     // UI 先行：本地隐藏即时见效，子命令落库后整库重载对齐（失败会显形回来）。
                     crud.vm.borrow_mut().hide_locally(&targets);
-                    crud.apply_filter(crud.filter(), crud.filter_label.borrow().clone());
+                    {
+                        // label 先落本地再传（RefCell 卫队禁内联进实参，见守卫测试）。
+                        let label = crud.filter_label.borrow().clone();
+                        crud.apply_filter(crud.filter(), label);
+                    }
                     let uuids = crud.uuids_of(&targets);
                     crud.spawn_lib_cmd("trash", &uuids, None, "删除");
                 }
@@ -1678,7 +1651,11 @@ fn main() {
                 return;
             }
             crud.vm.borrow_mut().hide_locally(&targets);
-            crud.apply_filter(crud.filter(), crud.filter_label.borrow().clone());
+            {
+                // label 先落本地再传（RefCell 卫队禁内联进实参，见守卫测试）。
+                let label = crud.filter_label.borrow().clone();
+                crud.apply_filter(crud.filter(), label);
+            }
             let uuids = crud.uuids_of(&targets);
             crud.spawn_lib_cmd("trash", &uuids, None, "删除");
         });
@@ -2260,7 +2237,6 @@ fn main() {
             ui.set_scope_menu_open(false);
             // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
             import_flow.close();
-            ui.set_context_menu_open(false);
             ui.set_move_menu_open(false);
             ui.set_rename_open(false);
             ui.set_properties_open(false);
