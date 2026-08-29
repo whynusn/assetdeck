@@ -220,6 +220,8 @@ caret 探测与 UIA 焦点元素查询在**能够成功粘贴**的微信、千�
 
 picker 里每个候选带三态：`运行中 · 可选择` / `未运行 · 选择后仅复制` / 不可用则不入列。最小化窗口、悬浮条、通知窗、Loading 壳统统淘汰（千牛一个进程能开出 20+ 个窗口，PDD 更多）。判定依据是窗口可见性 + 类名画像 + 标题模板，不依赖快捷键或进程枚举顺序。
 
+2026-08-29 用户裁定收窄「未运行」态的适用范围：它只属于**用户捕捉过的目标**——热/钉住目标休眠（窗口关到托盘）时置灰保留，兑现 D13 的「休眠目标置灰保留不消失」。从未上过框的内置画像一律不入候选列表（`TargetRoutingVm::refresh_windows` 整条跳过）；否则没装 Telegram 的机器上 picker 永远躺着一个灰色 Telegram，内置名单看起来就是硬编码广告位。
+
 ### D18 「粘贴即发送」是画像级能力，按 (类别 × 格式) 声明（2026-08-24，08-25 修订）
 
 千牛对 `CF_HDROP` 的行为是**粘贴即发送**，微信不是。因此在 `Profile` 上新增 `paste_sends`：当协商出的组合落在其中且用户没有显式开启自动发送时，**降级到只复制 + 提示**，绝不用「发送」冒充「上框」。这条直接来自用户红线：默认只做到输入框，发送是可选项。
@@ -505,7 +507,7 @@ if (click_count % 2) == 1 {
 | D53 | 动画修复包：入场 init 技巧无效（根因）→ 下一帧翻转；出场两段式；瓦片淡入 | ✅ |
 | D54 | 瀑布流底边漏补：fill 停表加「几何稳定」判据 | ✅ |
 | D55 | 皮肤 = 字号/间距/Rust 侧色值 token 补全 + 外置 TOML 主题包；std-widgets 映射边界 | 📋 批 2 |
-| D56 | 更新检测 = WinHTTP 零新依赖 + 静默检查（≥24h 可关）+ GitHub→镜像顺序回落 + 开浏览器 | 📋 批 2 |
+| D56 | 更新检测 = WinHTTP 零新依赖 + 静默检查（≥24h 可关）+ GitHub→镜像顺序回落 + 开浏览器 | ✅（2026-08-29 落地，见 D56 落地记） |
 
 ### D46 删除语义：库内回收站（2026-08-28）
 
@@ -548,6 +550,10 @@ if (click_count % 2) == 1 {
 **连带修订（2026-08-29，用户实测）**：D37 的 `gpu_rendering` **默认值翻转为 false（软件渲染）**——femtovg 在窗口 resize 时逐帧重建渲染面，拖拽尺寸明显卡顿（用户真机实测），而目标用户正是低配机（D40–D45）；软件档渲染完整（software-renderer-path 已修图标）。另查明用户所报「切换无效」直接根因：安装版 exe 为 1d5ab6a（程序化 selector）之前的旧构建，旧代码连写名 `winit-femtovg` 静默回落默认渲染器——新代码 backend_name+renderer_name 分传已修，重启后切换生效。
 
 **落地（2026-08-28，批1-import）**：spike S1 源码查证定论——Slint 1.17.1 **无 OS 文件拖入**（DragArea/DropArea 仅应用内 DnD；winit 后端对 `WindowEvent::DroppedFile` 零处理；Slint 自身未注册 drop 处理器，故无共存冲突），走兜底路线：platform `win32::dragdrop` 模块 `#[implement(IDropTarget)]` + `RegisterDragDrop`（Drop 取 CF_HDROP → DragQueryFileW 路径 → FileDropSink trait），OleInitialize 幂等；HWND 经 slint 的 raw-window-handle-06 提取（deps_guard 白名单扩一项，纯 trait 定义零逻辑）。主导入按钮升级为 `pick_open_files` 多选混选（FOS_ALLOWMULTISELECT），三入口全部汇流归类弹窗（R2 保留原入口语义）。
+
+**真机验收两连修（2026-08-29，用户报「拖拽导入没实现」）**：落地后真机上拖拽是无声无息的 no-op，两处独立缺陷叠加：
+1. **HWND 就绪退避从未起跑**：`register_file_drop_when_ready` 用局部 `slint::Timer::default().start(...)` 排重试——slint `Timer` 的 `Drop` 会把定时器从 `CURRENT_TIMERS` 摘除，临时值一离语句即被取消，重试链是死代码；事件循环首轮 winit 窗口未建 → hwnd 恒 0 → 注册从未发生。修复：改 `slint::Timer::single_shot`（静态，不依赖存活对象），挂载点随后重构为 WinEvent 钩子事件驱动（`mount_when_window_ready`）。教训与 D40 低配冷启动退路同款：**凡依赖延迟触发的回调，Timer 实例必须静态存活**。
+2. **HDROP 路径末字符被吃**：`extract_hdrop_paths` 按 `DragQueryFileW` 首调返回的长度 `len`（**不含结尾 NUL**）分配缓冲，二次调用时 API 连 NUL 写不下，实际写入 `len-1` 字符 + NUL——`walrus.jpg` 变 `walrus.jp`，扩展名 `jp` 查无此类型 → `is_importable=false` → `plan_groups` 全过滤返回空表 → `finalize` 静默早退（R4 设计：不支持类型静默跳过）。修复：缓冲区 `len+1`。**教训：静默过滤路径必须可观测**——finalize 空表现打 WARN，Drop 送达/UI 回调/finalize 分支/classify_open 置位进 Info 日志（对齐 D41 分段计时纪律）。
 
 ### D50 导入归类弹窗（2026-08-28）
 
@@ -619,10 +625,67 @@ if (click_count % 2) == 1 {
 
 **命中动作**：弹窗（新版本号 + release notes）→「打开发布页」开浏览器。**应用内下载安装明确推迟**（签名校验/安装器自更新是独立大项目）。版本比较 semver 对当前 0.1.0。
 
+**落地（2026-08-29，批 2 提前动工）**：
+
+- **分层**：`platform` 增 `HttpTextFetcher`/`UrlOpener` trait（lib.rs 零依赖纪律不变），win32 侧 `http` 模块实现——WinHTTP `AUTOMATIC_PROXY` 跟随系统代理（国内直连 GitHub 的生命线，镜像回落之外的第二条路）、session→connect→request 全 RAII、每相位 10s 超时、响应体 2 MiB 上限；windows-sys 加 `Win32_Networking_WinHttp` feature，**零新 crate**（serde_json 本就在编译树）。
+- **纯逻辑**：`ui-viewmodels::update_check`——手写三段版本比较（不引 semver crate；tag 解析不出按「不可判定」处理绝不误弹）、GitHub `releases/latest` JSON 解析（tag_name 必需、notes 截 4000 字）、源**顺序回落**（主源健康时其答案终局，哪怕「不更新」——镜像数据可能滞后）、`UpdateCheckVm` 状态机（静默失败回 Idle 零打扰、手动失败面板可见；「跳过此版本」只静音自动弹窗与角标，手动检查照样显示）。单测 21 条随模块内联。
+- **UI 三件**：设置面板「关于」区（版本读数 + 检查按钮 + 状态行，失败才着 danger）；新版本弹窗（两段式入场同 classify；notes 滚动区高度钉 `min(200px, 内容高)` 防 ScrollView 塌陷——「移动到分类」同款坑；打开发布页经 `Win32UrlOpener`→ShellExecuteW）；设置齿轮 8px 红点角标（有更新且未跳过时）。弹窗顶部锚定 y:130 与全部既有弹窗（96–150px）同一约定，不做垂直居中。
+- **线程纪律**：检查在 `std::thread`（WinHTTP 会话线程局部，UI 线程零阻塞）；收尾经 `invoke_from_event_loop` 弹回，闭包只带 `Weak<AppWindow>` + 纯数据（Send）——VM/设置 Rc 经 UI 线程 `UPDATE_WIRING` 槽位取回（Rc 非 Send 不能跨线程）。设置写盘仍只发生在 UI 线程。
+- **配置**：更新源清单 = 内置 GitHub 主源（`api.github.com/repos/whynusn/assetdeck/releases/latest`）+ `update_feeds.toml`（与 settings.toml 同目录，`feeds = [...]`）覆盖；**镜像默认值仍留白**——D56 原话「实测哪个可用再定默认」，待真机实测镜像连通性后补默认清单。
+- **验收**：版本比较/回落顺序/状态机/settings round-trip 全绿；slint-viewer 渲染四态（弹窗带/不带 notes、面板正常/失败态）经裁剪放大核验角标与配色。
+
 ### 批次归档：明确不做 / 推迟清单（2026-08-28）
 
 - 框选橡皮筋（见 D47）；编辑标签、大图预览浮层（见 D48）；备注（notes）字段与备注搜索
 - 瀑布流方向感知预取 + 空闲预算提升（症状驱动；D54 落地后观察再定）
 - 「来源建议分类 + 单键确认」（A4 的另一半）
 - 应用内更新下载安装（见 D56）
+
+### D57 构建链硬化（2026-08-29）
+
+**内容**：对统一打包流水线（scripts/package.ps1 + ci.yml 五 job）做供应链与一致性修补，四个动作：
+
+1. **工具链钉死**：新增 `rust-toolchain.toml`（channel=1.98.0、profile=minimal、clippy/rustfmt）作为版本**单一真相源**；CI 换本地 composite action `.github/actions/setup-toolchain`（从该文件读 channel 安装，零第三方 action 依赖；dtolnay/rust-toolchain 实测不读此文件才自建）。废止 stable 浮动——「本地 gnu ↔ CI MSVC 源码级兼容」的假设不再随 stable 升级静默失效。**环境记录**：2026-08-29 实测 TUNA 镜像 rustup/dist 对 1.97.0/1.98.0 全 404（用户级 RUSTUP_DIST_SERVER 配置未动），1.98.0-gnu 一次性安装经 `RUSTUP_DIST_SERVER=USTC` 覆盖完成。
+2. **cargo-deny 补 RustSec advisories 硬门禁**（并放开每日 schedule 触发——公告库是持续变化的外部输入；cargo-deny 版本钉 0.20.2，schema 有漂移前科）。策略：vulnerability/unsound 全量 deny；`unmaintained = "workspace"`（0.20 v2 schema 收作用域而非严重级）——现存 paste/rustybuzz/ttf-parser 三条 unmaintained 全是 Slint 1.17.1 + image 传递依赖、无安全升级可走，作用域外降级为警告。连带 `lru 0.12.5 → 0.18.3`（RUSTSEC-2026-0002/0253 两条 unsound 清零，仅 grid_vm/thumbs 两处构造点，编译零改动）。
+3. **产物校验和**：package.ps1 收尾生成 `artifacts/SHA256SUMS.txt`（sha256sum 标准格式），随 artifact 上传并附进 GitHub Release——安装包未签名前提下的最低完整性保障。
+4. **release tag/版本一致性校验**：release job 首步断言 `${GITHUB_REF_NAME#v}` == Cargo.toml version，杜绝「tag v0.2.0 发出 0.1.0 命名正式包」；installer/Cargo.toml 加注：其独立 version 不参与分发命名，勿当第二版本真相源。
+
+**已知残留（P2，未排期）**：package job 每 PR 全量打包（宜收窄到 main+tag）；`+crt-static` 仍在 package.ps1 里走临时 RUSTFLAGS（与 mem-regression 构建指纹不同，rust-cache 双份；宜进 `.cargo/config.toml` 的 msvc target 段）；产物缺 BUILD_INFO（host triple/工具链/git hash——「安装版 exe 滞后」类误报排查只能靠核时间戳）；打包产物无冒烟测试（mem-regression 测的是 target/release 直出 exe，非 zip 内那份）。
+
+### D58 画像严格档（require_title）：千牛优惠弹窗误激活的根治（2026-08-29）
+
+**症状**：用户反馈上框有概率拉起千牛的优惠弹窗（或其他杂窗口）而非接待中心。
+
+**根因（两条污染路径，同一根因）**：激活器本身只认单个 hwnd（`SW_RESTORE`+`SetForegroundWindow`），无任何按应用名拉起的逻辑；问题在上游绑定。千牛所有普通 Qt 窗口**共享同一个类名** `Qt5152QWindowIcon`（Qt 按运行时版本命名），而匹配规则是「类名或标题命中其一即可」——优惠弹窗类窗口凭类名即命中 qianniu 画像。路径 A：弹窗抢到前台 → WinEvent 前台钩子 → 热目标被**静默**改写为弹窗（`on_foreground` 此前零日志）→ 下次上框激活弹窗。路径 B：接待中心 hwnd 从枚举短暂消失（D42 竞态）时，同进程 (`exe:pid`) 的弹窗成为「唯一替代」被静默重绑。概率性来自两条路径都需要时机配合。注入前校验只查「存活+前台」，弹窗完全满足，身份校验从未发生。
+
+**决策**：画像新增 `require_title` 严格档（类名+标题须**同时**命中，用户画像可整字段覆盖），qianniu 启用；标题正则同时收编用户级变体 `接待(中心|台)$`（部分用户窗口为「接待台」）。严格档下弹窗不命中画像 → 不进候选、不能被热目标跟随、不能被重绑、不可能被激活——从绑定源头根治，不靠运行时补丁。配套：`TargetBinding` 新增 `session_window`（标题命中即会话窗口证据）；热目标切换打 Info 日志（旧→新 + 标题 + 会话窗标志），现场可回溯。
+
+**取舍记录**：评估过运行时「只升不降」守卫（会话窗口不被同应用非会话窗口顶替），**放弃**——它对启用严格档的画像纯冗余；对微信这类宽松画像则有害：微信独立聊天窗口标题是联系人名（类名命中、标题不命中），恰是守卫会误杀的合法目标。绑定精度归画像（数据），不做运行时启发式。微信不启用严格档的同一理由。
+
+**附：取焦点方式实测结论（同日多角度真机实验，工具 `tools/real-im-verify/src/bin/focus_probe.rs`）**：微信 4.0 UIA 树今天暴露 2 个可写元素（`mmui::ChatInputField`，FindFirst 8ms 落焦可验证），旧画像注释「候选数 0」已过时；千牛 CEF 输入框 UIA 不可达且盲找会误聚焦「买家账号」输入框（FindFirst/FindAll 全中招），PropertyCondition FindAll 在 CEF 上 151–421ms 禁入热路径。`GetGUIThreadInfo` caret（4–15µs）是微信+千牛**唯一**通用有效的「锚点点击后落焦验证」信号（点击输入框必现 2px blinking caret，点偏则无）——待落地为 `click_anchor` 点击后复核，把「只上框不误发」红线闭环。多开微信的账号昵称不在主窗口 UIA 树内（160 元素全量 dump 实证），自动获取需另行设计。
+
+### D59 目标配置双通道接线 + 实例别名册（2026-08-29）
+
+**内容**：把 D13 设计多年未接线的后两层目标数据源接通，解决「多开微信无法区分是哪一个微信」：
+
+1. **`profiles.user.toml` 用户画像**：与设置同目录约定（库根优先，回退 exe 旁），同 id 字段级覆盖内置画像（机制 D13 既有，`load_profiles` 一直支持，缺的只是装配层读取）。损坏退回内置画像并记 error 日志，不拖垮主程序（`TargetRoutingRuntime::profile_load_check` 预检）。
+2. **`targets.json` 实例别名册**：键 `instance_id`（`exe:pid`），纯模型 `targets::AliasMap`（BTreeMap 键序稳定、坏文件按空册、空白别名=清除）。装配层启动加载、重命名确认后原子写回（tmp+rename，与设置保存同模式）。UI 入口：右键目标 picker 行 → 重命名弹层（默认名回显，留空保存=恢复默认）。
+3. **标签链路**：`TargetChoice` 增加 `base_label`（别名覆盖前的默认标签，清除时恢复用）；别名在匹配后、进 tracker 前统一应用，chip/picker/钉住绑定同步改名。
+
+**诚实边界**：别名键的 `exe:pid` 随目标进程重启变化，别名只在目标进程存活期内稳定——这是窗口层可观测身份（exe+pid+标题，微信标题恒为「微信」）的诚实上限；账号昵称不在微信 4.0 主窗口 UIA 树内（D58 附注实证）。稳定别名需产品级账号身份源（如读微信数据目录），v1 不做，用户重启 IM 后重命名一次。
+
+### D60 库根与 exe 解耦 + 去重命中浮出 + 导入链路可观测性（2026-08-29）
+
+**症状**：用户反馈「导入素材有问题」，三层叠加：① 5 次 PNG 拖入全被 pHash 去重静默跳过（DEDUP_THRESHOLD=8，duplicate 走 stdout 被 UI 侧丢弃，UI 弹「导入完成」实际入库 0 条——同窗口连拍截图极易互判重复）；② GBK 编码 txt 上框物化 `read_to_string` 报错走零日志分支（asset_id=1×10、asset_id=12×4 静默无果）；③ 库根=exe 同目录，机器上 4 份 exe 副本（安装版/dist/debug/release）各带独立库互不可见、互不去重，且安装目录里的库被重装/验证流程清空（16:15 重装清掉 14:21 导入的全部素材）。
+
+**决策**：
+1. **库根与 exe 解耦**：`default_library_root` 改为 `%LOCALAPPDATA%\asset-manager\library`（与 logs 平台缺省目录同一数据根）。全部副本共享一库，重装不再触及库；LOCALAPPDATA 缺失回落 exe 同目录并告警。开发/便携隔离用 `--library-root` 显式指定。存量真实库一次性手工迁移（`target\release\library` → 新根，13 行完整），不写自动迁移代码。
+2. **去重命中必须浮出**：sample-library 在 `skipped>0` 时发 NOTICE 点名（源路径 ≈ 已有素材 file_name，上限 3 条）；duplicate 语义不变（仍跳过不占盘，符合导入去重红线）。
+3. **可观测性**：`spawn_import_pipeline` 两阶段接 `with_line` 把 worker stdout 非协议行（imported/duplicate/failed/done/timing）落日志；上框物化落空/出错分支补 warn 日志（旧实现零日志，是三次排障黑洞的元凶）。
+4. **文本素材入库即转 UTF-8**（库内不变量，非读取端兜底）：`media::normalize_text_to_utf8`——BOM 三态确定性识别（UTF-8 剥壳 / UTF-16 精确解码）→ 无 BOM 合法 UTF-8 零拷贝直通 → 其余按 GBK 转码（中文 Windows ANSI 事实标准）；新增依赖 encoding_rs（Apache-2.0/MIT）。library 入库计量按转码后字节、>8MB 入口硬拒绝（粘贴端对文本是同步读盘，病态大文本不进拷贝队列），拷贝线程走归一化写盘保证 size_bytes 与实盘一致。存量 2 条 GBK raw.txt 一次性重编码（22139→27854B）并同步 size_bytes。
+5. **上框域 = 活动素材**：materialize 拒绝已删除行与对象文件缺失（`CatalogError::PasteBlocked` 带原因上日志与通知条）——旧实现照常产出载荷，HDROP 指向不存在文件，IM 端静默丢弃整次粘贴（提示「成功」、实际贴空气）。
+
+**取舍记录**：文本编码在**导入边界**建立不变量而非读取端加解码回退（用户拍板：不打运行时补丁、只走根因）；GBK 是中文 Windows 的事实 ANSI，异种编码会得到替换字符而非失败——显式记录这一已知退化。双实例共享一库后，UI 单实例守卫（仅架构意向、代码未落地）优先级上升：并发写库目前依赖 SQLite 锁 + 单写者子进程纪律兜住，守卫待落地。
+
+
 
