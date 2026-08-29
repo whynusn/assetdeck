@@ -21,3 +21,10 @@ Cargo.lock.bak
 /cargo-check*.log
 /cargo-test*.log
 
+# 会话级渲染验证 / 探针 / 本地修复工具（不进仓）
+/.tools/
+/.tmp-renders/
+/.tmp-render*.ps1
+/Default_Project_probe/
+/dsh-fix-web-profile/
+
