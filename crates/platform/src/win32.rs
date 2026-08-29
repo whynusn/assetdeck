@@ -2668,7 +2668,10 @@ pub mod dragdrop {
             if len == 0 {
                 continue;
             }
-            let mut buffer = vec![0u16; len];
+            // 首次调用返回的长度不含结尾 NUL；缓冲区必须留出 NUL 位
+            // （len+1），否则 API 截断成 len-1 个字符——末字符被吃掉，
+            // "walrus.jpg" 变 "walrus.jp"，下游按扩展名过滤全部落空。
+            let mut buffer = vec![0u16; len + 1];
             let written = DragQueryFileW(hdrop, index, Some(&mut buffer)) as usize;
             if written == 0 {
                 continue;
