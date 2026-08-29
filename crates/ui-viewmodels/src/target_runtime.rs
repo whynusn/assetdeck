@@ -43,6 +43,15 @@ pub struct TargetRoutingRuntime {
 }
 
 impl TargetRoutingRuntime {
+    /// 预检画像解析。装配层用它实现「坏用户画像退回内置而不拖垮主程序」：
+    /// 先 check 再决定传不传 user，避免构造期 panic 路径吃掉用户侧配置错误。
+    pub fn profile_load_check(
+        builtin: &str,
+        user: Option<&str>,
+    ) -> Result<(), TargetProfileError> {
+        targets::load_profiles(builtin, user).map(|_| ())
+    }
+
     pub fn new(
         builtin: &str,
         user: Option<&str>,
@@ -126,6 +135,21 @@ impl TargetRoutingRuntime {
         // 打开列表前强制刷新一次健康度，避免展示到已经消失或新登录的窗口的陈旧状态。
         let _ = self.refresh_windows_now();
         self.routing.open_picker()
+    }
+
+    /// 注入装配层加载的实例别名册（targets.json）；对已有候选立即重放。
+    pub fn set_aliases(&mut self, aliases: targets::AliasMap) {
+        self.routing.set_aliases(aliases);
+    }
+
+    /// 别名册只读视图——装配层在重命名后据此原子保存 targets.json。
+    pub fn aliases(&self) -> &targets::AliasMap {
+        self.routing.aliases()
+    }
+
+    /// 重命名窗口实例（空白/None = 恢复默认名）。返回是否命中候选。
+    pub fn rename_target(&mut self, selection_key: &str, alias: Option<&str>) -> bool {
+        self.routing.rename_target(selection_key, alias)
     }
 
     /// 当前热目标绑定（只读快照）。供测试与「解绑自愈」判定使用；

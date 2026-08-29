@@ -1,6 +1,6 @@
 use pipeline::{AssetPayload, PasteConfig, PasteSession, TargetPasteOutcome, TargetPipelineDeps};
 use targets::{
-    matching_profile_windows, resolve_eligible_snapshot, Health, ProfileError, ProfileSet,
+    matching_profile_windows, resolve_eligible_snapshot, AliasMap, Health, ProfileError, ProfileSet,
     TargetBinding, TargetId, TargetTracker, WindowSnapshot,
 };
 
@@ -16,6 +16,9 @@ pub enum TargetBarMode {
 pub struct TargetChoice {
     pub binding: TargetBinding,
     pub health: Health,
+    /// 别名覆盖前的默认标签（`profile.label · 窗口标题`）。清除别名时据此恢复，
+    /// 不必重新枚举窗口。别名只改 `binding.label`，base 恒为构造时的原貌。
+    pub base_label: String,
 }
 
 impl TargetChoice {
@@ -196,7 +199,7 @@ impl TargetBarVm {
             return TargetBarSnapshot {
                 mode: TargetBarMode::ChooseTarget,
                 label: self.current.as_ref().map_or_else(
-                    || "选择上框目标".to_string(),
+                    || "选择聊天窗口".to_string(),
                     |choice| choice.binding.label.clone(),
                 ),
                 health: self
@@ -210,7 +213,9 @@ impl TargetBarVm {
         let Some(current) = self.current.as_ref() else {
             return TargetBarSnapshot {
                 mode: TargetBarMode::Empty,
-                label: "未识别目标".to_string(),
+                // 空态文案即下一步动作（点 chip 弹出选择列表），不再是内部状态名
+                // 「未识别目标」——它与右侧提示「未选择目标」曾三词一义互相打架。
+                label: "点击选择聊天窗口".to_string(),
                 health: Health::Unknown,
                 pinned: false,
                 choices: self.choices.clone(),
@@ -231,11 +236,28 @@ impl TargetBarVm {
     }
 }
 
+/// 热目标的一行摘要（切换日志用）：id@hwnd 标签 会话窗 最小化。
+fn describe_hot(binding: &Option<TargetBinding>) -> String {
+    match binding {
+        None => "无".to_string(),
+        Some(b) => format!(
+            "{}@{:?} {:?} 会话窗={} 最小化={}",
+            b.id.as_str(),
+            b.hwnd.map(|h| h.0),
+            b.label,
+            b.session_window,
+            b.minimized,
+        ),
+    }
+}
+
 /// 多 IM 目标路由的界面状态门面。窗口采集和输入注入由壳层注入，目标决策留在纯 Rust。
 pub struct TargetRoutingVm {
     profiles: ProfileSet,
     tracker: TargetTracker,
     bar: TargetBarVm,
+    /// 实例别名册（targets.json）。键 `exe:pid`，只影响展示标签，不影响匹配。
+    aliases: AliasMap,
 }
 
 impl TargetRoutingVm {
@@ -244,13 +266,99 @@ impl TargetRoutingVm {
             profiles: targets::load_profiles(builtin, user)?,
             tracker: TargetTracker::new(),
             bar: TargetBarVm::new(),
+            aliases: AliasMap::new(),
         })
     }
 
+    /// 装配层在启动时注入已加载的别名册；对已存在的候选立即重放。
+    pub fn set_aliases(&mut self, aliases: AliasMap) {
+        self.aliases = aliases;
+        for choice in &mut self.bar.choices {
+            if let Some(alias) = self.aliases.get(&choice.binding.instance_id) {
+                choice.binding.label = alias.to_string();
+            } else {
+                choice.binding.label = choice.base_label.clone();
+            }
+        }
+    }
+
+    pub fn aliases(&self) -> &AliasMap {
+        &self.aliases
+    }
+
+    /// 重命名（或清除，`None`/空白 = 恢复默认名）一个窗口实例。返回是否命中候选。
+    ///
+    /// 改名同步三处：候选列表、热/钉住绑定（chip 标签）、别名册本身——持久化由
+    /// 装配层在调用后取 [`Self::aliases`] 完成。
+    pub fn rename_target(&mut self, selection_key: &str, alias: Option<&str>) -> bool {
+        let Some(instance_id) = self
+            .bar
+            .choices
+            .iter()
+            .find(|choice| choice.selection_key() == selection_key)
+            .map(|choice| choice.binding.instance_id.clone())
+        else {
+            return false;
+        };
+        self.aliases.set(&instance_id, alias);
+        let label = self
+            .aliases
+            .get(&instance_id)
+            .map(str::to_string);
+        for choice in &mut self.bar.choices {
+            if choice.binding.instance_id == instance_id {
+                choice.binding.label =
+                    label.clone().unwrap_or_else(|| choice.base_label.clone());
+            }
+        }
+        // chip / 钉住绑定只换标签，hwnd 与身份不动（rebind 的既有语义）。
+        let mut relabelled: Option<TargetBinding> = None;
+        if let Some(hot) = self.tracker.hot() {
+            if hot.instance_id == instance_id {
+                let mut updated = hot.clone();
+                updated.label = label.clone().unwrap_or_else(|| {
+                    self.bar
+                        .choices
+                        .iter()
+                        .find(|choice| choice.binding.instance_id == instance_id)
+                        .map(|choice| choice.base_label.clone())
+                        .unwrap_or_else(|| updated.label.clone())
+                });
+                relabelled = Some(updated);
+            }
+        }
+        if let Some(updated) = relabelled {
+            let id = updated.id.clone();
+            self.tracker.rebind(&id, updated);
+        }
+        true
+    }
+
+    /// 按实例身份把别名写进绑定标签（匹配后、进 tracker 前统一过这里）。
+    fn apply_alias(&self, binding: &mut TargetBinding) {
+        if let Some(alias) = self.aliases.get(&binding.instance_id) {
+            binding.label = alias.to_string();
+        }
+    }
+
     pub fn on_foreground(&mut self, snapshot: &WindowSnapshot) {
-        let eligible = resolve_eligible_snapshot(&self.profiles, snapshot);
-        self.tracker
-            .on_foreground(eligible.map(|resolved| resolved.binding), false);
+        let eligible = resolve_eligible_snapshot(&self.profiles, snapshot).map(|mut resolved| {
+            self.apply_alias(&mut resolved.binding);
+            resolved.binding
+        });
+        let before = self.tracker.hot().cloned();
+        self.tracker.on_foreground(eligible, false);
+        // 热目标切换打点（2026-08-29）：此前前台漂移改写完全静默——千牛优惠弹窗
+        // 借类名命中顶替热目标后，现场无从回溯「目标什么时候变成弹窗的」。
+        // 会话窗标志一眼区分正常跟随与「类名命中但标题不合会话特征」的可疑顶替。
+        let after = self.tracker.hot().cloned();
+        if describe_hot(&before) != describe_hot(&after) {
+            log::info!(
+                "热目标切换 {} -> {}",
+                describe_hot(&before),
+                describe_hot(&after)
+            );
+        }
         self.sync_hot_target();
     }
 
@@ -259,6 +367,14 @@ impl TargetRoutingVm {
         for profile in self.profiles.profiles() {
             let matches = matching_profile_windows(profile, windows);
             if matches.is_empty() {
+                // D17 收窄（2026-08-29 用户裁定）：「未运行·选择后仅复制」态只
+                // 属于用户捕捉过的目标——热/钉住目标休眠时置灰保留（D13）。从未
+                // 上过框的内置画像不入列，否则没装 Telegram 的机器上 picker 永远
+                // 躺着一个灰色 Telegram，内置名单成了硬编码广告位。
+                let dormant_hot = self.tracker.hot().is_some_and(|hot| hot.id == profile.id);
+                if !dormant_hot {
+                    continue;
+                }
                 choices.push(TargetChoice {
                     binding: TargetBinding {
                         id: profile.id.clone(),
@@ -268,13 +384,23 @@ impl TargetRoutingVm {
                         minimized: false,
                         visible: false,
                         instance_id: String::new(),
+                        session_window: false,
                     },
                     health: Health::Unknown,
+                    base_label: profile.label.clone(),
                 });
             } else {
-                choices.extend(matches.into_iter().map(|resolved| TargetChoice {
-                    binding: resolved.binding,
-                    health: Health::Unknown,
+                choices.extend(matches.into_iter().map(|resolved| {
+                    let mut binding = resolved.binding;
+                    let base_label = binding.label.clone();
+                    if let Some(alias) = self.aliases.get(&binding.instance_id) {
+                        binding.label = alias.to_string();
+                    }
+                    TargetChoice {
+                        binding,
+                        health: Health::Unknown,
+                        base_label,
+                    }
                 }));
             }
         }
@@ -440,9 +566,13 @@ impl TargetRoutingVm {
     }
 
     fn sync_hot_target(&mut self) {
-        let target = self.tracker.hot().cloned().map(|binding| TargetChoice {
-            binding,
-            health: Health::Unknown,
+        let target = self.tracker.hot().cloned().map(|binding| {
+            let base_label = binding.label.clone();
+            TargetChoice {
+                binding,
+                health: Health::Unknown,
+                base_label,
+            }
         });
         self.bar.set_hot_target(target);
     }
@@ -462,8 +592,10 @@ mod tests {
                 minimized: false,
                 visible: true,
                 instance_id: format!("pid-{id}"),
+                session_window: false,
             },
             health: Health::Yellow,
+            base_label: id.to_string(),
         }
     }
 
@@ -574,6 +706,116 @@ label = "Telegram"
 exe_names = ["Telegram.exe"]
 "#;
 
+    const STRICT_QIANNIU_PROFILES: &str = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+class_names = ["Qt5152QWindowIcon"]
+title_regexes = ["接待(中心|台)$", "千牛工作台"]
+require_title = true
+"#;
+
+    fn snapshot_with_class(hwnd: isize, exe: &str, class: &str, title: &str) -> WindowSnapshot {
+        WindowSnapshot {
+            class_name: class.to_string(),
+            ..snapshot(hwnd, exe, title)
+        }
+    }
+
+    /// 严格档回归（2026-08-29 用户裁定）：优惠弹窗类窗口（类名命中、标题不合
+    /// 会话特征）抢前台不得顶替会话窗口热目标——严格档下它根本不命中画像。
+    /// 「接待台」标题变体（部分用户如此）照常跟随。
+    #[test]
+    fn promo_popup_foreground_never_takes_over_session_hot_target() {
+        let mut vm = TargetRoutingVm::from_profiles(STRICT_QIANNIU_PROFILES, None).unwrap();
+        vm.on_foreground(&snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        ));
+        let hot = vm.selected().expect("会话窗口应成为热目标");
+        assert_eq!(hot.id.as_str(), "qianniu");
+        assert!(hot.session_window, "标题命中的绑定必须携带会话窗标志");
+
+        // 弹窗抢前台：同 exe 同类名、标题无关。
+        vm.on_foreground(&snapshot_with_class(
+            2,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "限时特惠",
+        ));
+        let hot = vm.selected().unwrap();
+        assert_eq!(
+            hot.hwnd,
+            Some(targets::WindowHandle(1)),
+            "弹窗不得顶替会话窗口热目标"
+        );
+
+        // 「接待台」变体照常成为热目标。
+        vm.on_foreground(&snapshot_with_class(
+            3,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待台",
+        ));
+        assert_eq!(vm.selected().unwrap().hwnd, Some(targets::WindowHandle(3)));
+    }
+
+    /// 别名全链路：rename 改候选+热绑定标签，清除恢复 base，set_aliases 对既有
+    /// 候选立即重放。持久化（targets.json）由装配层取 `aliases()` 完成。
+    #[test]
+    fn rename_target_applies_alias_and_clear_restores_base() {
+        let mut vm = TargetRoutingVm::from_profiles(STRICT_QIANNIU_PROFILES, None).unwrap();
+        vm.refresh_windows(&[snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        )]);
+        let key = vm.snapshot().choices[0].selection_key();
+        let base = vm.snapshot().choices[0].base_label.clone();
+
+        assert!(vm.rename_target(&key, Some("主接待")));
+        assert_eq!(vm.snapshot().choices[0].binding.label, "主接待");
+        assert_eq!(vm.snapshot().choices[0].base_label, base, "base 不得被别名污染");
+
+        // 前台跟随产生的热目标（chip 标签来源）同样带别名。
+        vm.on_foreground(&snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        ));
+        assert_eq!(vm.selected().unwrap().label, "主接待");
+
+        // 空白 = 清除：候选与热绑定都恢复默认标签。
+        assert!(vm.rename_target(&key, Some("   ")));
+        assert_eq!(vm.snapshot().choices[0].binding.label, base);
+        assert_eq!(vm.selected().unwrap().label, base);
+        assert!(vm.aliases().is_empty());
+        assert!(!vm.rename_target("不存在的键@0", None), "未命中候选必须返回 false");
+    }
+
+    #[test]
+    fn set_aliases_replays_on_existing_choices() {
+        let mut vm = TargetRoutingVm::from_profiles(STRICT_QIANNIU_PROFILES, None).unwrap();
+        vm.refresh_windows(&[snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        )]);
+        let instance_id = vm.snapshot().choices[0].binding.instance_id.clone();
+
+        let mut aliases = targets::AliasMap::new();
+        aliases.set(&instance_id, Some("主接待"));
+        vm.set_aliases(aliases);
+
+        assert_eq!(vm.snapshot().choices[0].binding.label, "主接待");
+    }
+
     #[test]
     fn unrelated_foreground_does_not_replace_routing_vm_hot_target() {
         let mut vm = TargetRoutingVm::from_profiles(ROUTING_PROFILES, None).unwrap();
@@ -682,6 +924,32 @@ exe_names = ["Telegram.exe"]
         assert!(vm.toggle_picker());
         assert!(!vm.toggle_picker());
         assert_ne!(vm.snapshot().mode, TargetBarMode::ChooseTarget);
+    }
+
+    /// 从未捕捉过的内置画像不得出现在候选列表：没装 Telegram 的机器上，
+    /// picker 不能永远躺着一个灰色 Telegram。
+    #[test]
+    fn never_used_profiles_do_not_appear_in_candidates() {
+        let mut vm = TargetRoutingVm::from_profiles(ROUTING_PROFILES, None).unwrap();
+        vm.refresh_windows(&[snapshot(1, "WeChat.exe", "微信")]);
+        let choices = vm.snapshot().choices;
+        assert_eq!(choices.len(), 1, "无窗口的画像必须整条淘汰");
+        assert_eq!(choices[0].binding.id.as_str(), "wechat");
+        assert_eq!(choices[0].binding.hwnd, Some(targets::WindowHandle(1)));
+    }
+
+    /// D13「休眠置灰保留」只属于捕捉过的目标：热目标窗口消失后，候选里保留
+    /// 一个灰色占位，chip 也继续显示它，等窗口回来重绑。
+    #[test]
+    fn dormant_hot_target_stays_in_candidates_as_greyed_placeholder() {
+        let mut vm = TargetRoutingVm::from_profiles(ROUTING_PROFILES, None).unwrap();
+        vm.on_foreground(&snapshot(1, "Telegram.exe", "Telegram"));
+        vm.refresh_windows(&[]);
+        let choices = vm.snapshot().choices;
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].binding.id.as_str(), "telegram");
+        assert_eq!(choices[0].binding.hwnd, None, "休眠占位必须无窗口绑定");
+        assert_eq!(vm.selected().unwrap().id.as_str(), "telegram");
     }
 
     #[test]
