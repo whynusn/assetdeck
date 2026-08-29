@@ -1,0 +1,8 @@
+# 工具链单一真相源：channel 钉死具体版本，本机 rustup 与 CI（.github/actions/setup-toolchain）
+# 都以此解析，不再依赖 "stable" 浮动。升级 = 改这一行 + 本地门禁全绿后提交。
+# profile=minimal 控制安装体积；clippy/rustfmt 是 fmt/clippy 门禁必需，CI 安装命令与其保持一致。
+# host 三元组按机器解析：本机 windows-gnu、CI MSVC（源码级兼容，产物不交叉，见 AGENTS.md 工具链节）。
+[toolchain]
+channel = "1.98.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

@@ -2,6 +2,8 @@
 
 [package]
 name = "asset-installer"
+# 独立 workspace 的内部版本号：分发产物命名取主 workspace [workspace.package].version
+# （scripts/package.ps1 读取），此版本号不参与命名，勿当第二版本真相源。
 version = "0.1.0"
 edition = "2021"
 publish = false

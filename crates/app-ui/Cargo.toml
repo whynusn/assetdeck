@@ -16,7 +16,7 @@ ui-viewmodels = { path = "../ui-viewmodels" }
 # （spec/app-ui/backend/directory-structure.md「M8 装配边界」）。
 platform = { path = "../platform" }
 # D41 壳层缩略图缓存的 LRU（与 ui-viewmodels 同一 crate）。
-lru = "0.12"
+lru = "0.18"
 # 主窗口 HWND 提取（拖拽注册用）；slint 侧经 raw-window-handle-06 暴露。
 raw-window-handle = "0.6"
 slint = { version = "1", default-features = false, features = [

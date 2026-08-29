@@ -1,3 +1,12 @@
+[advisories]
+version = 2
+# RustSec 门禁策略：vulnerability/unsound 保持默认全量 deny（lru 两条 unsound 已随 0.18.3 升级清零）；
+# unmaintained 限 workspace 作用域——现存三条（paste/rustybuzz/ttf-parser）全是 Slint 1.17.1 + image
+# 的传递依赖且无安全升级可走，作用域外的发现降级为警告；等 Slint 升级自然消化，hard gate 只留给
+# 可修的真问题（直接依赖 unmaintained 仍会红灯）。
+unmaintained = "workspace"
+# ci.yml 的 deny job 已放开每日 schedule 触发——公告库是持续变化的外部输入，定时扫描才有价值。
+
 [bans]
 multiple-versions = "warn"
 deny = [

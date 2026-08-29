@@ -14,7 +14,7 @@ store = { path = "../store" }
 targets = { path = "../targets" }
 pipeline = { path = "../pipeline" }
 platform = { path = "../platform" }
-lru = "0.12"
+lru = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 # D42（上框解绑竞态自愈）落地：target_runtime 直接使用 log facade。

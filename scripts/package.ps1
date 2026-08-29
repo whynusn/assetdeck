@@ -19,6 +19,8 @@
         4. 产出 artifacts/素材管理器-安装版-<ver>.exe
 
     stage=all（默认）串联两阶段。最终产物统一落在 artifacts/，不再散落项目根目录。
+    收尾生成 artifacts/SHA256SUMS.txt（sha256sum 标准格式）——分发物未签名，校验和是
+    完整性保障的最低限度，随产物一起上传并附进 GitHub Release。
 
     为什么 installer 是独立 workspace：其编译期 include_bytes!("../../dist.tar.gz")
     要求 tar 必须先于编译存在；若并入主 workspace，任何 cargo build --workspace
@@ -206,6 +208,16 @@ switch ($Stage) {
     "installer" { Step-Installer }
     "all"       { Step-Portable; Step-Installer }
 }
+
+# ---------- 校验和清单：未签名分发物的完整性最低保障 ----------
+# 覆盖 OutDir 当前全部分发物，sha256sum 标准格式（哈希 + 两空格 + 文件名），Linux
+# sha256sum -c 可直接校验。分阶段调用时以最后一次调用重刷的清单为准；CI 统一走 Stage=all。
+$sumsPath = Join-Path $OutDir "SHA256SUMS.txt"
+Get-ChildItem $OutDir -File |
+    Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+    ForEach-Object { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant(), $_.Name } |
+    Set-Content -Path $sumsPath -Encoding ascii
+Write-Host "    OK 校验和: $sumsPath"
 
 Write-Host ""
 Write-Host "打包完成（stage=$Stage, version=$Version, out=$OutDir）"

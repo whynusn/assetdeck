@@ -1,0 +1,12 @@
+name: 'setup-toolchain'
+description: '按 rust-toolchain.toml 安装钉死工具链（channel 单一来源，零第三方 action 依赖）'
+runs:
+  using: 'composite'
+  steps:
+    - shell: pwsh
+      run: |
+        $channel = ((Get-Content rust-toolchain.toml) | Select-String '^channel\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+        # --profile/--component 与 rust-toolchain.toml 的声明保持一致（rustup toolchain install 不读该文件）
+        rustup toolchain install $channel --profile minimal --component clippy --component rustfmt
+        rustup default $channel
+        rustc --version
