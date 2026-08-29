@@ -10,7 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 4;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 5;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -56,6 +56,9 @@ pub struct AssetMeta {
     pub created_at: i64,
     pub imported_at: i64,
     pub phash: Option<Vec<u8>>,
+    /// 非图片素材的 SHA-256 内容摘要（D61 全类目去重）。图片恒 None——图片走
+    /// pHash 感知去重（AGENTS.md 硬约束），其余类型靠逐字节等值判定。
+    pub content_hash: Option<Vec<u8>>,
     /// 媒体像素宽（None = 尚未探测）。缩略图派生工序回写，UI 据此算真实宽高比。
     pub width: Option<u32>,
     /// 媒体像素高（None = 尚未探测）。
@@ -134,6 +137,15 @@ const MIGRATION_V4: &str = "
 ALTER TABLE assets ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// v5：内容等值去重（D61）。pHash 只覆盖图片（解码才有感知哈希）；视频/文本/
+/// 未知类型此前重复导入即双份占盘（导入去重红线只写了图片那一半）。给非图片
+/// 素材记 SHA-256 内容摘要 + 等值索引。NULL = 图片类或历史行——感知去重与
+/// 等值去重各管一类，语义互不侵犯。
+const MIGRATION_V5: &str = "
+ALTER TABLE assets ADD COLUMN content_hash BLOB;
+CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash);
+";
+
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -200,6 +212,9 @@ impl Store {
         }
         if found < 4 {
             conn.execute_batch(MIGRATION_V4)?;
+        }
+        if found < 5 {
+            conn.execute_batch(MIGRATION_V5)?;
         }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
@@ -277,7 +292,7 @@ impl Store {
     pub fn get_asset(&self, uuid: &str) -> Result<Option<AssetMeta>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
+            "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
              FROM assets WHERE uuid = ?1",
         )?;
         let mut rows = stmt.query(params![uuid])?;
@@ -294,8 +309,9 @@ impl Store {
             created_at: row.get(5)?,
             imported_at: row.get(6)?,
             phash: row.get(7)?,
-            width: row.get(8)?,
-            height: row.get(9)?,
+            content_hash: row.get(8)?,
+            width: row.get(9)?,
+            height: row.get(10)?,
         };
         drop(rows);
         drop(stmt);
@@ -579,6 +595,21 @@ impl Store {
         Ok(out)
     }
 
+    /// 内容摘要等值反查 uuid（D61 非图片去重的收尾查询）。**排除回收站**——
+    /// 与 all_phashes 同一去重语义：回收站素材不挡新导入。命中即唯一
+    /// （SHA-256 等值，不存在 pHash 那种多候选二次过滤），LIMIT 兜底防御。
+    pub fn uuid_by_content_hash(&self, hash: &[u8]) -> Result<Option<String>> {
+        let conn = self.lock();
+        let uuid: Option<String> = conn
+            .query_row(
+                "SELECT uuid FROM assets WHERE content_hash = ?1 AND deleted = 0 LIMIT 1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(uuid)
+    }
+
     /// 按 uuid 升序遍历全库资产元数据，逐行回调（含 tags）。**含回收站行**——
     /// 审计/对账路径专用；面向用户视图（浏览/派生/导出）必须用
     /// [`for_each_asset_active`](Self::for_each_asset_active)（D46 纪律）。
@@ -609,9 +640,9 @@ impl Store {
     where
         F: FnMut(AssetMeta),
     {
-        const SQL_ALL: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
+        const SQL_ALL: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
              FROM assets ORDER BY uuid";
-        const SQL_ACTIVE: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height
+        const SQL_ACTIVE: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
              FROM assets WHERE deleted = 0 ORDER BY uuid";
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(if only_active { SQL_ACTIVE } else { SQL_ALL })?;
@@ -629,8 +660,9 @@ impl Store {
                 created_at: row.get(5)?,
                 imported_at: row.get(6)?,
                 phash: row.get(7)?,
-                width: row.get(8)?,
-                height: row.get(9)?,
+                content_hash: row.get(8)?,
+                width: row.get(9)?,
+                height: row.get(10)?,
             };
             let tag_rows = tag_stmt.query_map(params![meta.uuid], |row| row.get::<_, String>(0))?;
             for tag in tag_rows {
@@ -668,8 +700,8 @@ impl Store {
 /// 单行写入的具体 SQL 序列（静态化避免 Mutex 重入）；调用方必须已持锁。
 pub fn write_asset(conn: &Connection, meta: &AssetMeta) -> Result<()> {
     let n = conn.prepare_cached(
-        "INSERT INTO assets (uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, width, height)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO assets (uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(uuid) DO UPDATE SET
            file_name = excluded.file_name,
            rel_path = excluded.rel_path,
@@ -678,6 +710,7 @@ pub fn write_asset(conn: &Connection, meta: &AssetMeta) -> Result<()> {
            created_at = excluded.created_at,
            imported_at = excluded.imported_at,
            phash = excluded.phash,
+           content_hash = excluded.content_hash,
            width = excluded.width,
            height = excluded.height",
     )?
@@ -690,6 +723,7 @@ pub fn write_asset(conn: &Connection, meta: &AssetMeta) -> Result<()> {
         meta.created_at,
         meta.imported_at,
         meta.phash,
+        meta.content_hash,
         meta.width,
         meta.height
     ])?;

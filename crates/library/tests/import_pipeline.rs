@@ -327,3 +327,111 @@ fn video_import_dispatches_media_job() {
     assert_eq!(jobs[0].uuid, t.uuid);
     assert_eq!(jobs[0].kind, MediaKind::Video);
 }
+
+// ---------------------------------------------------------------------------
+// D61 非图片内容等值去重：视频/文本此前重复导入即双份占盘（pHash 只覆盖
+// 图片）。契约：逐字节相同的非图片素材第二份判 Duplicate；同尺寸不同内容
+// 不得误杀；摘要落库供跨批次复用。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn video_content_hash_dedups_identical_and_keeps_different() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("library");
+    let lib = Library::open(&lib_dir).unwrap();
+
+    let payload = b"\x00\x00\x00\x18ftypmp42same-video-payload";
+    let source_a = dir.path().join("a1.mp4");
+    std::fs::write(&source_a, payload).unwrap();
+    let source_a2 = dir.path().join("a2.mp4");
+    std::fs::write(&source_a2, payload).unwrap();
+    // 同尺寸不同内容：预过滤命中、摘要不同——不得误判重复。
+    let mut other_payload = payload.to_vec();
+    other_payload[20] ^= 0xFF;
+    let source_b = dir.path().join("b.mp4");
+    std::fs::write(&source_b, &other_payload).unwrap();
+
+    let t1 = expect_ticket(
+        lib.enqueue(ImportRequest {
+            source: source_a,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap(),
+    );
+    wait_for(&lib, &t1, |s| matches!(s, CopyState::Done));
+
+    match lib
+        .enqueue(ImportRequest {
+            source: source_a2,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap()
+    {
+        EnqueueOutcome::Duplicate { existing_uuid } => assert_eq!(existing_uuid, t1.uuid),
+        other => panic!("逐字节相同的视频应判重复，实际 {other:?}"),
+    }
+
+    let t2 = expect_ticket(
+        lib.enqueue(ImportRequest {
+            source: source_b,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap(),
+    );
+    wait_for(&lib, &t2, |s| matches!(s, CopyState::Done));
+
+    let meta1 = lib.store().get_asset(&t1.uuid).unwrap().unwrap();
+    assert!(meta1.phash.is_none(), "视频不走 pHash");
+    assert_eq!(
+        meta1.content_hash.as_deref().map(<[u8]>::len),
+        Some(32),
+        "视频必须落 SHA-256 摘要"
+    );
+    assert_eq!(lib.store().all_assets_count().unwrap(), 2, "同尺寸不同内容要保留");
+    assert_eq!(
+        std::fs::read_dir(lib_dir.join("objects")).unwrap().count(),
+        2,
+        "去重后不得留第二份资产目录"
+    );
+}
+
+#[test]
+fn text_content_hash_dedups_after_utf8_normalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("library");
+    let lib = Library::open(&lib_dir).unwrap();
+
+    // 同一份 GBK 字节写两个名字：入库文本 = 归一化 UTF-8，两份归一化结果
+    // 相同 → 第二份判重复；尺寸按归一化字节计（D60 库内文本不变量）。
+    let gbk = [0xC4u8, 0xE3, 0xBA, 0xC3, 0x2E, 0x74, 0x78, 0x74];
+    let source_1 = dir.path().join("t1.txt");
+    std::fs::write(&source_1, gbk).unwrap();
+    let source_2 = dir.path().join("t2.txt");
+    std::fs::write(&source_2, gbk).unwrap();
+
+    let t1 = expect_ticket(
+        lib.enqueue(ImportRequest {
+            source: source_1,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap(),
+    );
+    wait_for(&lib, &t1, |s| matches!(s, CopyState::Done));
+
+    match lib
+        .enqueue(ImportRequest {
+            source: source_2,
+            category: None,
+            tags: vec![],
+        })
+        .unwrap()
+    {
+        EnqueueOutcome::Duplicate { existing_uuid } => assert_eq!(existing_uuid, t1.uuid),
+        other => panic!("归一化后相同的文本应判重复，实际 {other:?}"),
+    }
+    assert_eq!(lib.store().all_assets_count().unwrap(), 1);
+}

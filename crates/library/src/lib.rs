@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use domain::AssetKind;
+use sha2::{Digest, Sha256};
 use store::Store;
 
 pub mod rules;
@@ -178,6 +179,8 @@ struct CopyJob {
     total: u64,
     /// 会话内登记的 phash u64 值（无 phash 的素材为 None）；失败回滚精确清除用。
     session_hash: Option<u64>,
+    /// 会话内登记的内容摘要（仅非图片素材，D61）；失败回滚精确清除用。
+    content_hash: Option<[u8; 32]>,
 }
 
 /// 元数据写线程的批量操作。导入数万条时逐行 autocommit 在 Windows 上每行
@@ -273,6 +276,9 @@ pub struct Library {
     db_queue: DbQueueLock,
     /// 内存 pHash 去重索引。None 表示关闭（旧行为）。Arc 共享给拷贝线程做失败清除。
     phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>>,
+    /// 非图片内容摘要的会话登记（D61）：digest → uuid。写线程攒批提交前也能
+    /// 命中同批重复，与 pHash 会话路径同语义；只存本次导入会话的条目。
+    content_session: Arc<Mutex<HashMap<[u8; 32], String>>>,
     config: LibraryConfig,
 }
 
@@ -399,6 +405,11 @@ impl Library {
                 None
             });
 
+        // D61 内容去重会话登记（空表起）：同批次重复在写线程攒批提交前也能
+        // 命中，与 pHash 会话路径同语义。
+        let content_session: Arc<Mutex<HashMap<[u8; 32], String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         let shared: SharedLock = Arc::new((
             Mutex::new(Shared {
                 queue: VecDeque::new(),
@@ -422,12 +433,14 @@ impl Library {
             let worker_shared = Arc::clone(&shared);
             let worker_db_queue = Arc::clone(&db_queue);
             let worker_phash_index = std::sync::Arc::clone(&phash_index);
+            let worker_content_session = Arc::clone(&content_session);
             thread::spawn(move || {
                 worker_loop(
                     worker_root,
                     worker_shared,
                     worker_db_queue,
                     worker_phash_index,
+                    worker_content_session,
                 )
             });
         }
@@ -452,6 +465,7 @@ impl Library {
             shared,
             db_queue,
             phash_index,
+            content_session,
             config,
         })
     }
@@ -582,6 +596,52 @@ impl Library {
             }
         }
 
+        // —— 尺寸先行（内容去重的预过滤地基）——
+        // 文本素材（D60 库内文本不变量）：尺寸按转码后字节计，超限在入口硬
+        // 拒绝——病态大文本不进拷贝队列（粘贴端对文本本就是同步读盘）。
+        // 归一化字节同时是文本的内容摘要源（入库的正是这份字节）。
+        let (size_bytes, normalized_text): (i64, Option<Vec<u8>>) = if kind == AssetKind::Text {
+            if fs::metadata(&req.source)?.len() > TEXT_IMPORT_MAX_BYTES {
+                return Ok(EnqueueOutcome::Unsupported {
+                    reason: format!(
+                        "文本素材超过 {}MB，暂不支持导入",
+                        TEXT_IMPORT_MAX_BYTES / (1024 * 1024)
+                    ),
+                });
+            }
+            let raw = fs::read(&req.source)?;
+            let normalized = media::normalize_text_to_utf8(&raw).into_owned();
+            (normalized.len() as i64, Some(normalized))
+        } else {
+            (fs::metadata(&req.source)?.len() as i64, None)
+        };
+
+        // —— 非图片内容等值去重（D61）——
+        // pHash 只覆盖图片（解码才有感知哈希），视频/文本/未知类型此前重复
+        // 导入即双份占盘。非图片一律记 SHA-256 内容摘要并等值查重：视频流式
+        // 读源文件（峰值驻留一个 chunk），文本直接摘要已在内存的归一化字节
+        // （零额外 I/O）。图片不改：pHash 语义原样（AGENTS.md「导入去重必做」
+        // 的图片半边）。代价诚实写明：每个非图片素材多一次顺序读——相比
+        // 「重复素材永久双份占盘」的红线，一次性导入读便宜得多；不做
+        // 「库内无同尺寸就跳过哈希」的预过滤，否则首份素材不落摘要，之后
+        // 同内容文件永远找不到比对目标（同会话/跨会话双漏）。
+        // 诚实边界：同批并发导入同一文件，首份登记会话摘要前第二份已查重的
+        // 极小窗口内两份都会入库——与 pHash 会话路径的窗口一致。
+        let content_hash: Option<[u8; 32]> = if phash_bytes.is_none() {
+            let digest = match normalized_text {
+                Some(bytes) => sha256_bytes(&bytes),
+                None => sha256_file(&req.source)?,
+            };
+            if let Some(existing) = self.find_content_duplicate(&digest)? {
+                return Ok(EnqueueOutcome::Duplicate {
+                    existing_uuid: existing,
+                });
+            }
+            Some(digest)
+        } else {
+            None
+        };
+
         let uuid = uuid::Uuid::new_v4().hyphenated().to_string();
         let rel_dir = format!("objects/{uuid}");
         fs::create_dir_all(self.root.join(&rel_dir))?;
@@ -591,21 +651,6 @@ impl Library {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_else(|| "bin".to_string());
         let rel_path = format!("{rel_dir}/raw.{ext}");
-        // 文本素材（D60 库内文本不变量）：尺寸按转码后字节计，超限在入口硬
-        // 拒绝——病态大文本不进拷贝队列（粘贴端对文本本就是同步读盘）。
-        let size_bytes = if kind == AssetKind::Text {
-            if fs::metadata(&req.source)?.len() > TEXT_IMPORT_MAX_BYTES {
-                return Ok(EnqueueOutcome::Unsupported {
-                    reason: format!(
-                        "文本素材超过 {}MB，暂不支持导入",
-                        TEXT_IMPORT_MAX_BYTES / (1024 * 1024)
-                    ),
-                });
-            }
-            media::normalize_text_to_utf8(&fs::read(&req.source)?).len() as i64
-        } else {
-            fs::metadata(&req.source)?.len() as i64
-        };
         let created_at = fs::metadata(&req.source)?
             .modified()
             .ok()
@@ -626,6 +671,7 @@ impl Library {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
             phash: phash_bytes.clone(),
+            content_hash: content_hash.map(|digest| digest.to_vec()),
             // 导入阶段不解码媒体，像素尺寸留给派生工序（derive-thumbs）回写。
             width: None,
             height: None,
@@ -651,6 +697,12 @@ impl Library {
             index.hashes.push(hv);
             index.session_uuids.insert(hv, uuid.clone());
         }
+        if let Some(digest) = content_hash {
+            self.content_session
+                .lock()
+                .unwrap()
+                .insert(digest, uuid.clone());
+        }
 
         // 派发语义：Image/Video/Text 有解码工序，Other 不在 v1 派生范围。
         if let Some(kind) = to_media_kind(kind) {
@@ -669,6 +721,7 @@ impl Library {
             total: size_bytes as u64,
             // 失败回滚时精确清掉本条登记（与上面的 push 同值）。
             session_hash,
+            content_hash,
         };
         let (lock, cv) = &*self.shared;
         let mut g = lock.lock().unwrap();
@@ -698,6 +751,16 @@ impl Library {
             .uuids_for_phash_exact(&stored.to_be_bytes())
             .ok()?;
         uuids.into_iter().next()
+    }
+
+    /// 内容摘要 → 已存 uuid：先查会话登记（写线程攒批提交前也能命中，与
+    /// pHash 会话路径同语义），未中走等值索引。回收站行不参与（与 all_phashes
+    /// 的 D46 语义一致）。
+    fn find_content_duplicate(&self, digest: &[u8; 32]) -> Result<Option<String>> {
+        if let Some(uuid) = self.content_session.lock().unwrap().get(digest) {
+            return Ok(Some(uuid.clone()));
+        }
+        Ok(self.store.uuid_by_content_hash(digest)?)
     }
 
     fn queue_db_op(&self, op: DbOp) -> Result<()> {
@@ -743,6 +806,20 @@ fn decode_for_phash(path: &Path) -> image::ImageResult<image::DynamicImage> {
         .decode()
 }
 
+/// 非图片素材的 SHA-256 内容摘要：流式读取，峰值驻留一个 chunk（D3 纪律：
+/// 数 GB 视频也不整读进内存）。仅在 size 预过滤命中后才付出这次整读。
+fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().into())
+}
+
+/// 文本走归一化字节的摘要（入库的正是这份字节，跨批次可比）。
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 /// pHash 按 32×32 网格采样：小于该尺寸的原图直接采样会越界 panic
 /// （真实 1×1 图标实测崩溃，整段导入进程 101 退出）。先放大到 32×32
 /// 再哈希，极小图也能正常去重，且保证导入永不因尺寸崩溃。
@@ -766,6 +843,7 @@ fn worker_loop(
     shared: SharedLock,
     db_queue: DbQueueLock,
     phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>>,
+    content_session: std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
 ) {
     loop {
         let job = {
@@ -822,6 +900,7 @@ fn worker_loop(
                     shared.clone(),
                     db_queue.clone(),
                     std::sync::Arc::clone(&phash_index),
+                    std::sync::Arc::clone(&content_session),
                     job,
                 );
             }
@@ -831,6 +910,7 @@ fn worker_loop(
                 let _ = std::fs::remove_file(&job.dest);
                 let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
                 purge_session_hash(&phash_index, job.session_hash);
+                purge_content_session(&content_session, job.content_hash);
                 let (q_lock, q_cv) = &*db_queue;
                 {
                     let mut q = q_lock.lock().unwrap();
@@ -862,6 +942,16 @@ fn purge_session_hash(phash_index: &std::sync::Arc<Option<Mutex<PHashIndex>>>, h
     }
 }
 
+/// 失败回滚时摘除会话内容摘要登记（D61；无持久索引，摘登记即可）。
+fn purge_content_session(
+    content_session: &std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
+    digest: Option<[u8; 32]>,
+) {
+    if let Some(digest) = digest {
+        content_session.lock().unwrap().remove(&digest);
+    }
+}
+
 /// 拷贝成功后的收尾：等元数据提交确认 → Done；见 Failed（落库失败）→ 清盘。
 /// 死锁面分析：本函数只在 states 锁上做 wait_timeout（锁随等待释放），
 /// 写线程只短暂持锁标记 meta_ready / 失败态，不存在交叉等待环。
@@ -870,6 +960,7 @@ fn finish_after_copy_ok(
     shared: SharedLock,
     db_queue: DbQueueLock,
     phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>>,
+    content_session: std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
     job: CopyJob,
 ) {
     use std::time::{Duration, Instant};
@@ -883,6 +974,7 @@ fn finish_after_copy_ok(
             let _ = std::fs::remove_file(&job.dest);
             let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
             purge_session_hash(&phash_index, job.session_hash);
+            purge_content_session(&content_session, job.content_hash);
             let (q_lock, q_cv) = &*db_queue;
             {
                 let mut q = q_lock.lock().unwrap();
@@ -914,6 +1006,7 @@ fn finish_after_copy_ok(
             let _ = std::fs::remove_file(&job.dest);
             let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
             purge_session_hash(&phash_index, job.session_hash);
+            purge_content_session(&content_session, job.content_hash);
             let (q_lock, q_cv) = &*db_queue;
             {
                 let mut q = q_lock.lock().unwrap();

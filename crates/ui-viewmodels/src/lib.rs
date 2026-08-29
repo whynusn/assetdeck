@@ -3,6 +3,7 @@
 pub mod catalog_loader;
 pub mod classify;
 pub mod grid_vm;
+pub mod legacy_migration;
 pub mod layout;
 pub mod search;
 pub mod selection;

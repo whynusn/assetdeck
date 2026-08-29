@@ -895,6 +895,7 @@ impl ImportFlow {
             self.importing.clone(),
             format!("{total} 项素材"),
             self.settings.borrow().fast_import_mode,
+            None,
         );
     }
 }
@@ -1488,6 +1489,9 @@ fn main() {
     };
     // 启动即摆正回收站角标（库里可能已有墓碑行）。
     app.set_trash_count(crud.vm.borrow().trash_count() as i32);
+
+    // D61 旧版库迁移入口：启动即检测 exe 旁遗留库（设置面板展开时也会重检）。
+    refresh_migration_entry(&app, library_root.as_deref());
 
     // D49/D50 通用导入流（三入口汇流 → 预扫描 → 归类弹窗 → 清单子进程）。
     let import_flow = Rc::new(ImportFlow {
@@ -2456,11 +2460,15 @@ fn main() {
     // 设置面板开合。
     {
         let ui = app.as_weak();
+        let library_root = library_root.clone();
         app.on_settings_toggled(move || {
             let ui = ui.unwrap();
             let closing = ui.get_settings_open();
             if closing {
                 ui.set_settings_shown(false);
+            } else {
+                // D61：每次展开重检旧版库（迁移可能刚被文件管理器改名/删除）。
+                refresh_migration_entry(&ui, library_root.as_deref());
             }
             ui.set_settings_open(!ui.get_settings_open());
         });
@@ -2594,6 +2602,160 @@ fn main() {
                     "日志尚未初始化（本次运行未生成日志文件）".to_string(),
                 ),
             }
+        });
+    }
+
+    // D61 旧版库一键迁移：改名留档 → --import-paths 重放导入（复用导入管线
+    // 的进度/去重/缩略图编排，D49 清单格式）。失败回滚改名，素材原位无损；
+    // 成功写完成标记收账，入口自动消失。
+    {
+        let ui = app.as_weak();
+        let importing = importing.clone();
+        let settings = settings.clone();
+        let library_root = library_root.clone();
+        app.on_migrate_legacy_requested(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            if importing.load(Ordering::SeqCst) {
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "有导入任务进行中，请稍后再迁移".to_string(),
+                );
+                return;
+            }
+            let root = library_root
+                .clone()
+                .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+            let Some(exe_dir) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            else {
+                return;
+            };
+            let Some(legacy) = ui_viewmodels::legacy_migration::detect_legacy_library(
+                &exe_dir,
+                std::path::Path::new(&root),
+            ) else {
+                ui.set_migrate_legacy_available(false);
+                return;
+            };
+            if legacy.file_count == 0 {
+                ui.set_migrate_legacy_available(false);
+                return;
+            }
+            // 改名先行，清单随后（指向备份路径）：清单若在改名前写、引用旧
+            // 路径，改名后全部失效，worker 会静默跳过整批（imported=0 却
+            // 「成功」收账——真机验证抓到的原始缺陷）。清单写失败则回滚
+            // 改名，旧目录原位无损。
+            let renamed = !legacy.is_backup;
+            let original = legacy.source.clone();
+            let backup = if renamed {
+                match ui_viewmodels::legacy_migration::rename_to_backup(&original, &exe_dir) {
+                    Ok(backup) => backup,
+                    Err(error) => {
+                        show_notice(
+                            &ui,
+                            TargetNoticeTone::Error,
+                            format!("旧库目录无法改名（请关闭旧版素材管理器后重试）: {error}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                original.clone()
+            };
+            let list = std::env::temp_dir().join(format!(
+                "assetdeck_migrate_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            if let Err(error) =
+                ui_viewmodels::legacy_migration::write_import_manifest(&backup, &list)
+            {
+                if renamed {
+                    if let Err(rollback) = std::fs::rename(&backup, &original) {
+                        logging::warn!("清单写失败且改名回滚失败 backup={} : {rollback}", backup.display());
+                    }
+                }
+                let _ = std::fs::remove_file(&list);
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Error,
+                    format!("无法生成迁移清单: {error}"),
+                );
+                return;
+            }
+            logging::info!(
+                "旧版库迁移开始 source={} backup={} files={}",
+                original.display(),
+                backup.display(),
+                legacy.file_count
+            );
+            let label = format!("旧版素材迁移（{} 项）", legacy.file_count);
+            let mode_arg = import_mode_arg(&settings.borrow());
+            let args = vec![
+                "--import-paths".to_string(),
+                list.to_string_lossy().into_owned(),
+                "--library".to_string(),
+                root.clone(),
+                "--mode".to_string(),
+                mode_arg.to_string(),
+            ];
+            let weak_post = ui.as_weak();
+            let library_root_post = library_root.clone();
+            let backup_post = backup.clone();
+            let original_post = original.clone();
+            let list_post = list.clone();
+            let post: std::sync::Arc<dyn Fn(bool) + Send + Sync> =
+                std::sync::Arc::new(move |success: bool| {
+                if success {
+                    if let Err(error) =
+                        ui_viewmodels::legacy_migration::mark_migrated(&backup_post)
+                    {
+                        logging::warn!("迁移完成标记写入失败（不影响迁移结果）: {error}");
+                    }
+                    if let Some(ui) = weak_post.upgrade() {
+                        show_notice(
+                            &ui,
+                            TargetNoticeTone::Success,
+                            format!(
+                                "旧版素材已并入统一库；旧目录留档为「{}」，确认无误后可手动删除",
+                                backup_post
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            ),
+                        );
+                    }
+                } else if renamed {
+                    // 导入失败：回滚改名，素材原位无损，下次入口照常出现。
+                    match std::fs::rename(&backup_post, &original_post) {
+                        Ok(()) => {
+                            logging::info!("迁移导入失败，已回滚改名 {}", original_post.display())
+                        }
+                        Err(error) => logging::warn!(
+                            "迁移导入失败且改名回滚失败 backup={} : {error}（备份保留，入口可重试）",
+                            backup_post.display()
+                        ),
+                    }
+                }
+                let _ = std::fs::remove_file(&list_post);
+                if let Some(ui) = weak_post.upgrade() {
+                    refresh_migration_entry(&ui, library_root_post.as_deref());
+                }
+            });
+            spawn_import_pipeline(
+                ui.as_weak(),
+                args,
+                root,
+                importing.clone(),
+                label,
+                settings.borrow().fast_import_mode,
+                Some(post),
+            );
         });
     }
 
@@ -3205,6 +3367,38 @@ fn main() {
     }
 }
 
+/// D61：启动与设置面板展开时检测 exe 旁遗留库，回填设置面板迁移入口的
+/// 可见性与文案。检测是纯目录扫描（零解码零 SQL，见 ui-viewmodels::
+/// legacy_migration），UI 线程调用安全。
+fn refresh_migration_entry(ui: &AppWindow, library_root: Option<&str>) {
+    let root = library_root
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_library_root);
+    let detected = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .and_then(|exe_dir| {
+            ui_viewmodels::legacy_migration::detect_legacy_library(&exe_dir, &root)
+        });
+    match detected {
+        Some(legacy) => {
+            ui.set_migrate_legacy_available(true);
+            ui.set_migrate_legacy_detail(
+                format!(
+                    "检测到旧版素材库：{} 个文件（{:.1} MB）。迁移自动去重合并，旧目录改名留档。",
+                    legacy.file_count,
+                    legacy.total_bytes as f64 / (1024.0 * 1024.0)
+                )
+                .into(),
+            );
+        }
+        None => {
+            ui.set_migrate_legacy_available(false);
+            ui.set_migrate_legacy_detail("".into());
+        }
+    }
+}
+
 /// 导入管线共享编排（文件夹 / .emo 包两条入口共用）：
 /// 库目录前置校验 → sample-library 子进程导入 → 成功才派生缩略图。
 ///
@@ -3222,6 +3416,10 @@ fn spawn_import_pipeline(
     importing: Arc<AtomicBool>,
     label: String,
     fast_import_mode: bool,
+    // D61 迁移收尾钩子：阶段一成败各调一次，在 UI 线程、先于成败回显。
+    // Arc<dyn Fn> 以配合 ChildTask with_finished 的 Fn 约束（钩子内部自幂等，
+    // 重复调用无害）；None = 普通导入无后置动作。
+    post_phase1: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
 ) {
     let ui_ready = ui.upgrade().expect("导入时 UI 已不可用");
 
@@ -3309,7 +3507,13 @@ fn spawn_import_pipeline(
             let weak_invoke = weak.clone();
             let importing_phase1 = Arc::clone(&importing_phase1);
             let importing_phase2 = Arc::clone(&importing_phase2);
+            let post_hook = post_phase1.clone();
             let _ = slint::invoke_from_event_loop(move || {
+                // D61 迁移收尾钩子先跑：改名回滚/完成标记要发生在用户看到
+                // 「导入失败/完成」回显之前。
+                if let Some(post) = post_hook.as_ref() {
+                    post(success);
+                }
                 if let Some(ui) = weak_invoke.upgrade() {
                     if !success {
                         importing_phase1.store(false, Ordering::SeqCst);

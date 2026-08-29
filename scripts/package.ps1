@@ -9,7 +9,7 @@
       portable（便携版）
         1. cargo build --release：主程序(app-ui→asset-manager)、worker(decode-worker)、
            sample-library、derive-thumbs
-        2. 重建 dist/：拷贝 4 个 exe + 现场生成示例库 samples/inbox -> dist/library
+        2. 重建 dist/：拷贝 4 个 exe（不带任何素材库——8-29 覆盖事故的根治，D61）
         3. 校验必需文件齐全后打成 artifacts/素材管理器-便携版-<ver>.zip
 
       installer（安装版，依赖 portable 产出的 dist/）
@@ -112,16 +112,12 @@ function Step-Portable {
         Copy-Item -Path $src -Destination $Dist -Force
     }
 
-    # 示例库是生成物、不进 git：每次打包现场用 sample-library 从 samples/inbox
-    # 生成到 dist/library（开箱即有带缩略图的演示库）。旧写法依赖作者机器上
-    # 残留的 samples/library 目录，CI 上必然缺失而失败。
-    $sampleExe = Join-Path $RepoRoot "target\release\sample-library.exe"
-    & $sampleExe (Join-Path $RepoRoot "samples\inbox") (Join-Path $Dist "library")
-    Assert-LastExitCode "生成示例库"
-    # 校验：示例库元数据必须随包（安装后开箱即有预览）
-    if (-not (Test-Path (Join-Path $Dist "library\meta.db"))) {
-        throw "dist/library 缺少 meta.db，示例库生成失败"
-    }
+    # 8-29 事故根因（D61 收账）：payload 曾内嵌现场生成的示例库 dist/library，
+    # 安装时 unpack 覆盖 exe 旁用户库的 meta.db——重装即清空用户索引（真机实测
+    # 当天导入全灭）。且新版默认库根在 %LOCALAPPDATA%，exe 旁示例库本就是死重。
+    # 分发包从此**不带任何素材库**：首启统一库为空属预期，旧版用户走应用内
+    # 「设置 → 数据迁移」一键搬迁（D61）。sample-library.exe 保留：它是运行时
+    # 导入子进程（D11），不是打包工具。
 
     Write-Host "==> [portable] 打 zip"
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

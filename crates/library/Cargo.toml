@@ -13,6 +13,8 @@ phash = { path = "../phash" }
 # 注册表声明可导入的图片格式，这里必须真能解码，否则一个坏图拖垮整批导入。
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 uuid = { version = "1", features = ["v4"] }
+# D61 非图片内容等值去重：SHA-256 逐字节摘要（视频/文本/未知类型），图片仍走 pHash。
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

@@ -27,6 +27,7 @@ fn write_rows(root: &Path, rows: &[(&str, &str, Option<&str>)]) {
                 created_at: index as i64,
                 imported_at: index as i64,
                 phash: None,
+                content_hash: None,
                 width: None,
                 height: None,
             })

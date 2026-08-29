@@ -276,6 +276,14 @@ export component AppWindow inherits Window {
     // D38：设置面板底部「打开日志目录」。
     callback open-logs-requested();
 
+    // —— D61 旧版库一键迁移 ——
+    // 仅在检测到 exe 旁遗留库（或未收账的迁移备份）时出现于设置面板；
+    // detail 是检测文案（文件数/体量），busy 期间按钮禁用（与导入互斥）。
+    in property <bool> migrate-legacy-available: false;
+    in property <string> migrate-legacy-detail: "";
+    in property <bool> migrate-legacy-busy: false;
+    callback migrate-legacy-requested();
+
     // —— D56 更新检查 ——
     // app-version 是壳层注入的当前版本（"v0.1.0"）；status-text 是设置面板
     // 「关于」区状态行（danger 决定是否着错误色）；badge 是设置齿轮上的
@@ -1591,6 +1599,34 @@ export component AppWindow inherits Window {
                             glyph: Glyph.folder-search;
                             tip: "全部进程的日志都在这里，导出问题反馈时拷贝整个目录";
                             clicked => { root.open-logs-requested(); }
+                        }
+
+                        // D61 旧版库一键迁移：仅检测到 exe 旁遗留库时出现。
+                        // 文案与「关于」区同款克制风格，按钮态跟着 busy 走。
+                        // if 必须包在 VerticalLayout **内部**（同上方设置行）：
+                        // if 直接做布局子项时首选高度不传播，详情折行后
+                        // 「关于」标题会贴上来（渲染实测）。
+                        VerticalLayout {
+                            spacing: 5px;
+
+                            if root.migrate-legacy-available: SectionLabel {
+                                height: 14px;
+                                text: "数据迁移";
+                            }
+
+                            if root.migrate-legacy-available: FlatButton {
+                                text: root.migrate-legacy-busy ? "迁移中…" : "一键迁移旧版素材";
+                                enabled: !root.migrate-legacy-busy;
+                                tip: "把旧版存放在安装目录旁的素材搬进统一素材库：自动去重、后台补缩略图，旧目录改名留档";
+                                clicked => { root.migrate-legacy-requested(); }
+                            }
+
+                            if root.migrate-legacy-available: Text {
+                                text: root.migrate-legacy-detail;
+                                color: Theme.text-3;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                            }
                         }
 
                         // D56「关于」：版本读数 + 手动检查 + 状态行。文案跟着

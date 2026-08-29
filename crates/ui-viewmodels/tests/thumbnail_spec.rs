@@ -48,6 +48,7 @@ fn scaffold(tag: &str) -> PathBuf {
                 created_at: index as i64,
                 imported_at: index as i64,
                 phash: None,
+                content_hash: None,
                 width,
                 height,
             })

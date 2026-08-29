@@ -23,6 +23,7 @@ fn row(uuid: &str, name: &str, category: Option<&str>) -> AssetMeta {
         created_at: 1,
         imported_at: 1,
         phash: None,
+        content_hash: None,
         width: None,
         height: None,
     }

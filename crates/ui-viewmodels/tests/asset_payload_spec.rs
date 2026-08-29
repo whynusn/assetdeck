@@ -36,6 +36,7 @@ fn scaffold_relative_library(tag: &str, file_name: &str, bytes: &[u8]) -> PathBu
             created_at: 1,
             imported_at: 1,
             phash: None,
+            content_hash: None,
             width: None,
             height: None,
         })
@@ -182,6 +183,7 @@ fn scaffold_many(tag: &str, count: usize) -> PathBuf {
                 created_at: 1,
                 imported_at: 1,
                 phash: None,
+                content_hash: None,
                 width: None,
                 height: None,
             })

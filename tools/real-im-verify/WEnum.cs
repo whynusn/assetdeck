@@ -44,6 +44,15 @@ public class WEnum
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT p);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, int dx, int dy, uint data, IntPtr extra);
+
+    [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr h);
 
     [DllImport("user32.dll")]
@@ -51,4 +60,23 @@ public class WEnum
 
     [DllImport("user32.dll")]
     public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int index);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct INPUT
+    {
+        [FieldOffset(0)] public uint type;
+        [FieldOffset(8)] public MOUSEINPUT mi; // x64：type 后 4 字节对齐填充
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint count, INPUT[] inputs, int size);
 }

@@ -14,6 +14,7 @@ fn meta(uuid: &str, name: &str) -> AssetMeta {
         created_at: 1_700_000_000,
         imported_at: 1_700_000_001,
         phash: Some(vec![0xAB; 8]),
+        content_hash: None,
         width: None,
         height: None,
     }
@@ -349,6 +350,84 @@ fn v3_database_migrates_in_place_to_v4() {
     drop(s);
     let again = Store::open(&db_path).unwrap();
     assert!(again.is_deleted("old-9").unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// D61 内容等值去重（schema v5）：非图片素材的 SHA-256 摘要列 + 等值索引。
+// 契约：写读往返一致；查重排除回收站行（与 all_phashes 的 D46 语义一致）；
+// v4 旧库原地升级不丢历史行。
+// ---------------------------------------------------------------------------
+
+/// v4 旧库打开必须原地升 v5：`content_hash` 列出现、等值索引可用、历史行不丢。
+#[test]
+fn v4_database_migrates_in_place_to_v5() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy4.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL,
+               file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '',
+               category TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash BLOB,
+               width INTEGER,
+               height INTEGER,
+               deleted INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE tags (
+               asset_uuid TEXT NOT NULL REFERENCES assets(uuid) ON DELETE CASCADE,
+               tag TEXT NOT NULL,
+               PRIMARY KEY (asset_uuid, tag)
+             );
+             CREATE VIRTUAL TABLE assets_fts USING fts5(uuid UNINDEXED, name, tokenize='trigram');
+             CREATE INDEX idx_assets_phash ON assets(phash);
+             INSERT INTO assets (uuid, file_name, rel_path) VALUES ('old-11', '老视频.mp4', 'objects/old-11/raw.mp4');
+             INSERT INTO assets_fts (uuid, name) VALUES ('old-11', '老视频.mp4');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+
+    let s = Store::open(&db_path).unwrap();
+    assert_eq!(s.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    // 历史行存在、摘要为 NULL、查重不命中不报错。
+    let old = s.get_asset("old-11").unwrap().expect("历史行不得丢失");
+    assert_eq!(old.content_hash, None);
+    assert_eq!(s.uuid_by_content_hash(&[0u8; 32]).unwrap(), None);
+
+    // 重开幂等：不得重复 ALTER（会报 duplicate column）。
+    drop(s);
+    let again = Store::open(&db_path).unwrap();
+    assert_eq!(again.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert!(again.get_asset("old-11").unwrap().is_some());
+}
+
+/// 内容摘要写读往返；查重只认活跃行——回收站素材不挡新导入（与 pHash 语义一致）。
+#[test]
+fn content_hash_roundtrip_and_lookup_excludes_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("h-1", "视频甲.mp4");
+    a.phash = None;
+    a.content_hash = Some(vec![0x5A; 32]);
+    s.upsert_asset(&a).unwrap();
+
+    // 往返 + 等值命中；不同摘要不命中。
+    let loaded = s.get_asset("h-1").unwrap().unwrap();
+    assert_eq!(loaded.content_hash.as_deref(), Some(&[0x5Au8; 32][..]));
+    assert_eq!(
+        s.uuid_by_content_hash(&[0x5A; 32]).unwrap().as_deref(),
+        Some("h-1")
+    );
+    assert_eq!(s.uuid_by_content_hash(&[0x5B; 32]).unwrap(), None);
+
+    // 软删后查重不再命中（回收站素材不得挡新导入）。
+    s.soft_delete_assets(&["h-1"]).unwrap();
+    assert_eq!(s.uuid_by_content_hash(&[0x5A; 32]).unwrap(), None);
 }
 
 /// 软删 → 恢复闭环：标志位翻转、行与 tags 全程保留。
