@@ -7,7 +7,6 @@
 //! Library::enqueue 落库——断言新旧库分类一致。这覆盖了「单测全绿但组合序
 //! 失败」的盲区（前一轮清单/改名序缺陷正是这类测试暴露的范式）。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -65,7 +64,7 @@ struct LegacyAsset<'a> {
 /// 造一张视觉上唯一的灰度 PNG（梯度模式随 seed 变化，保证 pHash 互不命中）。
 fn png_bytes(seed: u8) -> Vec<u8> {
     let img = image::GrayImage::from_fn(48, 48, |x, y| {
-        image::Luma([((x as u32 * (seed as u32 + 1) + y as u32 * (seed as u32 + 3)) % 256) as u8])
+        image::Luma([((x * (u32::from(seed) + 1) + y * (u32::from(seed) + 3)) % 256) as u8])
     });
     let mut buf = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
@@ -132,11 +131,7 @@ fn parse_manifest_line(line: &str) -> (PathBuf, Option<String>) {
     let _kind = fields.next().unwrap_or_default();
     let mode = fields.next().unwrap_or_default();
     let path = PathBuf::from(fields.next().unwrap_or_default());
-    let category = if let Some(name) = mode.strip_prefix("category:") {
-        Some(name.to_string())
-    } else {
-        None
-    };
+    let category = mode.strip_prefix("category:").map(str::to_string);
     (path, category)
 }
 

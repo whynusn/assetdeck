@@ -1490,11 +1490,10 @@ fn main() {
         .expect("目标画像加载失败"),
     ));
     // 实例别名册：坏文件按空册处理（装饰性数据不阻断目标功能）。
-    match std::fs::read_to_string(&targets_json_path) {
-        Ok(content) => routing
+    if let Ok(content) = std::fs::read_to_string(&targets_json_path) {
+        routing
             .borrow_mut()
-            .set_aliases(ui_viewmodels::AliasMap::parse(&content)),
-        Err(_) => {}
+            .set_aliases(ui_viewmodels::AliasMap::parse(&content));
     }
     let target_choices: Rc<VecModel<TargetChoiceData>> = Rc::new(VecModel::default());
     app.set_target_choices(ModelRc::from(target_choices.clone()));

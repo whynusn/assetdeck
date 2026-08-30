@@ -464,8 +464,10 @@ fn probe_uia_children_scope(automation: &IUIAutomation, hwnd: HWND, target_pid: 
 /// GetGUIThreadInfo：目标线程的焦点 HWND 与 caret。
 fn probe_guithreadinfo(hwnd: HWND, label: &str) {
     let started = Instant::now();
-    let mut info = GUITHREADINFO::default();
-    info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     let tid = window_thread(hwnd);
     let ok = unsafe { GetGUIThreadInfo(tid, &mut info) }.is_ok();
     let elapsed = started.elapsed().as_micros();

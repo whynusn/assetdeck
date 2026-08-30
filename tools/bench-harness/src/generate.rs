@@ -97,6 +97,9 @@ pub fn generate_library(root: &Path, rows: u64, thumbs: usize) -> Result<()> {
                     // 全量写入确定性 phash：真实导入的图片均带 phash（去重红线），
                     // 行形态代表性优先于最小化；字节由 i 派生，不引入随机性。
                     phash: Some(i.to_be_bytes().to_vec()),
+                    // D61 v5 列：图片行 content_hash 恒 NULL（等值去重管非图片，
+                    // 语义互不侵犯），与真实导入的图片行形态一致。
+                    content_hash: None,
                     // 合成库的占位缩略图是 64×64 渐变，尺寸确定性派生自 i 无意义，
                     // 直接写死方形，让 grid_vm 走真实宽高比而非 fallback 公式。
                     width: Some(64),
