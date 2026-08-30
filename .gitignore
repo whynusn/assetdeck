@@ -9,6 +9,7 @@ Cargo.lock.bak
 *.pdb
 /mem-reports/
 /crates/ui-viewmodels/target/
+/crates/index/target/
 
 # 本地调试/会话临时产物
 # （decode-worker 日志已由 logging 平台缺省目录 + WorkerPool::with_priority_and_log_dir
