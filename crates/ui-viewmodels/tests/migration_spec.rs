@@ -140,7 +140,11 @@ fn parse_manifest_line(line: &str) -> (PathBuf, Option<String>) {
     (path, category)
 }
 
-fn wait_for(lib: &Library, ticket: &library::ImportTicket, pred: impl Fn(&CopyState) -> bool) -> CopyState {
+fn wait_for(
+    lib: &Library,
+    ticket: &library::ImportTicket,
+    pred: impl Fn(&CopyState) -> bool,
+) -> CopyState {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if let Some(state) = lib.state_of(ticket) {
@@ -165,10 +169,9 @@ fn migrate_legacy(legacy_root: &Path, unified_root: &Path) -> Library {
     // 2. 改名先行
     let backup = rename_to_backup(&detected.source, exe_dir).expect("改名留档");
     // 3. 读旧库分类（best-effort；这里旧库可读）
-    let categories = ui_viewmodels::legacy_migration::read_legacy_categories(
-        &backup.join("meta.db"),
-    )
-    .expect("应读到旧库分类");
+    let categories =
+        ui_viewmodels::legacy_migration::read_legacy_categories(&backup.join("meta.db"))
+            .expect("应读到旧库分类");
     // 4. 清单从备份路径生成、携带分类指令
     let list = unified_root.join("manifest.tsv");
     let count = write_import_manifest(&backup, &list, &categories).expect("写清单");
@@ -191,7 +194,9 @@ fn migrate_legacy(legacy_root: &Path, unified_root: &Path) -> Library {
             .expect("enqueue 应受理");
         match outcome {
             EnqueueOutcome::Ticket(t) => {
-                wait_for(&lib, &t, |s| matches!(s, CopyState::Done | CopyState::Failed(_)));
+                wait_for(&lib, &t, |s| {
+                    matches!(s, CopyState::Done | CopyState::Failed(_))
+                });
             }
             // 重复内容 → 库内已有，不创建新行（语义与生产 sample-library 一致）。
             EnqueueOutcome::Duplicate { .. } | EnqueueOutcome::Backpressure => {}

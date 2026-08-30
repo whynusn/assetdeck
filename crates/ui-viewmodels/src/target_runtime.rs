@@ -45,10 +45,7 @@ pub struct TargetRoutingRuntime {
 impl TargetRoutingRuntime {
     /// 预检画像解析。装配层用它实现「坏用户画像退回内置而不拖垮主程序」：
     /// 先 check 再决定传不传 user，避免构造期 panic 路径吃掉用户侧配置错误。
-    pub fn profile_load_check(
-        builtin: &str,
-        user: Option<&str>,
-    ) -> Result<(), TargetProfileError> {
+    pub fn profile_load_check(builtin: &str, user: Option<&str>) -> Result<(), TargetProfileError> {
         targets::load_profiles(builtin, user).map(|_| ())
     }
 

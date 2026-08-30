@@ -413,10 +413,7 @@ mod tests {
         // 分区标题按 section 变化插入：4 组 → 恰好 4 条 header，且位置正确。
         let headers: Vec<&SettingView> = views.iter().filter(|v| v.header).collect();
         assert_eq!(
-            headers
-                .iter()
-                .map(|h| h.title.as_str())
-                .collect::<Vec<_>>(),
+            headers.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(),
             ["上框行为", "导入", "外观", "高级"],
             "分区标题按顺序恰好出现一次"
         );

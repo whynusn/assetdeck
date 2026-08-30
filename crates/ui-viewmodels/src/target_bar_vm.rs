@@ -1,7 +1,7 @@
 use pipeline::{AssetPayload, PasteConfig, PasteSession, TargetPasteOutcome, TargetPipelineDeps};
 use targets::{
-    matching_profile_windows, resolve_eligible_snapshot, AliasMap, Health, ProfileError, ProfileSet,
-    TargetBinding, TargetId, TargetTracker, WindowSnapshot,
+    matching_profile_windows, resolve_eligible_snapshot, AliasMap, Health, ProfileError,
+    ProfileSet, TargetBinding, TargetId, TargetTracker, WindowSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,14 +301,10 @@ impl TargetRoutingVm {
             return false;
         };
         self.aliases.set(&instance_id, alias);
-        let label = self
-            .aliases
-            .get(&instance_id)
-            .map(str::to_string);
+        let label = self.aliases.get(&instance_id).map(str::to_string);
         for choice in &mut self.bar.choices {
             if choice.binding.instance_id == instance_id {
-                choice.binding.label =
-                    label.clone().unwrap_or_else(|| choice.base_label.clone());
+                choice.binding.label = label.clone().unwrap_or_else(|| choice.base_label.clone());
             }
         }
         // chip / 钉住绑定只换标签，hwnd 与身份不动（rebind 的既有语义）。
@@ -779,7 +775,11 @@ require_title = true
 
         assert!(vm.rename_target(&key, Some("主接待")));
         assert_eq!(vm.snapshot().choices[0].binding.label, "主接待");
-        assert_eq!(vm.snapshot().choices[0].base_label, base, "base 不得被别名污染");
+        assert_eq!(
+            vm.snapshot().choices[0].base_label,
+            base,
+            "base 不得被别名污染"
+        );
 
         // 前台跟随产生的热目标（chip 标签来源）同样带别名。
         vm.on_foreground(&snapshot_with_class(
@@ -795,7 +795,10 @@ require_title = true
         assert_eq!(vm.snapshot().choices[0].binding.label, base);
         assert_eq!(vm.selected().unwrap().label, base);
         assert!(vm.aliases().is_empty());
-        assert!(!vm.rename_target("不存在的键@0", None), "未命中候选必须返回 false");
+        assert!(
+            !vm.rename_target("不存在的键@0", None),
+            "未命中候选必须返回 false"
+        );
     }
 
     #[test]

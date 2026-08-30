@@ -15,7 +15,8 @@ use serde_json::Value;
 /// 默认更新源（D56：GitHub API 主源，与 ci.yml release job 的发布端点同一仓库）。
 /// 国内镜像顺序回落清单不写死在代码里——D56 留了「实测哪个可用再定默认」，
 /// 在 `update_feeds.toml`（与 settings.toml 同目录）配置后即覆盖本清单。
-pub const DEFAULT_FEEDS: &[&str] = &["https://api.github.com/repos/whynusn/assetdeck/releases/latest"];
+pub const DEFAULT_FEEDS: &[&str] =
+    &["https://api.github.com/repos/whynusn/assetdeck/releases/latest"];
 
 /// 静默检查最小间隔（D56：≥24h）。上次检查无论成败都刷新节流钟——
 /// 源持续不可达时每次启动都白打一发，不是用户想要的「检查」。
@@ -94,7 +95,10 @@ pub fn parse_release_json(text: &str) -> Result<ReleaseInfo, String> {
     if parse_version(tag).is_none() {
         return Err(format!("tag_name 不是可识别的版本号: {tag}"));
     }
-    let notes = value.get("body").and_then(Value::as_str).unwrap_or_default();
+    let notes = value
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let url = value
         .get("html_url")
         .and_then(Value::as_str)
@@ -116,9 +120,9 @@ pub fn check_update(
 ) -> CheckOutcome {
     let mut errors = Vec::new();
     for url in feeds {
-        let outcome = fetcher.fetch_text(url, FETCH_TIMEOUT_MS).and_then(|text| {
-            parse_release_json(&text).map_err(platform::PlatformError::Network)
-        });
+        let outcome = fetcher
+            .fetch_text(url, FETCH_TIMEOUT_MS)
+            .and_then(|text| parse_release_json(&text).map_err(platform::PlatformError::Network));
         match outcome {
             Err(error) => errors.push(format!("{url}: {error}")),
             Ok(info) => {
@@ -149,10 +153,7 @@ pub fn load_feeds(config: &Path) -> Vec<String> {
     match toml::from_str::<FeedConfig>(&text) {
         Ok(config) if !config.feeds.is_empty() => config.feeds,
         Ok(_) => {
-            log::warn!(
-                "{} 存在但 feeds 为空，回落默认更新源",
-                config.display()
-            );
+            log::warn!("{} 存在但 feeds 为空，回落默认更新源", config.display());
             default()
         }
         Err(error) => {
@@ -410,7 +411,10 @@ mod tests {
     #[test]
     fn check_update_falls_back_to_mirror_in_order() {
         let fetcher = MockFetcher::fail_then_ok(1, &release_json("v0.2.0"));
-        let feeds = vec!["https://primary/api".to_string(), "https://mirror/api".to_string()];
+        let feeds = vec![
+            "https://primary/api".to_string(),
+            "https://mirror/api".to_string(),
+        ];
         let outcome = check_update(&fetcher, &feeds, "0.1.0");
         assert_eq!(
             outcome,
@@ -422,7 +426,10 @@ mod tests {
         );
         assert_eq!(
             fetcher.calls.borrow().clone(),
-            vec!["https://primary/api".to_string(), "https://mirror/api".to_string()]
+            vec![
+                "https://primary/api".to_string(),
+                "https://mirror/api".to_string()
+            ]
         );
     }
 
@@ -430,8 +437,14 @@ mod tests {
     fn check_update_primary_answer_wins_even_when_up_to_date() {
         // 主源健康回答「不更新」时终止，不落到镜像（镜像可能滞后）。
         let fetcher = MockFetcher::ok(&[&release_json("v0.1.0"), &release_json("v9.9.9")]);
-        let feeds = vec!["https://primary/api".to_string(), "https://mirror/api".to_string()];
-        assert_eq!(check_update(&fetcher, &feeds, "0.1.0"), CheckOutcome::UpToDate);
+        let feeds = vec![
+            "https://primary/api".to_string(),
+            "https://mirror/api".to_string(),
+        ];
+        assert_eq!(
+            check_update(&fetcher, &feeds, "0.1.0"),
+            CheckOutcome::UpToDate
+        );
         assert_eq!(fetcher.calls.borrow().len(), 1);
     }
 
@@ -444,7 +457,10 @@ mod tests {
             ]),
             calls: RefCell::new(Vec::new()),
         };
-        let feeds = vec!["https://primary/api".to_string(), "https://mirror/api".to_string()];
+        let feeds = vec![
+            "https://primary/api".to_string(),
+            "https://mirror/api".to_string(),
+        ];
         let outcome = check_update(&fetcher, &feeds, "0.1.0");
         let CheckOutcome::Failed(message) = outcome else {
             panic!("应当 Failed");
@@ -456,7 +472,13 @@ mod tests {
     #[test]
     fn load_feeds_missing_file_falls_back_to_default() {
         let feeds = load_feeds(Path::new("Z:/不存在的目录/update_feeds.toml"));
-        assert_eq!(feeds, DEFAULT_FEEDS.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            feeds,
+            DEFAULT_FEEDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -473,11 +495,18 @@ mod tests {
         let dir = std::env::temp_dir().join("assetdeck-update-check-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("override.toml");
-        std::fs::write(&path, "feeds = [\"https://mirror-a/api\", \"https://mirror-b/api\"]").unwrap();
+        std::fs::write(
+            &path,
+            "feeds = [\"https://mirror-a/api\", \"https://mirror-b/api\"]",
+        )
+        .unwrap();
         let feeds = load_feeds(&path);
         assert_eq!(
             feeds,
-            vec!["https://mirror-a/api".to_string(), "https://mirror-b/api".to_string()]
+            vec![
+                "https://mirror-a/api".to_string(),
+                "https://mirror-b/api".to_string()
+            ]
         );
     }
 
@@ -516,11 +545,14 @@ mod tests {
         let mut vm = UpdateCheckVm::new(String::new());
         vm.begin_check();
         assert_eq!(
-            vm.finish(CheckOutcome::Available(ReleaseInfo {
-                version: "v0.2.0".into(),
-                notes: String::new(),
-                url: "https://example.com".into(),
-            }), true),
+            vm.finish(
+                CheckOutcome::Available(ReleaseInfo {
+                    version: "v0.2.0".into(),
+                    notes: String::new(),
+                    url: "https://example.com".into(),
+                }),
+                true
+            ),
             UpdateUiAction::OpenDialog
         );
         assert!(vm.badge_visible());
@@ -531,20 +563,26 @@ mod tests {
     fn vm_skipped_version_silences_dialog_and_badge_but_keeps_status() {
         let mut vm = UpdateCheckVm::new(String::new());
         vm.begin_check();
-        vm.finish(CheckOutcome::Available(ReleaseInfo {
-            version: "v0.2.0".into(),
-            notes: String::new(),
-            url: String::new(),
-        }), true);
+        vm.finish(
+            CheckOutcome::Available(ReleaseInfo {
+                version: "v0.2.0".into(),
+                notes: String::new(),
+                url: String::new(),
+            }),
+            true,
+        );
         assert_eq!(vm.skip_version().as_deref(), Some("v0.2.0"));
         // 下一轮静默检查命中同一版本：不弹窗、无角标，但状态行仍可见。
         vm.begin_check();
         assert_eq!(
-            vm.finish(CheckOutcome::Available(ReleaseInfo {
-                version: "v0.2.0".into(),
-                notes: String::new(),
-                url: String::new(),
-            }), true),
+            vm.finish(
+                CheckOutcome::Available(ReleaseInfo {
+                    version: "v0.2.0".into(),
+                    notes: String::new(),
+                    url: String::new(),
+                }),
+                true
+            ),
             UpdateUiAction::StatusOnly
         );
         assert!(!vm.badge_visible());
@@ -556,11 +594,14 @@ mod tests {
         let mut vm = UpdateCheckVm::new("v0.2.0".to_string());
         vm.begin_check();
         assert_eq!(
-            vm.finish(CheckOutcome::Available(ReleaseInfo {
-                version: "v0.2.0".into(),
-                notes: String::new(),
-                url: String::new(),
-            }), false),
+            vm.finish(
+                CheckOutcome::Available(ReleaseInfo {
+                    version: "v0.2.0".into(),
+                    notes: String::new(),
+                    url: String::new(),
+                }),
+                false
+            ),
             UpdateUiAction::OpenDialog
         );
     }

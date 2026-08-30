@@ -2760,7 +2760,14 @@ pub mod paint_guard {
                     // 恢复帧：补发内部绘制。winit 的 WM_PAINT 分支把它转成
                     // RedrawRequested；软件档的整窗标脏由下面 WM_PAINT 臂的
                     // 更新区判定接管。
-                    unsafe { RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_INTERNALPAINT) };
+                    unsafe {
+                        RedrawWindow(
+                            hwnd,
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            RDW_INTERNALPAINT,
+                        )
+                    };
                 }
             }
             WM_PAINT => {
@@ -2797,12 +2804,22 @@ pub mod paint_guard {
     /// 更新区仍完好。最小化恢复/完全遮挡重现时 DWM 丢弃重定表面，系统以整窗
     /// 失效请求重画；拖拽改尺寸等局部失效（缓冲仍可信）不触发整窗标脏。
     unsafe fn full_client_invalidate(hwnd: HWND) -> bool {
-        let mut update = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut update = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if unsafe { GetUpdateRect(hwnd, &mut update, 0) } == 0 {
             // 无更新区（RDW_INTERNALPAINT 之类的内部绘制请求）：交给常规重绘。
             return false;
         }
-        let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut client = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
             return false;
         }
@@ -2823,14 +2840,20 @@ pub mod paint_guard {
     /// WM_PAINT）。
     pub fn install(hwnd: isize, on_full_invalidate: Box<dyn Fn()>) -> Result<(), PlatformError> {
         if hwnd == 0 {
-            return Err(PlatformError::Window("窗口句柄为空，恢复重绘守卫不可用".into()));
+            return Err(PlatformError::Window(
+                "窗口句柄为空，恢复重绘守卫不可用".into(),
+            ));
         }
         if INSTALLED.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         ON_FULL_INVALIDATE.with(|slot| *slot.borrow_mut() = Some(on_full_invalidate));
         let previous = unsafe {
-            SetWindowLongPtrW(hwnd as HWND, GWLP_WNDPROC, guard_proc as *const () as usize as isize)
+            SetWindowLongPtrW(
+                hwnd as HWND,
+                GWLP_WNDPROC,
+                guard_proc as *const () as usize as isize,
+            )
         };
         if previous == 0 {
             INSTALLED.store(false, Ordering::Release);
@@ -2853,13 +2876,10 @@ pub mod window_ready {
 
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-    use windows_sys::Win32::UI::Accessibility::{
-        SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
-    };
+    use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, GetClientRect, GetWindowLongPtrW, GetWindowThreadProcessId,
-        IsWindowVisible, EVENT_OBJECT_SHOW, GA_ROOT, GWLP_HWNDPARENT, OBJID_WINDOW,
-        WINEVENT_OUTOFCONTEXT,
+        GetAncestor, GetClientRect, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
+        EVENT_OBJECT_SHOW, GA_ROOT, GWLP_HWNDPARENT, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT,
     };
 
     use crate::PlatformError;
@@ -2880,7 +2900,10 @@ pub mod window_ready {
         _id_thread: u32,
         _dwms_event_time: u32,
     ) {
-        if event != EVENT_OBJECT_SHOW || id_object != OBJID_WINDOW || id_child != 0 || hwnd.is_null()
+        if event != EVENT_OBJECT_SHOW
+            || id_object != OBJID_WINDOW
+            || id_child != 0
+            || hwnd.is_null()
         {
             return;
         }
@@ -2891,7 +2914,12 @@ pub mod window_ready {
         }
         // 只认本进程的可见、自 rooted、无属主顶层窗口（winit 主窗口；弹层与
         // 消息专用窗口在此被滤掉）。
-        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         let (visible, root, client_ok, owned) = unsafe {
             (
                 IsWindowVisible(hwnd) != 0,

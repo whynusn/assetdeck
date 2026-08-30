@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use windows::core::{BOOL, Interface, PWSTR};
+use windows::core::{Interface, BOOL, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -40,7 +40,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetForegroundWindow,
     GetGUIThreadInfo, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible, SendMessageTimeoutW, SetForegroundWindow, GUI_CARETBLINKING, GUITHREADINFO,
+    IsWindowVisible, SendMessageTimeoutW, SetForegroundWindow, GUITHREADINFO, GUI_CARETBLINKING,
     SMTO_ABORTIFHUNG, WM_GETOBJECT,
 };
 
@@ -142,10 +142,17 @@ fn focused_element_info(automation: &IUIAutomation, target_pid: u32) -> (bool, S
         && unsafe {
             focused
                 .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                .map(|p| p.CurrentIsReadOnly().map(|ro| !ro.as_bool()).unwrap_or(false))
+                .map(|p| {
+                    p.CurrentIsReadOnly()
+                        .map(|ro| !ro.as_bool())
+                        .unwrap_or(false)
+                })
                 .unwrap_or(false)
         };
-    (editable, format!("pid={pid} control={control:?} class={class:?} name={name:?}"))
+    (
+        editable,
+        format!("pid={pid} control={control:?} class={class:?} name={name:?}"),
+    )
 }
 
 const UIA_CONTROLTYPE_ID_ZERO: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID =
@@ -246,10 +253,8 @@ fn probe_uia_prop(automation: &IUIAutomation, hwnd: HWND, target_pid: u32) {
         ("document", UIA_DocumentControlTypeId),
     ] {
         let Ok(condition) = (unsafe {
-            automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &VARIANT::from(control_id.0),
-            )
+            automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(control_id.0))
         }) else {
             continue;
         };
@@ -333,10 +338,8 @@ fn probe_uia_first(automation: &IUIAutomation, hwnd: HWND, target_pid: u32) {
     let mut found: Option<IUIAutomationElement> = None;
     for control_id in [UIA_EditControlTypeId, UIA_DocumentControlTypeId] {
         let Ok(condition) = (unsafe {
-            automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &VARIANT::from(control_id.0),
-            )
+            automation
+                .CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(control_id.0))
         }) else {
             continue;
         };
@@ -620,8 +623,9 @@ fn probe_msaa(hwnd: HWND, label: &str) {
     };
     let mut text_roles = 0usize;
     if count > 0 {
-        let mut variants: Vec<VARIANT> =
-            (0..count.clamp(1, 64)).map(|_| unsafe { std::mem::zeroed() }).collect();
+        let mut variants: Vec<VARIANT> = (0..count.clamp(1, 64))
+            .map(|_| unsafe { std::mem::zeroed() })
+            .collect();
         let mut obtained: i32 = 0;
         if unsafe { AccessibleChildren(&acc, 0, &mut variants, &mut obtained) }.is_ok() {
             for variant in variants.iter().take(obtained as usize) {
@@ -670,7 +674,7 @@ fn variant_role_is_text(
     variant: &windows::Win32::System::Variant::VARIANT,
     role_system_text: i32,
 ) -> bool {
-    use windows::Win32::System::Variant::{VT_DISPATCH, VT_I4, VARIANT};
+    use windows::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_I4};
     let vt = unsafe { variant.Anonymous.Anonymous.vt };
     if vt != VT_DISPATCH {
         return false;
@@ -727,7 +731,9 @@ fn run_click_only(
     click: Option<(f32, f32)>,
 ) {
     use platform::win32::{Win32InputFocuser, Win32WindowActivator};
-    use platform::{FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowActivator, WindowHandle};
+    use platform::{
+        FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowActivator, WindowHandle,
+    };
 
     let (x_ratio, y_ratio) = click.unwrap_or((0.5, 0.5));
 
@@ -786,10 +792,7 @@ fn run_click_only(
 
     let plan = FocusPlan {
         steps: vec![FocusStep::AnchorClick],
-        anchor: Some(FocusAnchor {
-            x_ratio,
-            y_ratio,
-        }),
+        anchor: Some(FocusAnchor { x_ratio, y_ratio }),
     };
     let started = Instant::now();
     let outcome = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
@@ -815,8 +818,12 @@ fn dump_tree(automation: &IUIAutomation, hwnd: HWND) {
     };
     println!(
         "root name={:?} class={:?}",
-        unsafe { root.CurrentName() }.map(|v| v.to_string()).unwrap_or_default(),
-        unsafe { root.CurrentClassName() }.map(|v| v.to_string()).unwrap_or_default(),
+        unsafe { root.CurrentName() }
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        unsafe { root.CurrentClassName() }
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
     );
     let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
         return;
@@ -922,8 +929,8 @@ fn main() {
         // 用产品激活器（带确认循环与线程附加）把目标拉到前台——裸 SetForegroundWindow
         // 会被前台锁静默拒绝，探测结果会失真。
         if unsafe { GetForegroundWindow() } != hwnd {
-            use platform::{WindowActivator, WindowHandle};
             use platform::win32::Win32WindowActivator;
+            use platform::{WindowActivator, WindowHandle};
             let started = Instant::now();
             let activated = Win32WindowActivator
                 .activate(WindowHandle(hwnd_value), 200, 120)

@@ -71,10 +71,7 @@ pub fn read_category_by_uuid(
         .map_err(io_error)?;
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })
         .map_err(io_error)?;
     let mut map = std::collections::HashMap::new();

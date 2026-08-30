@@ -390,7 +390,11 @@ fn video_content_hash_dedups_identical_and_keeps_different() {
         Some(32),
         "视频必须落 SHA-256 摘要"
     );
-    assert_eq!(lib.store().all_assets_count().unwrap(), 2, "同尺寸不同内容要保留");
+    assert_eq!(
+        lib.store().all_assets_count().unwrap(),
+        2,
+        "同尺寸不同内容要保留"
+    );
     assert_eq!(
         std::fs::read_dir(lib_dir.join("objects")).unwrap().count(),
         2,

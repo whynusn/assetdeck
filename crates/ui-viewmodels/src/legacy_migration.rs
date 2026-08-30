@@ -71,7 +71,10 @@ fn is_migratable(dir: &Path, current_root: &Path) -> bool {
     if !dir.is_dir() || same_path(dir, current_root) {
         return false;
     }
-    matches!(walk_objects(&dir.join("objects"), &mut |_path, _len| false), Ok(false))
+    matches!(
+        walk_objects(&dir.join("objects"), &mut |_path, _len| false),
+        Ok(false)
+    )
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -245,8 +248,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("legacy_migration_{tag}_{}_{nanos}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "legacy_migration_{tag}_{}_{nanos}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
@@ -313,7 +318,11 @@ mod tests {
 
         let backup = rename_to_backup(&library, &exe_dir).unwrap();
         assert!(backup.starts_with(&exe_dir));
-        assert!(backup.file_name().unwrap().to_string_lossy().starts_with(BACKUP_PREFIX));
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(BACKUP_PREFIX));
         assert!(!library.exists(), "原目录应已改名为备份");
 
         // 备份未收账 → 仍可作为重试候选（is_backup=true）。
@@ -359,7 +368,10 @@ mod tests {
         let library = base.join("library");
         make_legacy_library(
             &library,
-            &[("dddddddd-4444/raw.png", b"p"), ("eeeeeeee-5555/raw.txt", b"t")],
+            &[
+                ("dddddddd-4444/raw.png", b"p"),
+                ("eeeeeeee-5555/raw.txt", b"t"),
+            ],
         );
         let list = base.join("list.tsv");
         let count =

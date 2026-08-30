@@ -263,10 +263,7 @@ mod tests {
 
         // GBK（中文 Windows ANSI）：你好 = C4 E3 BA C3。
         let gbk = [0xC4u8, 0xE3, 0xBA, 0xC3, b'a', b'b'];
-        assert_eq!(
-            normalize_text_to_utf8(&gbk).as_ref(),
-            "你好ab".as_bytes()
-        );
+        assert_eq!(normalize_text_to_utf8(&gbk).as_ref(), "你好ab".as_bytes());
 
         // UTF-8 BOM：剥壳。
         let mut bom_utf8 = vec![0xEFu8, 0xBB, 0xBF];

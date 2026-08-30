@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
 use platform::UrlOpener;
+use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
 use ui_viewmodels::classify::{self, EntryKind, GroupKind, GroupMode, ImportEntry, SourceGroup};
 use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
@@ -979,7 +979,10 @@ impl platform::FileDropSink for SlintFileDropSink {
         logging::info!(
             "拖拽 Drop 送达：{} 条路径（{}）",
             paths.len(),
-            paths.first().map(|p| p.display().to_string()).unwrap_or_default()
+            paths
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
         );
         let weak = self.ui.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -1182,9 +1185,10 @@ fn spawn_update_check(ui: slint::Weak<AppWindow>, feeds_path: std::path::PathBuf
     vm.borrow_mut().begin_check();
     if let Some(app) = ui.upgrade() {
         app.set_update_checking(true);
-        let status = vm
-            .borrow()
-            .status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs());
+        let status = vm.borrow().status_text(
+            settings.borrow().last_check_unix,
+            ui_viewmodels::unix_now_secs(),
+        );
         app.set_update_status_text(status.into());
         app.set_update_status_danger(false);
     }
@@ -1246,8 +1250,11 @@ fn apply_update_outcome(
     {
         let vm = update_vm.borrow();
         app.set_update_status_text(
-            vm.status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs())
-                .into(),
+            vm.status_text(
+                settings.borrow().last_check_unix,
+                ui_viewmodels::unix_now_secs(),
+            )
+            .into(),
         );
         app.set_update_status_danger(vm.status_is_error());
         app.set_update_badge(vm.badge_visible());
@@ -1475,12 +1482,18 @@ fn main() {
         Err(_) => None,
     };
     let routing = Rc::new(RefCell::new(
-        TargetRoutingRuntime::new(BUILTIN_PROFILES, profiles_user.as_deref(), win32_runtime_deps())
-            .expect("目标画像加载失败"),
+        TargetRoutingRuntime::new(
+            BUILTIN_PROFILES,
+            profiles_user.as_deref(),
+            win32_runtime_deps(),
+        )
+        .expect("目标画像加载失败"),
     ));
     // 实例别名册：坏文件按空册处理（装饰性数据不阻断目标功能）。
     match std::fs::read_to_string(&targets_json_path) {
-        Ok(content) => routing.borrow_mut().set_aliases(ui_viewmodels::AliasMap::parse(&content)),
+        Ok(content) => routing
+            .borrow_mut()
+            .set_aliases(ui_viewmodels::AliasMap::parse(&content)),
         Err(_) => {}
     }
     let target_choices: Rc<VecModel<TargetChoiceData>> = Rc::new(VecModel::default());
@@ -2853,7 +2866,10 @@ fn main() {
             ui.set_update_status_text(
                 update_vm
                     .borrow()
-                    .status_text(settings.borrow().last_check_unix, ui_viewmodels::unix_now_secs())
+                    .status_text(
+                        settings.borrow().last_check_unix,
+                        ui_viewmodels::unix_now_secs(),
+                    )
                     .into(),
             );
             logging::info!("已跳过版本 {version}");
@@ -3359,9 +3375,11 @@ fn main() {
     {
         let sink = std::sync::Arc::new(SlintFileDropSink { ui: app.as_weak() });
         let ui_weak = app.as_weak();
-        if let Err(error) = platform::win32::window_ready::on_first_visible_window(Box::new(
-            move |hwnd| mount_when_window_ready(hwnd, sink, ui_weak),
-        )) {
+        if let Err(error) =
+            platform::win32::window_ready::on_first_visible_window(Box::new(move |hwnd| {
+                mount_when_window_ready(hwnd, sink, ui_weak)
+            }))
+        {
             logging::warn!("窗口就绪钩子挂号失败：{error}（拖拽导入与重绘守卫不可用）");
         }
     }
@@ -3603,7 +3621,8 @@ fn spawn_import_pipeline(
                     .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
                     .with_env("DSH_LOG_LEVEL", log_level_arg);
             }
-            phase2_task = phase2_task.with_line(move |line| logging::info!("derive-thumbs: {line}"));
+            phase2_task =
+                phase2_task.with_line(move |line| logging::info!("derive-thumbs: {line}"));
             let _ = phase2_task
                 .with_progress(move |done, total| {
                     let weak = weak_derived_progress.clone();
@@ -3680,11 +3699,9 @@ fn normalize_library_root_value(value: &str) -> Option<String> {
 /// `--library-root` 显式指定。
 fn default_library_root() -> std::path::PathBuf {
     match std::env::var_os("LOCALAPPDATA") {
-        Some(base) if !base.is_empty() => {
-            std::path::PathBuf::from(base)
-                .join("asset-manager")
-                .join("library")
-        }
+        Some(base) if !base.is_empty() => std::path::PathBuf::from(base)
+            .join("asset-manager")
+            .join("library"),
         _ => {
             logging::warn!("LOCALAPPDATA 未设置，库根回落 exe 同目录（多副本将各自分裂）");
             std::env::current_exe()

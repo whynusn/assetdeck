@@ -517,8 +517,7 @@ require_title = true
                 "Qt5152QWindowIcon",
                 title,
             );
-            let (score, session_window) =
-                match_score(profile, &session).expect("会话窗口应命中");
+            let (score, session_window) = match_score(profile, &session).expect("会话窗口应命中");
             assert!(score >= 140);
             assert!(session_window, "标题命中必须标记会话窗: {title}");
             assert!(resolve_eligible_snapshot(&set, &session).is_some());

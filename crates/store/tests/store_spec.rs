@@ -600,7 +600,10 @@ fn read_category_by_uuid_maps_live_rows_and_skips_deleted() {
 
     let map = store::read_category_by_uuid(&db_path).expect("应读到旧库分类");
     assert_eq!(map.len(), 2, "回收站行不出现在映射里");
-    assert_eq!(map.get("uuid-live-named").unwrap(), &Some("海报".to_string()));
+    assert_eq!(
+        map.get("uuid-live-named").unwrap(),
+        &Some("海报".to_string())
+    );
     assert_eq!(map.get("uuid-live-null").unwrap(), &None);
 }
 

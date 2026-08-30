@@ -3,8 +3,8 @@
 pub mod catalog_loader;
 pub mod classify;
 pub mod grid_vm;
-pub mod legacy_migration;
 pub mod layout;
+pub mod legacy_migration;
 pub mod search;
 pub mod selection;
 pub mod settings;
@@ -37,9 +37,7 @@ pub use update_check::{
 
 pub use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps};
 pub use target_runtime::{TargetRoutingRuntime, TargetRuntimeDeps};
-pub use targets::{
-    AliasMap, Health as TargetHealth, ProfileError as TargetProfileError,
-};
+pub use targets::{AliasMap, Health as TargetHealth, ProfileError as TargetProfileError};
 
 /// 壳层（app-ui）依赖白名单只有本 crate + slint，装配所需的领域类型经此转发。
 pub use domain::{
