@@ -30,10 +30,11 @@ const WARMUP: usize = 8;
 /// 静置窗口 ≥10s（spec directory-structure）；browse 留足浏览脚本耗时余量。
 const IDLE_HOLD_MS: u64 = 12_000;
 /// browse 采样窗只是**上界**：sampler 在子进程自然退出时提前收窗
-/// （ProcessGone → break），健康跑机无代价。CI 2vCPU 实测「整库装载 + 脚本
-/// 浏览 + 12.5s 驻留」可超 25s（run 33291431999 红过一次：子进程未在窗内
-/// 完成——不是内存超支，是窗口上限击穿慢跑机），放大到 60s 消除时限抖动。
-const BROWSE_HOLD_MS: u64 = 60_000;
+/// （ProcessGone → break），健康跑机无代价。CI 2vCPU 慢机的装载段耗时波动
+/// 极大：25s 窗与 60s 窗各被击穿过一次（run 33291431999 / 33302128595——
+/// 宽限期满子进程仍存活，装载+浏览慢机可超 35s；不是内存超支，是时限抖动），
+/// 放大到 120s。子进程驻留 = 窗口一半（30s），采样中位数以稳态段为主。
+const BROWSE_HOLD_MS: u64 = 120_000;
 const ROWS: u64 = 100_000;
 
 fn locate_app_exe() -> PathBuf {
