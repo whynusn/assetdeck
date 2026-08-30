@@ -186,3 +186,95 @@ fn legacy_positional_form_still_imports() {
     assert_eq!(categories(&lib), vec!["待分类".to_string()]);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// PowerShell Compress-Archive 打 zip（与 EmoReader 的解压侧同族实现，互通）。
+/// Compress-Archive 只认 .zip 扩展名，先落 .zip 再改名 .emo。
+fn zip_dir_to_emo(src_dir: &Path, emo: &Path) {
+    let zip = emo.with_extension("zip-tmp.zip");
+    let script = format!(
+        "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
+        src_dir.display().to_string().replace('\'', "''"),
+        zip.display().to_string().replace('\'', "''"),
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("起 powershell 失败");
+    assert!(
+        output.status.success(),
+        "打 zip 失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::rename(&zip, emo).expect("改名为 .emo 失败");
+}
+
+/// 真实用户场景（2026-08-30 用户日志）：拖入 .emo 走归类弹窗 → 清单 kind=p。
+/// 清单路径的临时解包目录必须在 run_import 消费完素材**之后**才能删——
+/// 曾经的实现在收集完 assets 就立刻 remove_dir_all，run_import 拿到的全部
+/// 源路径都已失效，「导入完成」实际 imported=0（整包素材全部静默丢失）。
+#[test]
+fn emo_package_via_manifest_imports_all_assets() {
+    let root = temp_root("emo");
+    // zip 根放一个千牛组（组目录带 EmotionConfig.json → 千牛分支收 originalFile）。
+    let src = root.join("平安测试包");
+    let group = src.join("组A");
+    std::fs::create_dir_all(&group).unwrap();
+    std::fs::write(
+        group.join("EmotionConfig.json"),
+        r#"[{"originalFile":"a.jpg","groupName":"表情组"}]"#,
+    )
+    .unwrap();
+    write_png(&group.join("a.jpg"), 150);
+    let emo = root.join("平安测试包.emo");
+    zip_dir_to_emo(&src, &emo);
+    let lib = root.join("library");
+
+    let stdout = run_import_cli(&format!("p\tauto\t{}\n", emo.display()), &lib);
+
+    assert!(
+        stdout.contains("done: imported=1"),
+        ".emo 经清单导入应实际入库 1 条（cleanup 不得先于 run_import 删解包目录），stdout={stdout}"
+    );
+    assert_eq!(
+        categories(&lib),
+        vec!["表情组".to_string()],
+        "包内 groupName 分类应照常生效"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// 诚实上报（2026-08-30 用户事故的另一半）：全军覆没（imported=0 且
+/// failed>0）必须非零退出，壳层才会走失败路径报错——exit 0 会让用户面对
+/// 0 素材与「导入完成」成功提示自相矛盾。坏图（扩展名伪装）逐条失败。
+#[test]
+fn all_failed_batch_exits_nonzero() {
+    let root = temp_root("allfail");
+    let bad = root.join("bad.png");
+    std::fs::write(&bad, b"definitely not an image").unwrap();
+    let lib = root.join("library");
+
+    let list = root.join("paths.txt");
+    std::fs::write(&list, format!("f\tauto\t{}\n", bad.display())).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sample-library"))
+        .args([
+            "--import-paths",
+            &list.display().to_string(),
+            "--library",
+            &lib.display().to_string(),
+            "--mode",
+            "fast",
+        ])
+        .output()
+        .expect("起 sample-library 子进程失败");
+
+    assert!(
+        !output.status.success(),
+        "imported=0 且 failed>0 必须非零退出，stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !lib.join("meta.db").exists() || categories(&lib).is_empty(),
+        "全失败批次不得产生任何入库行"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

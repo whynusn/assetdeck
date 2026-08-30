@@ -722,5 +722,20 @@ if (click_count % 2) == 1 {
 
 **验证**：platform/app-ui 测试全绿 + workspace clippy（--exclude bench-harness）无新告警；探针 plain 30/30、showDesktop 20/20 全绿，日志证实每次恢复周期恰好触发一次「整窗失效重绘哨兵」；探针脚本已修「iconic 态采样」假阳性（iconic 等待 500ms 后跳过该轮）。
 
+### D63 .emo 经清单导入整包丢失：cleanup 时序违反读者契约 + 全失败必须非零退出（2026-08-30）
+
+**症状（用户日志，ZhangYue 机）**：拖入千牛 .emo 素材包走归类弹窗导入，提示「导入完成」，应用里 **0 素材**。app 日志里整包几百条 `sample-library: failed <%TEMP%\qianniu_emo_*\...> : 图片解码失败：系统找不到指定的路径 (os error 3)`。
+
+**根因（两条叠加，主犯是前者）**：
+1. **cleanup 时序**：`EmoReader.read()` 解包到临时目录，`ImportedAsset.source` 全部指向里面，契约注释明写「由 main **导入完成后**删除」。旧两位置参数流程（`import_package`）顺序正确（先 `run_import` 后清理解包目录）；D49 清单流程（`run_import_paths`）却在**收集完 assets 的当场**就 `remove_dir_all(cleanup)`，`run_import` 拿到的全部源路径已失效 → 逐条解码失败 → imported=0。e2e 测试全用 `d:`/`f:` 行、唯独没有 `p:`（.emo）行，盲区正中。
+2. **上报失真**：批次全失败时 sample-library 仍 exit 0（单文件失败不拖垮整批的既有语义），壳层 `with_finished(success=true)` 弹「导入完成」成功调——0 素材与成功提示自相矛盾，D60 的 NOTICE 警示被淹没。
+
+**决策**：
+1. `run_import_paths` 清理**后置**：cleanups 收进 Vec，`run_import` 返回后再逐个删除——镜像 import_package 的正确序，契约回到注释所写。
+2. **全军覆没 = 批次失败**：`run_import` 在 `imported == 0 && failed_total > 0` 时返回 `Err`（非零退出），壳层走既有失败路径报「导入失败：全部 N 个素材导入失败：…」；部分失败维持 Ok + NOTICE（D60 语义）；全重复（imported=0 skipped>0 failed=0）是合法幂等重导不算失败。
+3. TDD：进程边界 e2e 补两例——`emo_package_via_manifest_imports_all_assets`（真 zip 改名 .emo + `p:` 清单，红灯复现 imported=0，修复后 imported=1 且 groupName 分类生效；Compress-Archive 拒绝非 .zip 扩展名，fixture 先落 .zip 再改名）；`all_failed_batch_exits_nonzero`（坏图全失败 → 断言非零退出且零入库行）。
+
+**诚实边界**：部分失败（imported>0）仍 exit 0 + NOTICE 警示——「整批完成、个别失败」的既定语义不变；被打断的 .emo 重导是幂等的（pHash/内容去重）。fixture 用 Compress-Archive（与解压侧同族 .NET 实现），真实千牛 .emo 为标准 zip，互通已由解压侧既有行为背书。
+
 
 

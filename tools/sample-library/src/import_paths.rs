@@ -112,6 +112,11 @@ pub fn run_import_paths(lines: &[ImportLine], out: &Path, mode: CliMode) -> Resu
         .register_reader(Box::new(DirectoryReader));
 
     let mut assets: Vec<ImportedAsset> = Vec::new();
+    // 清理必须**后置**（2026-08-30 用户 .emo 整包丢失事故）：EmoReader 把包
+    // 解到临时目录，assets 的 source 路径全指向里面——读完即删的话，
+    // run_import 拿到的路径全部失效，「导入完成」实际 imported=0。镜像
+    // import_package 的正确序：先导入，后清理解包目录。
+    let mut cleanups: Vec<PathBuf> = Vec::new();
     for line in lines {
         // 单文件来源（D49 主导入多选的主体）：DirectoryReader 只认目录，散
         // 文件直接入列；可导入性按 media 注册表判扩展名，不支持 = 静默跳过
@@ -141,8 +146,8 @@ pub fn run_import_paths(lines: &[ImportLine], out: &Path, mode: CliMode) -> Resu
                     apply_directive(asset, &line.directive);
                 }
                 assets.extend(package.assets);
-                if let Some(cleanup) = package.cleanup {
-                    let _ = std::fs::remove_dir_all(cleanup);
+                if let Some(cleanup) = package.cleanup.take() {
+                    cleanups.push(cleanup);
                 }
             }
             Err(error) => {
@@ -153,7 +158,11 @@ pub fn run_import_paths(lines: &[ImportLine], out: &Path, mode: CliMode) -> Resu
             }
         }
     }
-    crate::run_import(&assets, out, mode)
+    let result = crate::run_import(&assets, out, mode);
+    for cleanup in cleanups {
+        let _ = std::fs::remove_dir_all(cleanup);
+    }
+    result
 }
 
 /// `--import-paths <file> --library <root> [--mode fast|background]` 分支。

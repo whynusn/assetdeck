@@ -303,6 +303,17 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
             summarize_failures(&duplicates)
         );
     }
+    // 全军覆没 = 批次失败，非零退出（诚实上报）：exit 0 会让壳层弹「导入完成」
+    // 成功调，用户面对 0 素材与成功提示自相矛盾（2026-08-30 用户 .emo 整包
+    // 丢失事故的另一半——cleanup 时序是根因，这里兜住其余全失败形态）。
+    // 部分失败仍走 Ok + NOTICE（D60 语义不变）；全重复（imported=0 skipped>0
+    // failed=0）是合法幂等重导，不算失败。
+    if imported == 0 && failed_total > 0 {
+        return Err(format!(
+            "全部 {failed_total} 个素材导入失败：{}",
+            summarize_failures(&failures)
+        ));
+    }
     Ok(())
 }
 
