@@ -564,3 +564,86 @@ fn renamed_deleted_asset_searchable_after_restore() {
     s.restore_assets(&["n-1"]).unwrap();
     assert_eq!(s.search("新文件名", 10).unwrap().len(), 1);
 }
+
+/// D61 分类保留：按 v0.1.0 时期的 v4 schema（用户真机旧库的真实形态）造库，
+/// read_category_by_uuid 应返回 uuid→category 映射且回收站行不出现。
+#[test]
+fn read_category_by_uuid_maps_live_rows_and_skips_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("meta.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        // v0.1.0 schema v4 = MIGRATION_V1 + v2/v3/v4 ALTER（照抄 tag 快照）。
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid        TEXT PRIMARY KEY NOT NULL,
+               file_name   TEXT NOT NULL,
+               rel_path    TEXT NOT NULL DEFAULT '',
+               category    TEXT,
+               size_bytes  INTEGER NOT NULL DEFAULT 0,
+               created_at  INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash       BLOB,
+               width       INTEGER,
+               height      INTEGER,
+               deleted     INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO assets (uuid, file_name, rel_path, category)
+               VALUES ('uuid-live-named', '促销海报.png', 'objects/uuid-live-named/raw.png', '海报');
+             INSERT INTO assets (uuid, file_name, rel_path, category)
+               VALUES ('uuid-live-null', '屏幕截图.png', 'objects/uuid-live-null/raw.png', NULL);
+             INSERT INTO assets (uuid, file_name, rel_path, category, deleted)
+               VALUES ('uuid-trashed', '回收站.png', '', '隐藏分类', 1);",
+        )
+        .unwrap();
+    }
+
+    let map = store::read_category_by_uuid(&db_path).expect("应读到旧库分类");
+    assert_eq!(map.len(), 2, "回收站行不出现在映射里");
+    assert_eq!(map.get("uuid-live-named").unwrap(), &Some("海报".to_string()));
+    assert_eq!(map.get("uuid-live-null").unwrap(), &None);
+}
+
+#[test]
+fn read_category_by_uuid_errors_on_missing_or_non_db() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(
+        store::read_category_by_uuid(&dir.path().join("不存在.db")).is_err(),
+        "缺文件必须报错（调用方降级为 auto）"
+    );
+    let fake = dir.path().join("fake.db");
+    std::fs::write(&fake, b"definitely not sqlite").unwrap();
+    assert!(
+        store::read_category_by_uuid(&fake).is_err(),
+        "非 SQLite 文件必须报错"
+    );
+}
+
+/// 只读纪律：read_category_by_uuid 不跑 schema 迁移——v0.1.0 的 user_version=4
+/// 读完必须原样保留（旧库属于用户，读取方不得改写）。
+#[test]
+fn read_category_by_uuid_does_not_migrate_user_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("meta.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL, file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '', category TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0, phash BLOB,
+               width INTEGER, height INTEGER, deleted INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO assets (uuid, file_name, category)
+               VALUES ('u-1', 'a.png', '海报');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    let _ = store::read_category_by_uuid(&db_path).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(v, 4, "读取不得触发迁移改写");
+}

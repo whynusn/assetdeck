@@ -46,6 +46,50 @@ impl From<rusqlite::Error> for StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// D61 迁移分类保留：只读旧库 `meta.db`，取 `uuid → category` 映射。
+///
+/// 旧库是用户数据，**不得走 [`Store::open`]**（那会跑 schema 迁移改写 user_version
+/// 与列）；这里用裸 `Connection` 只发一条 SELECT。旧库形态 = v0.1.0 起的
+/// `assets(uuid, category, deleted)` 三列（schema v4/v5 通用）；缺文件、非
+/// SQLite 文件、表缺列一律报 `io::Error`，调用方按「无分类可读」降级为
+/// `auto` 指令（迁移照常进行，只是分类落待分类）。
+///
+/// 只读纪律由 `read_category_by_uuid_does_not_migrate_user_version` 守卫。
+pub fn read_category_by_uuid(
+    db_path: &Path,
+) -> std::io::Result<std::collections::HashMap<String, Option<String>>> {
+    // SQLITE_OPEN_READ_WRITE（不带 CREATE）：缺文件即失败、绝不新建空库；
+    // 只发 SELECT 不发写语句，DB 内容与 user_version 不变。WAL 库可能需要
+    // 创建 -shm，旧库所在目录可写即可（被事故污染过的旧库目录都可写）。
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io_error)?;
+    let mut stmt = conn
+        .prepare("SELECT uuid, category FROM assets WHERE deleted = 0")
+        .map_err(io_error)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(io_error)?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (uuid, category) = row.map_err(io_error)?;
+        map.insert(uuid, category);
+    }
+    Ok(map)
+}
+
+/// rusqlite 错误 → io::Error（保留 Display，分类读取对调用方只暴露 io 接口）。
+fn io_error(e: rusqlite::Error) -> std::io::Error {
+    std::io::Error::other(e)
+}
+
 pub struct AssetMeta {
     pub uuid: String,
     pub file_name: String,

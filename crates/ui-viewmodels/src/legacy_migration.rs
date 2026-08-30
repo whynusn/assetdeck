@@ -135,10 +135,28 @@ fn scan(source: &Path, is_backup: bool) -> Option<LegacyLibrary> {
     })
 }
 
+/// 读旧库 `uuid → category` 映射（best-effort）：旧库 `meta.db` 缺失/损坏/
+/// 非 SQLite 时返回 `Err`，调用方按「无分类可读」降级——迁移照常走，分类
+/// 落待分类。详见 [`store::read_category_by_uuid`]（裸 SELECT 不跑迁移，
+/// 不改写用户旧库）。
+pub fn read_legacy_categories(
+    db_path: &Path,
+) -> io::Result<std::collections::HashMap<String, Option<String>>> {
+    store::read_category_by_uuid(db_path)
+}
+
 /// 把旧库 `objects/` 下全部素材文件写成 `--import-paths` 清单（D49 格式：
-/// `f\tauto\t<绝对路径>` 逐行；kind=f 散文件、mode=auto 归待分类——迁移不做
-/// 归类决策）。流式写盘不物化路径表，十万级素材也不进内存。返回写入行数。
-pub fn write_import_manifest(source: &Path, list_path: &Path) -> io::Result<usize> {
+/// `f\t<mode>\t<绝对路径>` 逐行）。流式写盘不物化路径表，十万级素材也不进内存。
+/// 返回写入行数。
+///
+/// **mode 列随分类映射走**（D61 分类保留）：旧库 uuid → Some(分类名) 写
+/// `category:<清洗后的名>`；None 或映射缺项写 `auto`（落待分类）。分类名
+/// 里的制表符/换行/首尾空白会被清洗（清单是 TAB 分隔的，脏字符会断行）。
+pub fn write_import_manifest(
+    source: &Path,
+    list_path: &Path,
+    category_by_uuid: &std::collections::HashMap<String, Option<String>>,
+) -> io::Result<usize> {
     use std::io::Write;
 
     let objects = source.join("objects");
@@ -147,7 +165,19 @@ pub fn write_import_manifest(source: &Path, list_path: &Path) -> io::Result<usiz
     let mut count = 0usize;
     let mut write_err: Option<io::Error> = None;
     walk_objects(&objects, &mut |path, _len| {
-        let line = format!("f\tauto\t{}\n", path.display());
+        // 对象目录名即旧库 uuid（v0.1.0 起 rel_path = objects/<uuid>/raw.<ext>）；
+        // 拿不到（历史畸形布局）→ auto。
+        let mode = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .and_then(|uuid| category_by_uuid.get(uuid))
+            .and_then(|opt| opt.as_deref())
+            .map(sanitize_category_directive)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("category:{name}"))
+            .unwrap_or_else(|| "auto".to_string());
+        let line = format!("f\t{mode}\t{}\n", path.display());
         buffer.extend_from_slice(line.as_bytes());
         count += 1;
         if buffer.len() >= 64 * 1024 {
@@ -166,6 +196,19 @@ pub fn write_import_manifest(source: &Path, list_path: &Path) -> io::Result<usiz
     }
     file.write_all(&buffer)?;
     Ok(count)
+}
+
+/// 清洗分类名用于 `category:` 指令：制表符/换行替换为空格、首尾空白裁掉；
+/// 空串 → None（调用方回退 auto）。清单一行一个素材，断行会撕裂映射。
+fn sanitize_category_directive(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '\t' | '\r' | '\n' => ' ',
+            other => other,
+        })
+        .collect();
+    cleaned.trim().to_string()
 }
 
 /// 把旧库目录整体改名留档：`library` → `library.migrated-<unix 秒>`。
@@ -319,7 +362,8 @@ mod tests {
             &[("dddddddd-4444/raw.png", b"p"), ("eeeeeeee-5555/raw.txt", b"t")],
         );
         let list = base.join("list.tsv");
-        let count = write_import_manifest(&library, &list).unwrap();
+        let count =
+            write_import_manifest(&library, &list, &std::collections::HashMap::new()).unwrap();
         assert_eq!(count, 2);
 
         let text = fs::read_to_string(&list).unwrap();
@@ -329,10 +373,51 @@ mod tests {
         for line in &lines {
             let mut fields = line.splitn(3, '\t');
             assert_eq!(fields.next(), Some("f"), "kind=f 散文件");
-            assert_eq!(fields.next(), Some("auto"), "mode=auto 归待分类");
+            assert_eq!(fields.next(), Some("auto"), "无分类映射时归待分类");
             let path = fields.next().expect("路径列");
             assert!(Path::new(path).is_file(), "路径必须是真实文件: {path}");
         }
+    }
+
+    #[test]
+    fn manifest_lines_carry_category_directives_and_sanitize() {
+        let base = temp_dir("manifest-cat");
+        let library = base.join("library");
+        make_legacy_library(
+            &library,
+            &[
+                ("11111111-aaaa/raw.png", b"p1"),
+                ("22222222-bbbb/raw.png", b"p2"),
+                ("33333333-cccc/raw.jpg", b"j"),
+            ],
+        );
+        // 映射覆盖 uuid1（正常分类）、uuid2（含制表符/换行/首尾空白 → 清洗）；
+        // uuid3 不在映射里 → auto；映射里有但磁盘没有的 uuid4 不产生行。
+        let mut categories = std::collections::HashMap::new();
+        categories.insert("11111111-aaaa".to_string(), Some("海报".to_string()));
+        categories.insert(
+            "22222222-bbbb".to_string(),
+            Some(" \t脏\n名字\t ".to_string()),
+        );
+        categories.insert("44444444-dddd".to_string(), Some("幽灵".to_string()));
+
+        let list = base.join("list.tsv");
+        let count = write_import_manifest(&library, &list, &categories).unwrap();
+        assert_eq!(count, 3);
+
+        let text = fs::read_to_string(&list).unwrap();
+        let mut modes: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            let mut fields = line.splitn(3, '\t');
+            assert_eq!(fields.next(), Some("f"));
+            modes.push(fields.next().expect("mode 列"));
+        }
+        modes.sort();
+        assert_eq!(
+            modes,
+            vec!["auto", "category:海报", "category:脏 名字"],
+            "分类名必须清洗制表符/换行/首尾空白（清单是 TAB 分隔的）"
+        );
     }
 
     #[test]
@@ -356,7 +441,8 @@ mod tests {
         assert_eq!(detected.total_bytes, 21, "旁车不计入体积");
 
         let list = base.join("list.tsv");
-        let count = write_import_manifest(&library, &list).unwrap();
+        let count =
+            write_import_manifest(&library, &list, &std::collections::HashMap::new()).unwrap();
         assert_eq!(count, 2, "旁车不进清单");
         let text = fs::read_to_string(&list).unwrap();
         assert!(!text.contains("paste.png"), "清单不得包含旁车: {text}");

@@ -2672,9 +2672,23 @@ fn main() {
                     .map(|d| d.as_nanos())
                     .unwrap_or(0)
             ));
-            if let Err(error) =
-                ui_viewmodels::legacy_migration::write_import_manifest(&backup, &list)
-            {
+            // D61 分类保留：读旧库 uuid→category（best-effort；读不到按
+            // 无分类走 auto，迁移照常进行）。在改名之后读备份目录的 meta.db。
+            let categories =
+                match ui_viewmodels::legacy_migration::read_legacy_categories(
+                    &backup.join("meta.db"),
+                ) {
+                    Ok(map) => map,
+                    Err(error) => {
+                        logging::warn!("旧库分类读取失败（按待分类迁移）: {error}");
+                        std::collections::HashMap::new()
+                    }
+                };
+            if let Err(error) = ui_viewmodels::legacy_migration::write_import_manifest(
+                &backup,
+                &list,
+                &categories,
+            ) {
                 if renamed {
                     if let Err(rollback) = std::fs::rename(&backup, &original) {
                         logging::warn!("清单写失败且改名回滚失败 backup={} : {rollback}", backup.display());

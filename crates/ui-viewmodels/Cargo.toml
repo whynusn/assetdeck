@@ -25,6 +25,12 @@ log = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"
+# D61 分类保留端到端测试：模拟 v0.1.0 用户迁移（真库导入链路）
+library = { path = "../library" }
+tempfile = "3"
+image = "0.25"
+# 造 v0.1.0 schema v4 旧库（与 store 共享底层 rusqlite，不新增 vendored crate）
+rusqlite = "0.32"
 
 [[bench]]
 name = "layout"

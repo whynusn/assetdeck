@@ -5301,16 +5301,20 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "domain",
+ "image",
  "index",
+ "library",
  "log",
  "lru",
  "media",
  "pipeline",
  "platform",
+ "rusqlite",
  "serde",
  "serde_json",
  "store",
  "targets",
+ "tempfile",
  "toml",
 ]
 
