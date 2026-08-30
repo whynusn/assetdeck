@@ -585,7 +585,10 @@ mod tests {
         let done_a = exe_dir.join(format!("{BACKUP_PREFIX}200"));
         make_legacy_library(&done_a, &[("b/raw.png", b"b")]);
         mark_migrated(&done_a).unwrap();
-        assert_eq!(find_completed_backup(std::slice::from_ref(&exe_dir)), Some(done_a));
+        assert_eq!(
+            find_completed_backup(std::slice::from_ref(&exe_dir)),
+            Some(done_a)
+        );
 
         let done_b = old_install.join(format!("{BACKUP_PREFIX}300"));
         make_legacy_library(&done_b, &[("c/raw.png", b"c")]);
