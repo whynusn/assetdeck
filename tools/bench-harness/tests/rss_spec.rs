@@ -15,6 +15,8 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use bench_harness::generate::generate_library;
 use bench_harness::sampler::sample_median;
@@ -27,7 +29,11 @@ const POLL_MS: u64 = 250;
 const WARMUP: usize = 8;
 /// 静置窗口 ≥10s（spec directory-structure）；browse 留足浏览脚本耗时余量。
 const IDLE_HOLD_MS: u64 = 12_000;
-const BROWSE_HOLD_MS: u64 = 25_000;
+/// browse 采样窗只是**上界**：sampler 在子进程自然退出时提前收窗
+/// （ProcessGone → break），健康跑机无代价。CI 2vCPU 实测「整库装载 + 脚本
+/// 浏览 + 12.5s 驻留」可超 25s（run 33291431999 红过一次：子进程未在窗内
+/// 完成——不是内存超支，是窗口上限击穿慢跑机），放大到 60s 消除时限抖动。
+const BROWSE_HOLD_MS: u64 = 60_000;
 const ROWS: u64 = 100_000;
 
 fn locate_app_exe() -> PathBuf {
@@ -163,17 +169,32 @@ fn browse_100k_rss_under_250mb() {
 
     let report = sample_median(child.id(), POLL_MS, WARMUP, BROWSE_HOLD_MS)
         .expect("测量失败=红: browse 采样中止");
+    // 失败归因插桩：窗终时刻的样本概况（中位数/样本数可判子进程死在哪个阶段）。
+    eprintln!(
+        "[diag] 采样窗结束 median={}B samples={}",
+        report.median_bytes, report.samples
+    );
 
-    // 子进程必须干净退出（异常退出 = 样本不可信 = 红）
-    match child.try_wait() {
-        Ok(Some(status)) if status.success() => {}
-        Ok(Some(status)) => panic!("测量失败=红: browse 子进程异常退出({status})"),
-        Ok(None) => {
+    // 子进程必须干净退出（异常退出 = 样本不可信 = 红）。
+    // 退出摘除竞态（CI 实测，run 33291431999）：ExitProcess 写回真实退出码
+    // （≠STILL_ACTIVE）到内核对象置信号之间有毫秒级窗口——sampler 恰在此窗
+    // 收到 ProcessGone 收窗后，紧邻的 try_wait 仍可能 WAIT_TIMEOUT => 误判
+    // 「未在窗口内完成」。ProcessGone 本身就是完成信号，这里给 5s 宽限期
+    // 复查退出状态；真挂死的子进程超期后 kill 判红，语义不变。
+    let mut status = child.try_wait().expect("测量失败=红: wait 失败");
+    let grace = Instant::now() + Duration::from_secs(5);
+    while status.is_none() && Instant::now() < grace {
+        thread::sleep(Duration::from_millis(50));
+        status = child.try_wait().expect("测量失败=红: wait 失败");
+    }
+    match status {
+        Some(s) if s.success() => {}
+        Some(s) => panic!("测量失败=红: browse 子进程异常退出({s})"),
+        None => {
             let _ = child.kill();
             let _ = child.wait();
             panic!("测量失败=红: browse 子进程未在采样窗口内完成浏览脚本");
         }
-        Err(e) => panic!("测量失败=红: wait 失败: {e}"),
     }
 
     print_report("browse", report.median_bytes, report.samples);
