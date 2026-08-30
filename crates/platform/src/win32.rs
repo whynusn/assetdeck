@@ -2705,21 +2705,32 @@ pub mod dragdrop {
 }
 
 /// 恢复重绘守卫：Windows 上 winit 不派发 Occluded 事件，glutin 对 WGL 表面
-/// 的 resize 是 no-op（"not supported with WGL"）——窗口尺寸变化后交换链
-/// 缓冲内容为未定义（黑），客户端区能否恢复全靠系统补发 WM_PAINT（winit
-/// 以它驱动 RedrawRequested）。最小化→唤出路径众多（任务栏点击、Win+D、
-/// 第三方唤起器），偶发漏发时未呈现的黑色缓冲会一直留在屏上（真机复现：
-/// 多次唤出后窗口部分渲染黑屏）。这里对主窗口 HWND 做旧式子类化：捕获
-/// 「最小化→非最小化」的 WM_SIZE 转换并补一发 RDW_INTERNALPAINT（系统侧
-/// 合并去重，不产生重绘风暴），把「恢复后必有重绘」变成硬保证。
+/// 的 resize 是 no-op（"not supported with WGL"）——最小化→唤出后 GPU 交换链
+/// 缓冲内容未定义（黑），客户端区能否恢复全靠系统补发 WM_PAINT（winit 以它
+/// 驱动 RedrawRequested，femtovg 由此重铺整帧）。
+///
+/// 软件渲染档（winit+softbuffer）的黑屏是另一条失效链（2026-08-30 真机复发，
+/// 源码级定位）：① slint 收到最小化的 Resized(0×0) 直接丢弃（winitwindowadapter
+/// resize_event 过滤零尺寸，防渲染器炸）——恢复时场景零变化；② sw 渲染器的
+/// `render()` 每帧用 softbuffer 的 buffer age 选重绘档，Windows 上 age 恒为 1
+/// ⇒ `ReusedBuffer` 部分重绘，把 `occluded(true)` 设的全量档直接覆写；③ 部分
+/// 重绘算出空脏区 ⇒ softbuffer 一像素不上屏，但 `present_with_damage` 收尾的
+/// `ValidateRect(整窗)` 让系统从此不再补发 WM_PAINT；④ DWM 在最小化/完全遮挡
+/// 期间可能丢弃窗口重定表面 ⇒ 黑区定格，直到鼠标悬浮把悬浮件区域标脏。
+///
+/// 两链的公共兜底：子类化主窗口 proc，钩 WM_PAINT——更新区几乎覆盖整个客户区
+/// （≥90%，= 系统判定表面内容不可信）时调用应用层回调把整窗标脏，强制一帧
+/// 全量重绘。「最小化→非最小化」转换仍补发 RDW_INTERNALPAINT（femtovg 档靠它
+/// 触发重绘；系统侧合并去重，不产生重绘风暴）。
 pub mod paint_guard {
+    use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::Graphics::Gdi::{RedrawWindow, RDW_INTERNALPAINT};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{GetUpdateRect, RedrawWindow, RDW_INTERNALPAINT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, SIZE_MINIMIZED,
-        WM_NCDESTROY, WM_SIZE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GetClientRect, SetWindowLongPtrW, GWLP_WNDPROC,
+        SIZE_MINIMIZED, WM_NCDESTROY, WM_PAINT, WM_SIZE, WNDPROC,
     };
 
     use crate::PlatformError;
@@ -2727,6 +2738,13 @@ pub mod paint_guard {
     static ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     static WAS_MINIMIZED: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        /// 整窗标脏回调（应用层翻转 repaint-nudge）。WM_PAINT 投递在窗口所属
+        /// 线程 = Slint UI 线程（与 window_ready 模块同理），thread_local 存
+        /// 非 Send 闭包即可。
+        static ON_FULL_INVALIDATE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
 
     unsafe extern "system" fn guard_proc(
         hwnd: HWND,
@@ -2740,16 +2758,29 @@ pub mod paint_guard {
                 let was = WAS_MINIMIZED.swap(minimized, Ordering::Relaxed);
                 if was && !minimized {
                     // 恢复帧：补发内部绘制。winit 的 WM_PAINT 分支把它转成
-                    // RedrawRequested，femtovg 由此重铺整帧覆盖未定义缓冲。
+                    // RedrawRequested；软件档的整窗标脏由下面 WM_PAINT 臂的
+                    // 更新区判定接管。
                     unsafe { RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_INTERNALPAINT) };
                 }
             }
+            WM_PAINT => {
+                // 在转发给 winit（其 BeginPaint/ValidateRect 会清掉更新区）之前
+                // 先看一眼：整窗失效 ⇒ 表面内容已不可信，部分重绘必漏画。
+                if unsafe { full_client_invalidate(hwnd) } {
+                    ON_FULL_INVALIDATE.with(|slot| {
+                        if let Some(callback) = slot.borrow().as_ref() {
+                            callback();
+                        }
+                    });
+                }
+            }
             WM_NCDESTROY => {
-                // 还原子类化，避免销毁路径上 proc 悬垂。
+                // 还原子类化，避免销毁路径上 proc 悬垂；顺带释放回调。
                 let original = ORIGINAL_PROC.load(Ordering::Relaxed);
                 if original != 0 {
                     unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, original) };
                 }
+                ON_FULL_INVALIDATE.with(|slot| *slot.borrow_mut() = None);
             }
             _ => {}
         }
@@ -2762,21 +2793,48 @@ pub mod paint_guard {
         }
     }
 
-    /// 在主窗口 HWND 上安装守卫（幂等）。UI 线程 STA 单线程泵消息，安装期间
-    /// 不会有并发 proc 调用，ORIGINAL_PROC 的落库顺序因此安全。失败仅告警，
-    /// 不阻断主流程（守卫是兜底，常态路径是系统自发的 WM_PAINT）。
-    pub fn install(hwnd: isize) -> Result<(), PlatformError> {
+    /// 当前更新区是否几乎覆盖整个客户区（≥90%）。在 winit 校验窗口之前调用，
+    /// 更新区仍完好。最小化恢复/完全遮挡重现时 DWM 丢弃重定表面，系统以整窗
+    /// 失效请求重画；拖拽改尺寸等局部失效（缓冲仍可信）不触发整窗标脏。
+    unsafe fn full_client_invalidate(hwnd: HWND) -> bool {
+        let mut update = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetUpdateRect(hwnd, &mut update, 0) } == 0 {
+            // 无更新区（RDW_INTERNALPAINT 之类的内部绘制请求）：交给常规重绘。
+            return false;
+        }
+        let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
+            return false;
+        }
+        let client_w = (client.right - client.left) as i64;
+        let client_h = (client.bottom - client.top) as i64;
+        if client_w <= 0 || client_h <= 0 {
+            return false;
+        }
+        let update_w = (update.right - update.left).clamp(0, client_w as i32) as i64;
+        let update_h = (update.bottom - update.top).clamp(0, client_h as i32) as i64;
+        update_w * update_h * 10 >= client_w * client_h * 9
+    }
+
+    /// 在主窗口 HWND 上安装守卫（幂等）。`on_full_invalidate` 在 UI 线程被调
+    /// （WM_PAINT 与窗口同线程），应把 slint 侧整窗标脏。UI 线程 STA 单线程
+    /// 泵消息，安装期间不会有并发 proc 调用，ORIGINAL_PROC 的落库顺序因此
+    /// 安全。失败仅告警，不阻断主流程（守卫是兜底，常态路径是系统自发的
+    /// WM_PAINT）。
+    pub fn install(hwnd: isize, on_full_invalidate: Box<dyn Fn()>) -> Result<(), PlatformError> {
         if hwnd == 0 {
             return Err(PlatformError::Window("窗口句柄为空，恢复重绘守卫不可用".into()));
         }
         if INSTALLED.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        ON_FULL_INVALIDATE.with(|slot| *slot.borrow_mut() = Some(on_full_invalidate));
         let previous = unsafe {
             SetWindowLongPtrW(hwnd as HWND, GWLP_WNDPROC, guard_proc as *const () as usize as isize)
         };
         if previous == 0 {
             INSTALLED.store(false, Ordering::Release);
+            ON_FULL_INVALIDATE.with(|slot| *slot.borrow_mut() = None);
             return Err(PlatformError::Window("SetWindowLongPtrW 子类化失败".into()));
         }
         ORIGINAL_PROC.store(previous, Ordering::Release);

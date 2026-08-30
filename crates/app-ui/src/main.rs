@@ -997,15 +997,28 @@ impl platform::FileDropSink for SlintFileDropSink {
 }
 
 /// 主窗口就绪（WinEvent 钩子回调，事件驱动，无轮询）后的挂载项：D49 拖拽
-/// 导入注册 + 恢复重绘守卫（winit/femtovg 在 Windows 上的黑屏兜底，见
-/// platform::win32::paint_guard / window_ready 模块注释）。任一失败只告警，
-/// 不阻断主流程。
-fn mount_when_window_ready(hwnd: isize, sink: std::sync::Arc<SlintFileDropSink>) {
+/// 导入注册 + 恢复重绘守卫（唤出黑屏兜底，机制详见 platform::win32::paint_guard
+/// 模块注释：守卫钩 WM_PAINT 全窗失效，应用层翻转 repaint-nudge 标脏整窗，
+/// 强制软件渲染器部分重绘管线画一整帧）。任一失败只告警，不阻断主流程。
+fn mount_when_window_ready(
+    hwnd: isize,
+    sink: std::sync::Arc<SlintFileDropSink>,
+    ui: slint::Weak<AppWindow>,
+) {
     match platform::win32::dragdrop::register_file_drop(hwnd, sink) {
         Ok(()) => logging::info!("拖拽导入已注册（hwnd={hwnd:#x}）"),
         Err(error) => logging::warn!("拖拽导入注册失败：{error}（可继续用导入入口）"),
     }
-    match platform::win32::paint_guard::install(hwnd) {
+    let paint_ui = ui;
+    match platform::win32::paint_guard::install(
+        hwnd,
+        Box::new(move || {
+            if let Some(ui) = paint_ui.upgrade() {
+                logging::info!("整窗失效重绘哨兵触发（repaint-nudge 翻转）");
+                ui.set_repaint_nudge(!ui.get_repaint_nudge());
+            }
+        }),
+    ) {
         Ok(()) => logging::info!("恢复重绘守卫已安装（hwnd={hwnd:#x}）"),
         Err(error) => logging::warn!("恢复重绘守卫安装失败：{error}（不影响常规重绘）"),
     }
@@ -3341,12 +3354,13 @@ fn main() {
     }
 
     grid.sync();
-    // D49 拖拽导入 + 黑屏兜底（恢复后强制补一发重绘）：事件驱动等主窗口就绪
-    // ——run 前 WinEvent 钩子挂号，窗口首次可见即一次性装配（无轮询）。
+    // D49 拖拽导入 + 唤出黑屏兜底（整窗标脏强制全量重绘）：事件驱动等主窗口
+    // 就绪——run 前 WinEvent 钩子挂号，窗口首次可见即一次性装配（无轮询）。
     {
         let sink = std::sync::Arc::new(SlintFileDropSink { ui: app.as_weak() });
+        let ui_weak = app.as_weak();
         if let Err(error) = platform::win32::window_ready::on_first_visible_window(Box::new(
-            move |hwnd| mount_when_window_ready(hwnd, sink),
+            move |hwnd| mount_when_window_ready(hwnd, sink, ui_weak),
         )) {
             logging::warn!("窗口就绪钩子挂号失败：{error}（拖拽导入与重绘守卫不可用）");
         }

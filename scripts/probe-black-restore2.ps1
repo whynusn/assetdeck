@@ -60,6 +60,12 @@ function Get-Ratio([System.Drawing.Bitmap]$b, [int]$x0, [int]$y0, [int]$x1, [int
 }
 
 function Capture-Ratio([IntPtr]$hwnd, [string]$tagFile) {
+  # 2026-08-30 修探针缺陷：SW_RESTORE 后系统异步完成图标化恢复，紧跟着的采样
+  # 可能落在最小化态——GetWindowRect 返回 (-32000,-32000)，CopyFromScreen 截到
+  # 屏幕外纯黑，误报 100% RED（当轮 plain-s42 cycle6 即此假阳性）。等最多
+  # 500ms 恢复可见再采样；仍 iconic 则跳过该轮。
+  for ($k = 0; $k -lt 10 -and [W3]::IsIconic($hwnd); $k++) { Start-Sleep -Milliseconds 50 }
+  if ([W3]::IsIconic($hwnd)) { return @{ ratio = -1.0 } }
   $r = New-Object W3+RECT
   [W3]::GetWindowRect($hwnd, [ref]$r) | Out-Null
   $w = $r.R - $r.L; $h = $r.B - $r.T
@@ -139,7 +145,7 @@ for ($c = 1; $c -le $Cycles; $c++) {
   }
   Start-Sleep -Milliseconds $delay
   $res = Capture-Ratio $hwnd ("{0}-c{1:d3}" -f $tag, $c)
-  $verdict = if ($res.ratio -gt 0.05) { 'RED' } else { 'green' }
+  $verdict = if ($res.ratio -lt 0) { 'skip' } elseif ($res.ratio -gt 0.05) { 'RED' } else { 'green' }
   if ($verdict -eq 'RED') { $red++ }
   "{0},{1},{2}" -f $c, [math]::Round($res.ratio, 4), $verdict | Add-Content $csv
   if ($verdict -eq 'RED') { Write-Host ("[{0}] cycle {1} ratio={2:P2} -> RED" -f $tag, $c, $res.ratio) }

@@ -703,5 +703,24 @@ if (click_count % 2) == 1 {
 
 **取舍记录**：迁移入口放在 app 内而非自解压 installer——installer 保持「哑」（解包+快捷方式），任何数据操作都归 app 源码（可测试、可回滚、可观测）。检测按**位置**不按版本号（exe 旁有 library 即候选），避免版本识别的脆弱性；同一检测逻辑天然覆盖「库曾被覆盖事故」的受害者（孤儿对象文件会被重放导入收编）。**流程教训**：初版实现把清单生成放在改名之前（意图：清单写失败不动旧目录），真机 GUI 验证抓出致命序——清单引用的是改名前路径，改名后 18 条全灭，worker 对缺失文件静默跳过（imported=0），迁移却照常「成功」收账；单测全绿因为各函数都只被孤立测试，组合序只有端到端能暴露。修正为改名先行、清单从备份路径生成、清单写失败回滚改名——「写清单失败不动旧目录」改由回滚保证。
 
+### D62 唤出黑屏根因闭环：slint 软件渲染器部分重绘在表面丢弃后漏画（2026-08-30）
+
+**症状（真机复发，134e6f0 的守卫在场无效）**：唤出窗口后局部黑屏，只有鼠标悬浮经过的组件重新渲染出来。安装版日志证实 `winit/software` 渲染档 + 守卫已安装，但黑屏依旧。
+
+**根因（源码级闭环，slint 1.17.1 + softbuffer 0.4.8 + winit 0.30.13）**：软件渲染档的黑屏与 femtovg 的 WGL 未定义缓冲是**不同失效链**，134e6f0 的 `RDW_INTERNALPAINT` 兜不住前者：
+1. 最小化时 winit 报 `Resized(0×0)`，slint `winitwindowadapter::resize_event` **直接丢弃零尺寸**（防渲染器炸）——场景零变化，恢复时 item 几何零 diff；
+2. `sw` 渲染器 `render()` **每帧用 softbuffer 的 buffer age 选重绘档**，Windows 上 age 恒返回 1 ⇒ `ReusedBuffer` 部分重绘——把 `occluded(true)`（Resized(0×0) 时手动调用）设的 `NewBuffer` 全量档**当场覆写**，该重置在这条链上形同虚设；
+3. 部分·重绘算出空脏区 ⇒ 一像素不上屏；而 softbuffer win32 的 `present_with_damage` 收尾 `ValidateRect(整窗)`，系统从此不再补发 WM_PAINT；
+4. DWM 在最小化/完全遮挡期间可能丢弃窗口重定表面 ⇒ 黑区定格，直到鼠标悬浮把悬浮件区域标脏（与截图症状完全吻合）。
+旧探针「全绿」的验证是假阴性：只跑了 plain 变体 7 个周期，且脚本会在最小化态采样（GetWindowRect 返回 -32000 屏幕外坐标）——本轮 30 周期即抓到一次 100% 纯黑假阳性。
+
+**决策**：黑屏兜底从「补触发一次重绘」改为「**系统整窗失效时把 slint 整窗标脏**」，双渲染档通用：
+- `platform::win32::paint_guard` 子类 proc 增钩 **WM_PAINT**：转发给 winit（其 ValidateRect 会清更新区）之前用 `GetUpdateRect` 判更新区是否 ≥90% 客户区——是即「系统判定表面内容不可信」（最小化恢复/遮挡重现的 DWM 丢弃特征）⇒ 调应用层回调（thread_local 存非 Send 闭包，与 window_ready 同纪律）。局部失效（拖拽改尺寸的新暴露边条）不触发，不伤部分重绘的吞吐；「最小化→非最小化」补发 RDW_INTERNALPAINT 保留（femtovg 档靠它触发重绘）。
+- 应用层回调翻转 `AppWindow.repaint-nudge` 布尔位；`appwindow.slint` 垫底放一个铺满窗口的透明哨兵 Rectangle，`opacity: repaint-nudge ? 1.0 : 0.999`——Opacity 类项变化命中 partial_renderer 的 `must_refresh_children` 分支，自身几何=全窗 ⇒ 下一帧全量重绘，盖掉黑区。哨兵透明无 TouchArea：不参与布局、不挡输入、两档透明度差 0.1% 不可感知。
+- **为什么不用别的路**：slint 公开 API 无「强制全量重绘」入口（只有 `request_redraw`，仍走空脏区路径）；改 1px 尺寸骗 buffer 重建会破坏最大化态且有闪烁；等 slint 上游修 age 语义/Windows Occluded 派发不可控。属性标脏是应用层唯一可靠杠杆。
+- **诚实边界**：nudge 每次整窗失效多画一帧全量（恢复时一次，代价可忽略）；WM_PAINT 钩子在拖拽改尺寸时不触发（局部更新区），性能无回退。
+
+**验证**：platform/app-ui 测试全绿 + workspace clippy（--exclude bench-harness）无新告警；探针 plain 30/30、showDesktop 20/20 全绿，日志证实每次恢复周期恰好触发一次「整窗失效重绘哨兵」；探针脚本已修「iconic 态采样」假阳性（iconic 等待 500ms 后跳过该轮）。
+
 
 

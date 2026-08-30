@@ -149,6 +149,10 @@ export component AppWindow inherits Window {
     // 拖动夹取范围（壳层持久化时用同一组数字，改这里需同步 main.rs 常量）。
     property <length> min-sidebar-width: 150px;
     property <length> max-sidebar-width: 420px;
+    // 唤出全量重绘哨兵翻转位：platform::win32::paint_guard 在「系统整窗失效」
+    // （最小化恢复/遮挡重现，DWM 已丢窗口表面）时翻转此属性 → repaint-sentinel
+    // 的 opacity 绑定变化 → 整窗标脏，逼部分重绘管线画一整帧盖掉黑区。
+    in property <bool> repaint-nudge: false;
 
     // —— D47/D48 选区、菜单与弹窗状态（全部壳层驱动，视图无业务）——
     in property <int> selection-bar: 0; // UiEnums.bar-*
@@ -353,6 +357,18 @@ export component AppWindow inherits Window {
         // 钳制窗口可拖尺寸；这里几何由 FocusScope 决定，100% 是安全的。）
         width: 100%;
         height: 100%;
+
+        // 全量重绘哨兵：垫在所有内容之下，透明无 TouchArea（不参与布局、
+        // 不挡输入）。repaint-nudge 翻转带动 opacity 变化；Opacity 类项在
+        // 脏区计算里命中「变化即刷新整棵子树」分支（partial_renderer.rs
+        // must_refresh_children），故其自身几何 = 全窗 ⇒ 一帧全量重绘。
+        // 两档透明度差 0.1%，肉眼不可感知。
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            opacity: root.repaint-nudge ? 1.0 : 0.999;
+        }
 
         VerticalLayout {
             // 顶部工具栏：标题/总数 + 检索器 + 设置入口。
