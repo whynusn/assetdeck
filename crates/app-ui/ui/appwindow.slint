@@ -284,9 +284,13 @@ export component AppWindow inherits Window {
     // 仅在检测到 exe 旁遗留库（或未收账的迁移备份）时出现于设置面板；
     // detail 是检测文案（文件数/体量），busy 期间按钮禁用（与导入互斥）。
     in property <bool> migrate-legacy-available: false;
+    // D64 已完成态：旧库已全部收账时迁移区不隐身——展示留档位置供找回。
+    in property <bool> migrate-legacy-done: false;
+    in property <string> migrate-legacy-backup-path: "";
     in property <string> migrate-legacy-detail: "";
     in property <bool> migrate-legacy-busy: false;
     callback migrate-legacy-requested();
+    callback open-migration-backup-requested();
 
     // —— D56 更新检查 ——
     // app-version 是壳层注入的当前版本（"v0.1.0"）；status-text 是设置面板
@@ -1617,15 +1621,16 @@ export component AppWindow inherits Window {
                             clicked => { root.open-logs-requested(); }
                         }
 
-                        // D61 旧版库一键迁移：仅检测到 exe 旁遗留库时出现。
-                        // 文案与「关于」区同款克制风格，按钮态跟着 busy 走。
+                        // D61/D64 旧版库迁移：三态——可迁移（按钮）/ 已收账
+                        // （留档可见 + 打开留档目录，回应「找不到原本数据源」）/
+                        // 隐藏。文案与「关于」区同款克制风格，按钮态跟着 busy 走。
                         // if 必须包在 VerticalLayout **内部**（同上方设置行）：
                         // if 直接做布局子项时首选高度不传播，详情折行后
                         // 「关于」标题会贴上来（渲染实测）。
                         VerticalLayout {
                             spacing: 5px;
 
-                            if root.migrate-legacy-available: SectionLabel {
+                            if root.migrate-legacy-available || root.migrate-legacy-done: SectionLabel {
                                 height: 14px;
                                 text: "数据迁移";
                             }
@@ -1637,7 +1642,14 @@ export component AppWindow inherits Window {
                                 clicked => { root.migrate-legacy-requested(); }
                             }
 
-                            if root.migrate-legacy-available: Text {
+                            if root.migrate-legacy-done: FlatButton {
+                                text: "打开旧库留档目录";
+                                glyph: Glyph.folder-search;
+                                tip: "旧素材已并入统一素材库，原目录改名留档在这里；确认无误后可手动删除";
+                                clicked => { root.open-migration-backup-requested(); }
+                            }
+
+                            if root.migrate-legacy-available || root.migrate-legacy-done: Text {
                                 text: root.migrate-legacy-detail;
                                 color: Theme.text-3;
                                 font-size: 10px;

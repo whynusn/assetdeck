@@ -9,7 +9,8 @@
 //!   文件本体才是真相源；重放导入顺带重建缩略图与 FTS，不继承旧索引的任何账。
 //! - **改名先于导入**：改名本身就是防重标记，不存在「导入成功、改名失败 →
 //!   再点全量重复」窗口；导入失败把改名回滚，素材原位无损。
-//! - 分类/标签不迁移：v0.1.0 无用户分类语义（全部待分类），重放后统一进待分类。
+//! - 分类随迁（D61 补全）：读旧库 `meta.db` 的 uuid→category（只读，不改写
+//!   用户旧库），经清单 `category:` 指令由导入管线原样落库；读不到落待分类。
 //!
 //! 本模块全是纯文件系统函数（零解码零 SQL），UI 进程调用安全；重活（解码/拷贝/
 //! pHash/落库）全在 sample-library 子进程——进程模型红线不破。
@@ -75,6 +76,73 @@ fn is_migratable(dir: &Path, current_root: &Path) -> bool {
         walk_objects(&dir.join("objects"), &mut |_path, _len| false),
         Ok(false)
     )
+}
+
+/// 安装器的默认安装目录（与 installer/src/main.rs 的 `install_dir()` 同源约定，
+/// 两处常量手工同步——安装目录可被 `--install-dir` 改写，这里只作检测候选之一）。
+/// 便携 zip 换目录装、换路径重装时旧库不在新 exe 旁，靠这个候选兜住。
+pub fn default_legacy_install_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join("Programs").join("素材管理器"))
+}
+
+fn canonical_or_self(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// 跨候选目录检测（D64）：`detect_legacy_library` 只看单个 exe 目录——便携包
+/// 解压到新目录、或安装路径变过时，旧库不在新 exe 旁，迁移入口静默消失
+/// （用户实测「一开始就没有迁移按钮」）。顺序即优先级，canonical 去重。
+pub fn detect_legacy_library_multi(
+    exe_dirs: &[PathBuf],
+    current_root: &Path,
+) -> Option<LegacyLibrary> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for dir in exe_dirs {
+        let canonical = canonical_or_self(dir);
+        if seen.contains(&canonical) {
+            continue;
+        }
+        seen.push(canonical);
+        if let Some(found) = detect_legacy_library(dir, current_root) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// 已收账备份查找（D64 已完成态可见性）：跨候选目录找**最新的**带 done 标记
+/// 备份，供 UI 展示「旧数据去哪了 / 留档在哪」。「最新」按备份名时间戳后缀
+/// 比较（字典序即时间序）——跨目录不能比全路径（目录段会先于时间戳参与排序）。
+pub fn find_completed_backup(exe_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let mut latest: Option<(String, PathBuf)> = None;
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for dir in exe_dirs {
+        let canonical = canonical_or_self(dir);
+        if seen.contains(&canonical) {
+            continue;
+        }
+        seen.push(canonical);
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.starts_with(BACKUP_PREFIX)
+                && path.is_dir()
+                && path.join(MIGRATION_MARKER).exists()
+                && latest.as_ref().is_none_or(|(lname, _)| name > *lname)
+            {
+                latest = Some((name, path));
+            }
+        }
+    }
+    latest.map(|(_, path)| path)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -458,5 +526,74 @@ mod tests {
         assert_eq!(count, 2, "旁车不进清单");
         let text = fs::read_to_string(&list).unwrap();
         assert!(!text.contains("paste.png"), "清单不得包含旁车: {text}");
+    }
+
+    /// 跨候选目录检测（D64）：exe 旁没有旧库时回落默认安装目录；exe 旁有则
+    /// 优先 exe 旁；同目录重复传入不重复检测。
+    #[test]
+    fn detect_multi_falls_back_to_default_install_dir() {
+        let base = temp_dir("multi");
+        let exe_dir = base.join("exe");
+        let old_install = base.join("Programs").join("素材管理器");
+        let unified = base.join("unified");
+        fs::create_dir_all(&unified).unwrap();
+
+        // 两处都没有 → None。
+        assert!(
+            detect_legacy_library_multi(&[exe_dir.clone(), old_install.clone()], &unified)
+                .is_none()
+        );
+
+        // 只有默认安装目录有旧库 → 回落命中。
+        make_legacy_library(
+            &old_install.join("library"),
+            &[("99999999-9999/raw.png", b"old-install-data")],
+        );
+        let detected =
+            detect_legacy_library_multi(&[exe_dir.clone(), old_install.clone()], &unified)
+                .expect("应回落默认安装目录");
+        assert_eq!(detected.source, old_install.join("library"));
+        assert!(!detected.is_backup);
+
+        // exe 旁也有 → exe 旁优先。
+        make_legacy_library(
+            &exe_dir.join("library"),
+            &[("88888888-8888/raw.png", b"exe-side-data")],
+        );
+        let detected =
+            detect_legacy_library_multi(&[exe_dir.clone(), old_install.clone()], &unified)
+                .expect("exe 旁优先");
+        assert_eq!(detected.source, exe_dir.join("library"));
+    }
+
+    /// 已收账备份查找（D64 已完成态）：只认带 done 标记的备份，跨目录取字典序
+    /// 最新；未收账备份（重试场景）不进已完成态。
+    #[test]
+    fn find_completed_backup_only_returns_marked() {
+        let base = temp_dir("done");
+        let exe_dir = base.join("exe");
+        let old_install = base.join("Programs").join("素材管理器");
+        let unified = base.join("unified");
+        fs::create_dir_all(&unified).unwrap();
+
+        // 未收账备份：不算已完成。
+        let unmarked = exe_dir.join(format!("{BACKUP_PREFIX}100"));
+        make_legacy_library(&unmarked, &[("a/raw.png", b"a")]);
+        assert!(find_completed_backup(std::slice::from_ref(&exe_dir)).is_none());
+
+        // exe 旁收账一份，默认安装目录再收账一份（字典序更大）→ 取后者。
+        let done_a = exe_dir.join(format!("{BACKUP_PREFIX}200"));
+        make_legacy_library(&done_a, &[("b/raw.png", b"b")]);
+        mark_migrated(&done_a).unwrap();
+        assert_eq!(find_completed_backup(std::slice::from_ref(&exe_dir)), Some(done_a));
+
+        let done_b = old_install.join(format!("{BACKUP_PREFIX}300"));
+        make_legacy_library(&done_b, &[("c/raw.png", b"c")]);
+        mark_migrated(&done_b).unwrap();
+        assert_eq!(
+            find_completed_backup(&[exe_dir, old_install]),
+            Some(done_b),
+            "跨目录取字典序最新"
+        );
     }
 }

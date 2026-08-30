@@ -11,7 +11,7 @@ mod ui_enums;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use platform::UrlOpener;
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
@@ -2651,14 +2651,23 @@ fn main() {
             let root = library_root
                 .clone()
                 .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
-            let Some(exe_dir) = std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-            else {
-                return;
-            };
-            let Some(legacy) = ui_viewmodels::legacy_migration::detect_legacy_library(
-                &exe_dir,
+            // 候选目录与 refresh_migration_entry 同一份（D64）：exe 旁 + 安装器
+            // 默认安装目录。
+            let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    candidate_dirs.push(parent.to_path_buf());
+                }
+            }
+            if let Some(default_install) =
+                ui_viewmodels::legacy_migration::default_legacy_install_dir()
+            {
+                if !candidate_dirs.contains(&default_install) {
+                    candidate_dirs.push(default_install);
+                }
+            }
+            let Some(legacy) = ui_viewmodels::legacy_migration::detect_legacy_library_multi(
+                &candidate_dirs,
                 std::path::Path::new(&root),
             ) else {
                 ui.set_migrate_legacy_available(false);
@@ -2674,8 +2683,20 @@ fn main() {
             // 改名，旧目录原位无损。
             let renamed = !legacy.is_backup;
             let original = legacy.source.clone();
+            // 备份建在旧库自己所在目录（可能与 exe 旁不同——D64 跨目录候选）。
+            let detected_dir = original
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| {
+                    std::env::current_exe()
+                        .expect("取当前 exe 失败")
+                        .parent()
+                        .expect("exe 必有父目录")
+                        .to_path_buf()
+                });
             let backup = if renamed {
-                match ui_viewmodels::legacy_migration::rename_to_backup(&original, &exe_dir) {
+                match ui_viewmodels::legacy_migration::rename_to_backup(&original, &detected_dir)
+                {
                     Ok(backup) => backup,
                     Err(error) => {
                         show_notice(
@@ -2795,6 +2816,28 @@ fn main() {
                 settings.borrow().fast_import_mode,
                 Some(post),
             );
+        });
+    }
+
+    // D64 已完成态：打开迁移留档目录（资源管理器直接定位）。路径来自检测
+    // 时的属性，实际存在性在这里再兜一次底。
+    {
+        let ui = app.as_weak();
+        app.on_open_migration_backup_requested(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let backup = ui.get_migrate_legacy_backup_path().to_string();
+            if backup.is_empty() || !std::path::Path::new(&backup).is_dir() {
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "留档目录不存在（可能已被清理）".to_string(),
+                );
+                return;
+            }
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(&backup)
+                .spawn();
+            logging::info!("打开迁移留档目录 {backup}");
         });
     }
 
@@ -3412,34 +3455,82 @@ fn main() {
     }
 }
 
-/// D61：启动与设置面板展开时检测 exe 旁遗留库，回填设置面板迁移入口的
-/// 可见性与文案。检测是纯目录扫描（零解码零 SQL，见 ui-viewmodels::
-/// legacy_migration），UI 线程调用安全。
+/// D61/D64：启动与设置面板展开时检测遗留库，回填设置面板迁移入口。
+/// 检测候选 = 当前 exe 旁 + 安装器默认安装目录（便携 zip 换目录装、换路径
+/// 重装时旧库不在新 exe 旁——用户实测「一开始就没有迁移按钮」的根因）。
+/// 三态：可迁移（按钮）/ 已收账（留档可见 + 打开留档目录）/ 无事（隐藏）。
+/// 每次检测结果都落 Info 日志——「按钮为什么没出现」从此有现场可查。
+/// 检测是纯目录扫描（零解码零 SQL，见 ui-viewmodels::legacy_migration），
+/// UI 线程调用安全。
 fn refresh_migration_entry(ui: &AppWindow, library_root: Option<&str>) {
     let root = library_root
         .map(std::path::PathBuf::from)
         .unwrap_or_else(default_library_root);
-    let detected = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-        .and_then(|exe_dir| {
-            ui_viewmodels::legacy_migration::detect_legacy_library(&exe_dir, &root)
-        });
+    let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidate_dirs.push(parent.to_path_buf());
+        }
+    }
+    if let Some(default_install) = ui_viewmodels::legacy_migration::default_legacy_install_dir() {
+        if !candidate_dirs.contains(&default_install) {
+            candidate_dirs.push(default_install);
+        }
+    }
+    let detected =
+        ui_viewmodels::legacy_migration::detect_legacy_library_multi(&candidate_dirs, &root);
     match detected {
         Some(legacy) => {
+            let away_from_exe = std::env::current_exe().ok().is_some_and(|exe| {
+                exe.parent()
+                    .map(|parent| parent != legacy.source.parent().unwrap_or(parent))
+                    .unwrap_or(false)
+            });
             ui.set_migrate_legacy_available(true);
+            ui.set_migrate_legacy_done(false);
             ui.set_migrate_legacy_detail(
                 format!(
-                    "检测到旧版素材库：{} 个文件（{:.1} MB）。迁移自动去重合并，旧目录改名留档。",
+                    "检测到旧版素材库{}：{} 个文件（{:.1} MB）。迁移自动去重合并，旧目录改名留档。",
+                    if away_from_exe {
+                        format!(
+                            "（位于 {}）",
+                            legacy.source.parent().unwrap_or(&legacy.source).display()
+                        )
+                    } else {
+                        String::new()
+                    },
                     legacy.file_count,
                     legacy.total_bytes as f64 / (1024.0 * 1024.0)
                 )
                 .into(),
             );
+            logging::info!(
+                "迁移检测：发现可迁移候选 {}（{} 个文件）",
+                legacy.source.display(),
+                legacy.file_count
+            );
         }
         None => {
             ui.set_migrate_legacy_available(false);
-            ui.set_migrate_legacy_detail("".into());
+            match ui_viewmodels::legacy_migration::find_completed_backup(&candidate_dirs) {
+                Some(backup) => {
+                    ui.set_migrate_legacy_done(true);
+                    ui.set_migrate_legacy_backup_path(backup.to_string_lossy().into_owned().into());
+                    ui.set_migrate_legacy_detail(
+                        format!(
+                            "旧素材已并入统一库。留档目录：{}（确认无误后可手动删除）。",
+                            backup.display()
+                        )
+                        .into(),
+                    );
+                    logging::info!("迁移检测：全部已收账，留档于 {}", backup.display());
+                }
+                None => {
+                    ui.set_migrate_legacy_done(false);
+                    ui.set_migrate_legacy_detail("".into());
+                    logging::info!("迁移检测：候选目录 {} 个，均无遗留库", candidate_dirs.len());
+                }
+            }
         }
     }
 }
@@ -3525,8 +3616,38 @@ fn spawn_import_pipeline(
             .with_env("DSH_LOG_LEVEL", log_level_arg);
     }
     // worker stdout 的非协议行（imported/duplicate/failed/done/timing）落日志：
-    // duplicate/failed 是「素材为什么没出现」的唯一现场记录。
-    phase1_task = phase1_task.with_line(move |line| logging::info!("sample-library: {line}"));
+    // duplicate/failed 是「素材为什么没出现」的唯一现场记录。done 行的统计
+    // 另存一份，完成通知带「新增/重复/失败」摘要（D64）——「导入完成」配
+    // 0 新增是用户读成失败的重灾区（2026-08-30 两起：全失败与全重复）。
+    let done_stats: Arc<Mutex<Option<(u32, u32, u32)>>> = Arc::new(Mutex::new(None));
+    let done_stats_line = Arc::clone(&done_stats);
+    phase1_task = phase1_task.with_line(move |line| {
+        if let Some(rest) = line.strip_prefix("done:") {
+            let mut parsed = None;
+            for field in rest.split_whitespace() {
+                if let Some(v) = field
+                    .strip_prefix("imported=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    parsed.get_or_insert((0, 0, 0)).0 = v;
+                } else if let Some(v) = field
+                    .strip_prefix("skipped=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    parsed.get_or_insert((0, 0, 0)).1 = v;
+                } else if let Some(v) = field
+                    .strip_prefix("failed=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    parsed.get_or_insert((0, 0, 0)).2 = v;
+                }
+            }
+            if let Some(stats) = parsed {
+                *done_stats_line.lock().unwrap() = Some(stats);
+            }
+        }
+        logging::info!("sample-library: {line}");
+    });
     let _ = phase1_task
         .with_progress(move |done, total| {
             let weak = weak_progress.clone();
@@ -3540,7 +3661,15 @@ fn spawn_import_pipeline(
             let weak = weak_notice.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    show_notice(&ui, TargetNoticeTone::Warning, text);
+                    // 子进程 NOTICE 自带色调前缀（D64）：警示=常驻黄条（素材
+                    // 失败），提示=绿条自动消隐（重复素材已在库中——它不是
+                    // 失败，黄条曾被用户读成「导入失败」）。未知前缀按警示兜底。
+                    let tone = if text.starts_with("提示：") {
+                        TargetNoticeTone::Success
+                    } else {
+                        TargetNoticeTone::Warning
+                    };
+                    show_notice(&ui, tone, text);
                 }
             });
         })
@@ -3553,6 +3682,7 @@ fn spawn_import_pipeline(
             let importing_phase1 = Arc::clone(&importing_phase1);
             let importing_phase2 = Arc::clone(&importing_phase2);
             let post_hook = post_phase1.clone();
+            let done_stats_finished = Arc::clone(&done_stats);
             let _ = slint::invoke_from_event_loop(move || {
                 // D61 迁移收尾钩子先跑：改名回滚/完成标记要发生在用户看到
                 // 「导入失败/完成」回显之前。
@@ -3562,16 +3692,32 @@ fn spawn_import_pipeline(
                 if let Some(ui) = weak_invoke.upgrade() {
                     if !success {
                         importing_phase1.store(false, Ordering::SeqCst);
-                        let msg = if message.trim().is_empty() {
+                        // 去掉子进程 eprintln 的「sample-library failed: 」前缀——
+                        // UI 只说人话，工具名留给日志。
+                        let trimmed = message
+                            .trim()
+                            .strip_prefix("sample-library failed: ")
+                            .unwrap_or(message.trim());
+                        let msg = if trimmed.is_empty() {
                             "导入失败".to_string()
                         } else {
-                            format!("导入失败：{}", message.trim())
+                            format!("导入失败：{trimmed}")
                         };
                         ui.invoke_import_finished(false, msg.into());
                         return;
                     }
-                    // 导入完成，先让 UI 刷新出素材列表。
-                    ui.invoke_import_finished(true, "导入完成，正在后台生成缩略图...".into());
+                    // 导入完成：带「新增/重复/失败」摘要（D64）。全重复时明说
+                    // 「未新增」——裸的「导入完成」配 0 新增会被读成失败。
+                    let summary = match *done_stats_finished.lock().unwrap() {
+                        Some((imported, skipped, failed)) if imported == 0 && failed == 0 => {
+                            format!("导入完成：{skipped} 个素材已在库中，未新增")
+                        }
+                        Some((imported, skipped, failed)) => {
+                            format!("导入完成：新增 {imported} · 重复 {skipped} · 失败 {failed}")
+                        }
+                        None => "导入完成，正在后台生成缩略图...".to_string(),
+                    };
+                    ui.invoke_import_finished(true, summary.into());
                 }
             });
 

@@ -292,14 +292,16 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
     );
     if failed_total > 0 || !failures.is_empty() {
         // NOTICE 行：UI 侧 task_runner 解析后弹提示，失败不再「默默吞掉」。
+        // 前缀「警示：/提示：」供壳层选通知色调（警示=常驻黄条，提示=可自动
+        // 消隐的绿条）——重复素材曾是黄条，被用户读成「导入失败」（2026-08-30）。
         println!(
-            "NOTICE\t有 {failed_total} 个素材导入失败：{}",
+            "NOTICE\t警示：有 {failed_total} 个素材导入失败：{}",
             summarize_failures(&failures)
         );
     }
     if skipped > 0 || !duplicates.is_empty() {
         println!(
-            "NOTICE\t有 {skipped} 个素材与库内已有素材重复，已跳过：{}",
+            "NOTICE\t提示：有 {skipped} 个素材已在库中（内容相同，未重复入库）：{}",
             summarize_failures(&duplicates)
         );
     }
