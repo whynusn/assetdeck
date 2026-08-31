@@ -69,6 +69,11 @@ pub const BAR_HIDDEN: i32 = 0;
 pub const BAR_MULTI: i32 = 1;
 pub const BAR_TRASH: i32 = 2;
 
+/// D65 导入结果行形态 → UiEnums.result-row-*（完全相同 / 相似 / 失败）。
+pub const IMPORT_RESULT_EXACT: i32 = 0;
+pub const IMPORT_RESULT_SIMILAR: i32 = 1;
+pub const IMPORT_RESULT_FAILED: i32 = 2;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +92,8 @@ mod tests {
         assert_eq!(card_kind(AssetKind::Video), 1);
         assert_eq!(card_kind(AssetKind::Text), 2);
         assert_eq!(card_kind(AssetKind::Other), 3);
+        assert_eq!(IMPORT_RESULT_EXACT, 0);
+        assert_eq!(IMPORT_RESULT_SIMILAR, 1);
+        assert_eq!(IMPORT_RESULT_FAILED, 2);
     }
 }

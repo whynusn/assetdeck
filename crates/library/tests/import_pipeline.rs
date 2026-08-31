@@ -9,7 +9,14 @@ use library::{
 
 fn make_png(dir: &Path, name: &str, gray: u8) -> PathBuf {
     let path = dir.join(name);
-    let img = image::GrayImage::from_fn(32, 32, |_x, _y| image::Luma([gray]));
+    // 结构化渐变而非纯色：近纯色图 pHash 不可信（D65 低信息守卫），
+    // 涉及 phash 断言的 fixture 必须有真实结构。
+    let img = image::GrayImage::from_fn(32, 32, |x, y| {
+        let v = gray
+            .saturating_add((x as u8).saturating_mul(3))
+            .saturating_add(y as u8 / 2);
+        image::Luma([v])
+    });
     DynamicImage::ImageLuma8(img)
         .save(&path)
         .expect("写测试 PNG 失败");
@@ -19,7 +26,13 @@ fn make_png(dir: &Path, name: &str, gray: u8) -> PathBuf {
 fn make_image(dir: &Path, name: &str, gray: u8) -> PathBuf {
     let path = dir.join(name);
     // RGB 而非 Luma8：GIF 编码器不接受灰度，webp/bmp 用 RGB 亦无碍。
-    let img = image::RgbImage::from_fn(32, 32, |_x, _y| image::Rgb([gray, gray, gray]));
+    // 结构化渐变：理由同 make_png（D65 低信息守卫）。
+    let img = image::RgbImage::from_fn(32, 32, |x, y| {
+        let v = gray
+            .saturating_add((x as u8).saturating_mul(3))
+            .saturating_add(y as u8 / 2);
+        image::Rgb([v, v, v])
+    });
     DynamicImage::ImageRgb8(img)
         .save(&path)
         .expect("写测试图片失败");
@@ -45,7 +58,7 @@ fn wait_for(lib: &Library, ticket: &ImportTicket, pred: impl Fn(&CopyState) -> b
 
 fn expect_ticket(outcome: EnqueueOutcome) -> ImportTicket {
     match outcome {
-        EnqueueOutcome::Ticket(t) => t,
+        EnqueueOutcome::Ticket { ticket, .. } => ticket,
         other => panic!("应受理导入，实际 {other:?}"),
     }
 }
@@ -77,7 +90,9 @@ fn import_copies_file_into_library_layout() {
 }
 
 #[test]
-fn duplicate_phash_rejected_no_second_copy() {
+fn duplicate_byte_identical_image_rejected_no_second_copy() {
+    // D65：图片重复判定收归 SHA-256 字节等值（pHash 不再判死）。同一文件
+    // 重导入 → Duplicate，objects 下只留一份。
     let dir = tempfile::tempdir().unwrap();
     let source = make_png(dir.path(), "same.png", 120);
     let lib_dir = dir.path().join("library");
@@ -154,7 +169,7 @@ fn copy_queue_respects_backpressure_cap() {
             tags: vec![],
         })
         .unwrap();
-    assert!(matches!(outcome, EnqueueOutcome::Ticket(_)));
+    assert!(matches!(outcome, EnqueueOutcome::Ticket { .. }));
 
     let src1 = make_png(dir.path(), "bp1.png", 61);
     let outcome = lib
@@ -216,7 +231,10 @@ fn misnamed_png_with_jpg_extension_imports_via_content_sniffing() {
     // 并让整批导入失败。现在按内容嗅探格式，应正常入库且带 phash。
     let dir = tempfile::tempdir().unwrap();
     let png_bytes = {
-        let img = image::GrayImage::from_fn(32, 32, |_x, _y| image::Luma([64]));
+        let img = image::GrayImage::from_fn(32, 32, |x, y| {
+            // 结构化渐变：近纯色图 pHash 不可信（D65），phash 断言需要真实结构。
+            image::Luma([(64 + x * 2 + y / 2).min(255) as u8])
+        });
         let mut buf = std::io::Cursor::new(Vec::new());
         DynamicImage::ImageLuma8(img)
             .write_to(&mut buf, image::ImageFormat::Png)

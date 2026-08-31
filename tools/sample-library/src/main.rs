@@ -163,6 +163,9 @@ const TICKET_TIMEOUT: Duration = Duration::from_secs(90);
 /// 失败清单内存上限：超过后只留条数，明细由「等 N 个」汇总兜底，
 /// 数万条打包里几十万个坏文件也不会撑爆聚合内存。
 const FAILURE_LIST_CAP: usize = 256;
+/// 导入结果明细行（RESULTITEM，D65）单类目上限：完成弹窗逐项点名到此为
+/// 止，超出部分以「等 N 项」收尾；真实计数始终在 done 行，不受上限影响。
+const RESULT_ITEM_CAP: usize = 150;
 /// 进度行粒度：1%（至少每件必报一次收尾）。
 fn progress_step(total: usize) -> usize {
     (total / 100).max(1)
@@ -172,9 +175,13 @@ fn progress_step(total: usize) -> usize {
 struct Summary {
     imported: AtomicUsize,
     skipped: AtomicUsize,
+    /// 相似命中计数（D65）：素材已照常入库，仅提醒「与库内已有素材高度
+    /// 相似」——裁决权在用户，这里只负责把提醒带出去。
+    similar: AtomicUsize,
     failed_total: AtomicUsize,
     failures: Mutex<Vec<String>>,
     duplicates: Mutex<Vec<String>>,
+    similars: Mutex<Vec<String>>,
     done: AtomicUsize,
     /// 进度行步长（1% 粒度），由 run_import 按总量算好注入。
     step: usize,
@@ -185,17 +192,53 @@ impl Summary {
         println!("failed {} : {reason}", source.display());
         self.failed_total.fetch_add(1, Ordering::Relaxed);
         let mut list = self.failures.lock().unwrap();
+        if list.len() < RESULT_ITEM_CAP {
+            println!("RESULTITEM\tfailed\t\t{}\t{reason}", source.display());
+        }
         if list.len() < FAILURE_LIST_CAP {
             list.push(format!("{}：{reason}", source.display()));
         }
     }
 
-    /// 去重命中同样要可点名：skipped 不是「无事发生」，汇总 NOTICE 据此
-    /// 弹提示，否则「导入完成」与「实际入库 0 条」对用户无法区分。
+    /// 字节级完全相同的重复（D65 唯一自动跳过形态）同样要可点名：skipped
+    /// 不是「无事发生」，完成弹窗与 NOTICE 据此点名，否则「导入完成」与
+    /// 「实际入库 0 条」对用户无法区分。
     fn record_duplicate(&self, source: &Path, existing: &str) {
+        self.skipped.fetch_add(1, Ordering::Relaxed);
         let mut list = self.duplicates.lock().unwrap();
+        if list.len() < RESULT_ITEM_CAP {
+            println!("RESULTITEM\texact\t\t{}\t{existing}", source.display());
+        }
         if list.len() < FAILURE_LIST_CAP {
-            list.push(format!("{} ≈ 已有素材「{}」", source.display(), existing));
+            list.push(format!(
+                "{} ≈ 已有素材「{}」（完全相同）",
+                source.display(),
+                existing
+            ));
+        }
+    }
+
+    /// 相似命中（D65）：已入库、带提醒。RESULTITEM 行把 (源, 已有, 距离)
+    /// 结构化交给壳层完成弹窗；stdout 的 similar 行留给日志回溯。
+    fn record_similar(&self, source: &Path, existing: &str, distance: u32) {
+        println!(
+            "similar {} ≈ {existing} (distance={distance})",
+            source.display()
+        );
+        self.similar.fetch_add(1, Ordering::Relaxed);
+        let mut list = self.similars.lock().unwrap();
+        if list.len() < RESULT_ITEM_CAP {
+            println!(
+                "RESULTITEM\tsimilar\t{distance}\t{}\t{existing}",
+                source.display()
+            );
+        }
+        if list.len() < FAILURE_LIST_CAP {
+            list.push(format!(
+                "{} ≈ 已有素材「{}」（感知距离 {distance}）",
+                source.display(),
+                existing
+            ));
         }
     }
 }
@@ -234,9 +277,11 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
     let summary = Arc::new(Summary {
         imported: AtomicUsize::new(0),
         skipped: AtomicUsize::new(0),
+        similar: AtomicUsize::new(0),
         failed_total: AtomicUsize::new(0),
         failures: Mutex::new(Vec::new()),
         duplicates: Mutex::new(Vec::new()),
+        similars: Mutex::new(Vec::new()),
         done: AtomicUsize::new(0),
         step,
     });
@@ -275,9 +320,11 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
 
     let imported = summary.imported.load(Ordering::Relaxed);
     let skipped = summary.skipped.load(Ordering::Relaxed);
+    let similar = summary.similar.load(Ordering::Relaxed);
     let failed_total = summary.failed_total.load(Ordering::Relaxed);
     let failures = summary.failures.lock().unwrap();
     let duplicates = summary.duplicates.lock().unwrap();
+    let similars = summary.similars.lock().unwrap();
 
     // 进度收尾必须打满：节流可能让最后一段停在 99%。
     println!("PROGRESS\t{total}\t{total}");
@@ -287,7 +334,7 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
         .all_assets_count()
         .map_err(|e| e.to_string())?;
     println!(
-        "done: imported={imported} skipped={skipped} failed={failed_total} total={count} root={}",
+        "done: imported={imported} skipped={skipped} similar={similar} failed={failed_total} total={count} root={}",
         out.display()
     );
     if failed_total > 0 || !failures.is_empty() {
@@ -301,8 +348,15 @@ fn run_import(assets: &[ImportedAsset], out: &Path, mode: CliMode) -> Result<(),
     }
     if skipped > 0 || !duplicates.is_empty() {
         println!(
-            "NOTICE\t提示：有 {skipped} 个素材已在库中（内容相同，未重复入库）：{}",
+            "NOTICE\t提示：有 {skipped} 个素材与库内已有素材完全相同（未重复入库）：{}",
             summarize_failures(&duplicates)
+        );
+    }
+    if similar > 0 || !similars.is_empty() {
+        // D65：相似命中已照常入库——绝不静默，也绝不丢弃，提醒用户复核。
+        println!(
+            "NOTICE\t提示：有 {similar} 个素材与库内已有素材高度相似（已照常导入，建议复核）：{}",
+            summarize_failures(&similars)
         );
     }
     // 全军覆没 = 批次失败，非零退出（诚实上报）：exit 0 会让壳层弹「导入完成」
@@ -328,7 +382,7 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
     };
     let outcome = library.enqueue(request);
     match outcome {
-        Ok(EnqueueOutcome::Ticket(ticket)) => {
+        Ok(EnqueueOutcome::Ticket { ticket, similarity }) => {
             match library.wait_terminal(&ticket, TICKET_TIMEOUT) {
                 Some(CopyState::Done) => match library.store().get_asset(&ticket.uuid) {
                     Ok(Some(meta)) => {
@@ -339,6 +393,17 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
                             meta.size_bytes
                         );
                         summary.imported.fetch_add(1, Ordering::Relaxed);
+                        // D65 相似提醒：素材已入库，把「像谁、多像」带出结果。
+                        if let Some(hit) = similarity {
+                            let existing = library
+                                .store()
+                                .get_asset(&hit.existing_uuid)
+                                .ok()
+                                .flatten()
+                                .map(|meta| meta.file_name)
+                                .unwrap_or_else(|| hit.existing_uuid.clone());
+                            summary.record_similar(&asset.source, &existing, hit.distance);
+                        }
                     }
                     Ok(None) => {
                         summary.record_failure(&asset.source, "拷贝完成后元数据缺失");
@@ -367,7 +432,6 @@ fn import_one(library: &Library, summary: &Summary, asset: &ImportedAsset) {
                 .unwrap_or_else(|| existing_uuid.clone());
             println!("duplicate {existing_uuid} <= {}", asset.source.display());
             summary.record_duplicate(&asset.source, &existing);
-            summary.skipped.fetch_add(1, Ordering::Relaxed);
         }
         Ok(EnqueueOutcome::Unsupported { reason }) => {
             summary.record_failure(&asset.source, &reason);

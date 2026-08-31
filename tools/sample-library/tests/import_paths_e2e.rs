@@ -27,8 +27,8 @@ fn temp_root(tag: &str) -> PathBuf {
 }
 
 fn write_png(path: &Path, gray: u8) {
-    // pHash 对平坦图全部同值（DCT 低频符号与亮度均值无关）：纯色 fixture
-    // 会随机触发导入去重（Duplicate 与并发调度顺序相关）。x/y 梯度给足结构。
+    // x/y 梯度给足结构：pHash 低信息守卫（D65）下近纯色图不出可信 hash，
+    // 涉及相似判定的 fixture 必须有真实内容。
     let img = image::RgbImage::from_fn(64, 64, |x, y| {
         image::Rgb([
             (x * 3) as u8,
@@ -36,6 +36,27 @@ fn write_png(path: &Path, gray: u8) {
             gray.wrapping_add((x * y) as u8),
         ])
     });
+    DynamicImage::ImageRgb8(img)
+        .save(path)
+        .expect("写测试图失败");
+}
+
+/// 近重复对：同一梯度图案整体平移亮度 shift 级（phash 单测实测距离 ≤10）。
+fn write_png_shifted(path: &Path, gray: u8, shift: u8) {
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([
+            ((x * 3) as u8).saturating_add(shift),
+            ((y * 3) as u8).saturating_add(shift),
+            gray.wrapping_add((x * y) as u8).saturating_add(shift),
+        ])
+    });
+    DynamicImage::ImageRgb8(img)
+        .save(path)
+        .expect("写测试图失败");
+}
+
+fn write_solid_png(path: &Path, rgb: [u8; 3]) {
+    let img = image::RgbImage::from_fn(64, 64, |_x, _y| image::Rgb(rgb));
     DynamicImage::ImageRgb8(img)
         .save(path)
         .expect("写测试图失败");
@@ -94,6 +115,13 @@ fn categories(lib: &Path) -> Vec<String> {
     };
     cats.sort();
     cats
+}
+
+/// 库内资产行数（含回收站行——这些用例关心的是「文件有没有进库」）。
+fn asset_rows(lib: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(lib.join("meta.db")).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+        .unwrap()
 }
 
 #[test]
@@ -277,4 +305,102 @@ fn all_failed_batch_exits_nonzero() {
         "全失败批次不得产生任何入库行"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// D65 导入去重重构的进程边界回归：判死权收归 SHA-256 字节等值；pHash 降级
+// 为相似提醒（照常入库）；近纯色图不得凭噪声 hash 互判。协议：done 行统计
+// + RESULTITEM 明细行 + NOTICE 点名。
+// 注：同批并发导入存在「首份登记会话前第二份已查重」的窗口（D61 诚实边界），
+// 涉及判定确定性的用例一律两次独立子进程运行。
+// ---------------------------------------------------------------------------
+
+/// 字节相同的重复 = 唯一自动跳过形态，且必须点名（RESULTITEM + NOTICE）。
+#[test]
+fn byte_identical_duplicate_skips_and_names_item() {
+    let root = temp_root("exact_dup_e2e");
+    write_png(&root.join("a.png"), 90);
+    let lib = root.join("library");
+    let line = format!("f\tauto\t{}\n", root.join("a.png").display());
+    run_import_cli(&line, &lib);
+
+    let stdout = run_import_cli(&line, &lib);
+    assert!(
+        stdout.contains("done: imported=0 skipped=1 similar=0"),
+        "跨批次字节相同应判精确重复且无相似提醒，stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("RESULTITEM\texact"),
+        "重复跳过必须逐项点名，stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("完全相同"),
+        "NOTICE 应说明是完全相同（而非模糊相似），stdout={stdout}"
+    );
+    assert_eq!(asset_rows(&lib), 1, "重复入库不得产生第二行");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 近重复（pHash 距离 ≤12）照常入库 + 相似提醒——绝不静默丢弃（D60 的
+/// 「同窗口连拍 5 连丢」回归）。
+#[test]
+fn near_duplicate_imports_with_similarity_notice() {
+    let root = temp_root("near_dup_e2e");
+    write_png(&root.join("a.png"), 100);
+    write_png_shifted(&root.join("b.png"), 100, 8);
+    let lib = root.join("library");
+
+    run_import_cli(
+        &format!("f\tauto\t{}\n", root.join("a.png").display()),
+        &lib,
+    );
+    let stdout = run_import_cli(
+        &format!("f\tauto\t{}\n", root.join("b.png").display()),
+        &lib,
+    );
+
+    assert!(
+        stdout.contains("done: imported=1 skipped=0 similar=1"),
+        "近重复应照常入库并带相似计数，stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("RESULTITEM\tsimilar"),
+        "相似命中必须逐项点名，stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("高度相似"),
+        "NOTICE 应提示相似已导入待复核，stdout={stdout}"
+    );
+    assert_eq!(asset_rows(&lib), 2, "两张图都必须在库里");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// 低信息守卫进程级回归（历史缺陷：两张颜色不同的纯色图凭噪声 hash 互判
+/// 重复，第二张静默消失）：现在都入库、零跳过、零相似提醒。
+#[test]
+fn distinct_flat_images_both_import_without_flags() {
+    let root = temp_root("flat_pair_e2e");
+    write_solid_png(&root.join("red.png"), [220, 40, 40]);
+    write_solid_png(&root.join("blue.png"), [40, 60, 220]);
+    let lib = root.join("library");
+
+    let stdout = run_import_cli(
+        &format!(
+            "f\tauto\t{}\nf\tauto\t{}\n",
+            root.join("red.png").display(),
+            root.join("blue.png").display()
+        ),
+        &lib,
+    );
+
+    assert!(
+        stdout.contains("done: imported=2 skipped=0 similar=0"),
+        "两张不同的纯色图都应入库且互不判重，stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("RESULTITEM"),
+        "无重复无相似无失败时不得产生结果明细行，stdout={stdout}"
+    );
+    assert_eq!(asset_rows(&lib), 2, "红蓝两张图都必须在库里");
+    std::fs::remove_dir_all(&root).unwrap();
 }

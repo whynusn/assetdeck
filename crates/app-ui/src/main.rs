@@ -1660,6 +1660,27 @@ fn main() {
             flow.confirm(remember);
         });
     }
+    // D65 导入结果弹窗：两段式出场（同 classify——先收 shown 播反向过渡，
+    // 播完再收 open 卸载）。
+    {
+        let ui = app.as_weak();
+        app.on_import_result_closed(move || {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            let animated = ui.get_animations_enabled();
+            ui.set_import_result_shown(false);
+            let weak = ui.as_weak();
+            Timer::single_shot(
+                std::time::Duration::from_millis(if animated { 170 } else { 0 }),
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_import_result_open(false);
+                    }
+                },
+            );
+        });
+    }
 
     // probe 结果回调（子进程线程经 Weak<AppWindow> 转接的落点）。
     {
@@ -3584,6 +3605,9 @@ fn spawn_import_pipeline(
     ui_ready.set_progress_visible(true);
     ui_ready.set_progress_percent(0.0);
     ui_ready.set_progress_text("正在准备导入...".into());
+    // 新导入开始时收起上一次的结果弹窗，避免两层弹窗叠放。
+    ui_ready.set_import_result_open(false);
+    ui_ready.set_import_result_shown(false);
     show_notice(
         &ui_ready,
         TargetNoticeTone::Success,
@@ -3615,35 +3639,71 @@ fn spawn_import_pipeline(
             .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
             .with_env("DSH_LOG_LEVEL", log_level_arg);
     }
-    // worker stdout 的非协议行（imported/duplicate/failed/done/timing）落日志：
-    // duplicate/failed 是「素材为什么没出现」的唯一现场记录。done 行的统计
-    // 另存一份，完成通知带「新增/重复/失败」摘要（D64）——「导入完成」配
-    // 0 新增是用户读成失败的重灾区（2026-08-30 两起：全失败与全重复）。
-    let done_stats: Arc<Mutex<Option<(u32, u32, u32)>>> = Arc::new(Mutex::new(None));
+    // worker stdout 的非协议行（imported/duplicate/similar/failed/done/timing）
+    // 落日志：duplicate/failed/similar 是「素材为什么没出现/为什么被提醒」的
+    // 唯一现场记录。done 行的统计另存一份，完成通知带「新增/重复/相似/失败」
+    // 摘要（D64/D65）——「导入完成」配 0 新增是用户读成失败的重灾区
+    // （2026-08-30 两起：全失败与全重复）。RESULTITEM 明细行（D65）另收一份，
+    // 完成时喂导入结果弹窗逐项点名。
+    #[derive(Debug, Clone, Copy, Default)]
+    struct DoneStats {
+        imported: u32,
+        skipped: u32,
+        similar: u32,
+        failed: u32,
+    }
+    let done_stats: Arc<Mutex<Option<DoneStats>>> = Arc::new(Mutex::new(None));
     let done_stats_line = Arc::clone(&done_stats);
+    /// RESULTITEM 明细行（kind, source, existing, distance）：
+    /// kind = ui_enums::IMPORT_RESULT_*（D65）。
+    type ResultItems = Vec<(i32, String, String, i32)>;
+    let result_items: Arc<Mutex<ResultItems>> = Arc::new(Mutex::new(Vec::new()));
+    let result_items_line = Arc::clone(&result_items);
     phase1_task = phase1_task.with_line(move |line| {
         if let Some(rest) = line.strip_prefix("done:") {
-            let mut parsed = None;
+            let mut stats = DoneStats::default();
             for field in rest.split_whitespace() {
                 if let Some(v) = field
                     .strip_prefix("imported=")
                     .and_then(|v| v.parse::<u32>().ok())
                 {
-                    parsed.get_or_insert((0, 0, 0)).0 = v;
+                    stats.imported = v;
                 } else if let Some(v) = field
                     .strip_prefix("skipped=")
                     .and_then(|v| v.parse::<u32>().ok())
                 {
-                    parsed.get_or_insert((0, 0, 0)).1 = v;
+                    stats.skipped = v;
+                } else if let Some(v) = field
+                    .strip_prefix("similar=")
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    stats.similar = v;
                 } else if let Some(v) = field
                     .strip_prefix("failed=")
                     .and_then(|v| v.parse::<u32>().ok())
                 {
-                    parsed.get_or_insert((0, 0, 0)).2 = v;
+                    stats.failed = v;
                 }
             }
-            if let Some(stats) = parsed {
-                *done_stats_line.lock().unwrap() = Some(stats);
+            *done_stats_line.lock().unwrap() = Some(stats);
+        } else if let Some(rest) = line.strip_prefix("RESULTITEM\t") {
+            // D65 明细行：kind\textra\tsource\texisting。existing 取行内剩余
+            // 全部（失败原因即便含制表符也不丢内容）；source 为空 = 上游坏行。
+            let mut fields = rest.splitn(4, '\t');
+            let kind = match fields.next().unwrap_or_default() {
+                "similar" => ui_enums::IMPORT_RESULT_SIMILAR,
+                "failed" => ui_enums::IMPORT_RESULT_FAILED,
+                _ => ui_enums::IMPORT_RESULT_EXACT,
+            };
+            let distance = fields
+                .next()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0);
+            let source = fields.next().unwrap_or_default().to_string();
+            let existing = fields.next().unwrap_or_default().to_string();
+            let mut list = result_items_line.lock().unwrap();
+            if !source.is_empty() && list.len() < 480 {
+                list.push((kind, source, existing, distance));
             }
         }
         logging::info!("sample-library: {line}");
@@ -3683,6 +3743,7 @@ fn spawn_import_pipeline(
             let importing_phase2 = Arc::clone(&importing_phase2);
             let post_hook = post_phase1.clone();
             let done_stats_finished = Arc::clone(&done_stats);
+            let result_items_finished = Arc::clone(&result_items);
             let _ = slint::invoke_from_event_loop(move || {
                 // D61 迁移收尾钩子先跑：改名回滚/完成标记要发生在用户看到
                 // 「导入失败/完成」回显之前。
@@ -3706,17 +3767,62 @@ fn spawn_import_pipeline(
                         ui.invoke_import_finished(false, msg.into());
                         return;
                     }
-                    // 导入完成：带「新增/重复/失败」摘要（D64）。全重复时明说
-                    // 「未新增」——裸的「导入完成」配 0 新增会被读成失败。
-                    let summary = match *done_stats_finished.lock().unwrap() {
-                        Some((imported, skipped, failed)) if imported == 0 && failed == 0 => {
-                            format!("导入完成：{skipped} 个素材已在库中，未新增")
+                    // 导入完成：带「新增/重复/相似/失败」摘要（D64/D65）。全重复
+                    // 时明说「未新增」——裸的「导入完成」配 0 新增会被读成失败；
+                    // 摘要段只拼非零项，0 值不占行。
+                    let stats = *done_stats_finished.lock().unwrap();
+                    let summary = match stats {
+                        Some(s) if s.imported == 0 && s.failed == 0 => {
+                            if s.similar > 0 {
+                                format!(
+                                    "导入完成：{} 个素材已在库中 · 相似素材 {} 个已导入，见明细",
+                                    s.skipped, s.similar
+                                )
+                            } else {
+                                format!("导入完成：{} 个素材已在库中，未新增", s.skipped)
+                            }
                         }
-                        Some((imported, skipped, failed)) => {
-                            format!("导入完成：新增 {imported} · 重复 {skipped} · 失败 {failed}")
+                        Some(s) => {
+                            let mut parts = vec![format!("新增 {}", s.imported)];
+                            if s.skipped > 0 {
+                                parts.push(format!("重复 {}", s.skipped));
+                            }
+                            if s.similar > 0 {
+                                parts.push(format!("相似 {}", s.similar));
+                            }
+                            if s.failed > 0 {
+                                parts.push(format!("失败 {}", s.failed));
+                            }
+                            format!("导入完成：{}", parts.join(" · "))
                         }
                         None => "导入完成，正在后台生成缩略图...".to_string(),
                     };
+                    // D65 结果弹窗：有需要核对/知情的条目（跳过/相似/失败）才弹，
+                    // 干净导入维持轻提示不加点击成本。明细行来自 RESULTITEM 协议。
+                    let rows: Vec<ImportResultRowData> = result_items_finished
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(kind, source, existing, distance)| ImportResultRowData {
+                            kind: *kind,
+                            source: source.as_str().into(),
+                            existing: existing.as_str().into(),
+                            distance: *distance,
+                        })
+                        .collect();
+                    if !rows.is_empty() {
+                        ui.set_import_result_summary(summary.as_str().into());
+                        ui.set_import_result_rows(slint::ModelRc::from(Rc::new(VecModel::from(
+                            rows,
+                        ))));
+                        ui.set_import_result_open(true);
+                        let weak_anim = weak_invoke.clone();
+                        Timer::single_shot(std::time::Duration::from_millis(16), move || {
+                            if let Some(ui) = weak_anim.upgrade() {
+                                ui.set_import_result_shown(true);
+                            }
+                        });
+                    }
                     ui.invoke_import_finished(true, summary.into());
                 }
             });

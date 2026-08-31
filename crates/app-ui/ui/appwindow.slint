@@ -30,6 +30,10 @@ export global UiEnums {
     out property <int> bar-hidden: 0;
     out property <int> bar-multi: 1;
     out property <int> bar-trash: 2;
+    // D65 导入结果行形态。
+    out property <int> result-row-exact: 0;
+    out property <int> result-row-similar: 1;
+    out property <int> result-row-failed: 2;
 }
 
 export struct TileData {
@@ -85,6 +89,16 @@ export struct ClassifyRowData {
     default-mode: int,
     chosen-mode: int,
     unified-name: string,
+}
+
+// D65 导入结果行：kind = UiEnums.result-row-*（0=完全相同跳过 1=相似已导入
+// 2=失败）；source = 导入源文件名；existing = 已有素材名（exact/similar）或
+// 失败原因（failed）；distance = 感知距离（仅 similar 行有意义）。
+export struct ImportResultRowData {
+    kind: int,
+    source: string,
+    existing: string,
+    distance: int,
 }
 
 export component AppWindow inherits Window {
@@ -192,6 +206,16 @@ export component AppWindow inherits Window {
     callback classify-row-name-changed(int, string);
     callback classify-canceled();
     callback classify-confirmed(bool);
+
+    // —— D65 导入结果弹窗 ——
+    // 去重/相似/失败的持久点名面板：瞬时通知条会自动消隐，而「素材去哪了」
+    // 的结论必须可停留、可逐项核对（去重感知红线）。open/shown 两段式同
+    // classify；明细行由壳层从子进程 RESULTITEM 协议行收集。
+    in property <bool> import-result-open: false;
+    in property <bool> import-result-shown: false;
+    in property <string> import-result-summary: "";
+    in property <[ImportResultRowData]> import-result-rows;
+    callback import-result-closed();
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
@@ -2359,6 +2383,121 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "取消"; clicked => { root.classify-canceled(); } }
                     Button { text: "导入"; primary: true; clicked => { root.classify-confirmed(remember-box.checked); } }
+                }
+            }
+        }
+
+        // D65 导入结果弹窗：跳过/相似/失败的持久逐项点名。顶部锚定 y120（弹窗
+        // 族约定 96–150px，不做垂直居中）；行数超窗走 ScrollView（高度钉
+        // min(320px, 内容高)，不钉会塌成内建 min-height——update 弹窗同款坑）。
+        if root.import-result-open: Rectangle {
+            property <bool> shown: root.import-result-shown;
+
+            opacity: shown ? 1.0 : 0.0;
+            x: (root.width - self.width) / 2;
+            y: 120px + (shown ? 0px : 8px);
+            width: 560px;
+            height: result-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+
+            result-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                SectionLabel {
+                    height: 14px;
+                    text: "导入结果";
+                }
+
+                Text {
+                    text: root.import-result-summary;
+                    color: Theme.text-2;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                ScrollView {
+                    height: Math.min(320px, result-rows.preferred-height);
+                    viewport-width: self.visible-width;
+                    viewport-height: result-rows.preferred-height;
+
+                    result-rows := VerticalLayout {
+                        spacing: 4px;
+
+                        for row in root.import-result-rows: Rectangle {
+                            height: 40px;
+                            border-radius: Theme.radius;
+                            background: Theme.bg-panel;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+
+                                Rectangle {
+                                    height: 18px;
+                                    width: result-badge.preferred-width + 16px;
+                                    border-radius: 999px;
+                                    background: row.kind == UiEnums.result-row-failed ? Theme.danger-soft
+                                        : row.kind == UiEnums.result-row-similar ? Theme.accent-soft
+                                        : Theme.warn-soft;
+
+                                    result-badge := Text {
+                                        text: row.kind == UiEnums.result-row-failed ? "失败"
+                                            : row.kind == UiEnums.result-row-similar ? "相似 " + row.distance
+                                            : "完全相同";
+                                        color: row.kind == UiEnums.result-row-failed ? Theme.danger
+                                            : row.kind == UiEnums.result-row-similar ? Theme.accent
+                                            : Theme.warn;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: row.source;
+                                    color: Theme.text;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 2;
+                                }
+
+                                Text {
+                                    // failed 行右列 = 失败原因；exact 是字节等值（非相似，
+                                    // 不带 ≈）；similar 才是相似提示。
+                                    text: row.kind == UiEnums.result-row-failed ? row.existing
+                                        : row.kind == UiEnums.result-row-exact ? "已有素材 " + row.existing
+                                        : "≈ 已有素材 " + row.existing;
+                                    color: Theme.text-3;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 3;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "知道了";
+                        primary: true;
+                        clicked => { root.import-result-closed(); }
+                    }
                 }
             }
         }

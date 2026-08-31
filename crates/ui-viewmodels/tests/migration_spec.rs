@@ -188,7 +188,7 @@ fn migrate_legacy(legacy_root: &Path, unified_root: &Path) -> Library {
             })
             .expect("enqueue 应受理");
         match outcome {
-            EnqueueOutcome::Ticket(t) => {
+            EnqueueOutcome::Ticket { ticket: t, .. } => {
                 wait_for(&lib, &t, |s| {
                     matches!(s, CopyState::Done | CopyState::Failed(_))
                 });
@@ -310,7 +310,7 @@ fn migration_duplicate_does_not_overwrite_existing_category() {
         })
         .unwrap()
     {
-        EnqueueOutcome::Ticket(t) => t,
+        EnqueueOutcome::Ticket { ticket: t, .. } => t,
         other => panic!("预置素材应入库，实际 {other:?}"),
     };
     wait_for(&lib, &t, |s| matches!(s, CopyState::Done));

@@ -23,8 +23,12 @@ pub use rules::{CategoryContext, CategoryRule, GroupNameRule, ParentDirectoryRul
 pub use trash::TRASH_DIR;
 
 pub const INBOX_CATEGORY: &str = "待分类";
-/// 去重判定：汉明距离 ≤ 该值视为同一资产（phash 测试安全边际 ≥16 的两倍关系）。
-pub const DEDUP_THRESHOLD: u32 = 8;
+/// 相似提示阈值（D65）：图片 pHash 汉明距离 ≤ 该值时**照常导入**并在结果里
+/// 标注「与已有素材高度相似」。它不再是丢弃判据——pHash 对截图/表情包类
+/// 素材的误判代价是不可逆的静默丢素材（D60 实证：同窗口连拍 5 连丢），
+/// 判死权收归 SHA-256 字节等值，相似裁决权交还用户。
+/// phash 测试安全边际（无关图案 ≥16）仍高于此阈值。
+pub const SIMILAR_DISTANCE_THRESHOLD: u32 = 12;
 const COPY_CHUNK: usize = 64 * 1024;
 /// pHash 采样网格边长（phash 内部按 32×32 取像素；不足则先放大）。
 const PHASH_MIN_EDGE: u32 = 32;
@@ -148,9 +152,25 @@ pub struct ImportTicket {
     pub uuid: String,
 }
 
+/// 相似命中记录（D65）：素材照常入库，附带「与库内哪个已有素材相似、
+/// 感知距离多少」——调用方负责把这条提醒浮出给用户，由用户裁决去留。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimilarityHit {
+    pub existing_uuid: String,
+    pub distance: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum EnqueueOutcome {
-    Ticket(ImportTicket),
+    /// 素材已接受入库。`similarity` 非 None 表示与库内已有素材高度相似
+    /// （pHash 距离 ≤ SIMILAR_DISTANCE_THRESHOLD）——这是提醒，不是拦截。
+    Ticket {
+        ticket: ImportTicket,
+        similarity: Option<SimilarityHit>,
+    },
+    /// 与库内已有素材**字节级完全相同**（SHA-256 内容等值，D65 起覆盖包括
+    /// 图片在内的全部类目）。这是系统唯一自动跳过的形态——零歧义、不重复
+    /// 占盘；调用方必须在结果里点名，不得静默。
     Duplicate {
         existing_uuid: String,
     },
@@ -292,11 +312,20 @@ struct PHashIndex {
 }
 
 impl PHashIndex {
-    fn find_within(&self, incoming: u64, threshold: u32) -> Option<u64> {
-        self.hashes
-            .iter()
-            .copied()
-            .find(|stored| phash::hamming_distance(incoming, *stored) <= threshold)
+    /// 阈值内**最近**命中（D65）：相似提示要给出可信的距离读数，取最小
+    /// 距离而不是首个命中。距离 0 提前收表。
+    fn nearest_within(&self, incoming: u64, threshold: u32) -> Option<(u64, u32)> {
+        let mut best: Option<(u64, u32)> = None;
+        for &stored in &self.hashes {
+            let distance = phash::hamming_distance(incoming, stored);
+            if distance <= threshold && best.as_ref().is_none_or(|(_, bd)| distance < *bd) {
+                best = Some((stored, distance));
+                if distance == 0 {
+                    break;
+                }
+            }
+        }
+        best
     }
 
     fn remove_hash(&mut self, hash: u64) {
@@ -546,60 +575,10 @@ impl Library {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unnamed".to_string());
 
-        // 解码只发生在 Image 类目：Video/Text 天然不解码，Other（未知扩展名）
-        // 也不该拿去 image::open——这与派发语义「Other 不在 v1 派生范围」对齐，
-        // 旧实现之外的扩展一律不试解码。
-        let phash_bytes: Option<Vec<u8>> = match kind {
-            AssetKind::Image => match decode_for_phash(&req.source) {
-                Ok(img) => Some(phash_of(&img)),
-                Err(e) => {
-                    return Ok(EnqueueOutcome::Unsupported {
-                        reason: format!("图片解码失败：{e}"),
-                    });
-                }
-            },
-            AssetKind::Video | AssetKind::Text | AssetKind::Other => None,
-        };
-
-        // —— 去重判定 ——
-        // 内存索引路径（D37）：O(N) 纯内存汉明扫描，无 SQL、零字符串分配；
-        // 命中疑似重复才做一次等值索引反查（idx_assets_phash）定 uuid。
-        // 会话内新增条目直接从本地 map 解析，不等写线程提交。
-        if let Some(bytes) = &phash_bytes {
-            let incoming =
-                u64::from_be_bytes(bytes.as_slice().try_into().expect("phash 固定 8 字节"));
-            match self.phash_index() {
-                Some(index_mutex) => {
-                    let matched_stored = {
-                        let index = index_mutex.lock().unwrap();
-                        index.find_within(incoming, DEDUP_THRESHOLD)
-                    };
-                    if let Some(stored) = matched_stored {
-                        if let Some(dup) = self.resolve_duplicate_uuid(stored, incoming) {
-                            return Ok(EnqueueOutcome::Duplicate { existing_uuid: dup });
-                        }
-                        // 幽灵 hash（索引有、库无此行——并发删除等）：放弃命中
-                        // 继续按新素材导入，宁多一份不可丢素材。
-                    }
-                }
-                None => {
-                    // 对照旧行为（memory_phash_index 关闭）。
-                    for (uuid, existing) in self.store.all_phashes()? {
-                        let stored = u64::from_be_bytes(existing.as_slice().try_into().unwrap());
-                        if phash::hamming_distance(incoming, stored) <= DEDUP_THRESHOLD {
-                            return Ok(EnqueueOutcome::Duplicate {
-                                existing_uuid: uuid,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // —— 尺寸先行（内容去重的预过滤地基）——
-        // 文本素材（D60 库内文本不变量）：尺寸按转码后字节计，超限在入口硬
-        // 拒绝——病态大文本不进拷贝队列（粘贴端对文本本就是同步读盘）。
-        // 归一化字节同时是文本的内容摘要源（入库的正是这份字节）。
+        // —— 文本尺寸闸与归一化（D60 库内文本不变量）——
+        // 尺寸按转码后字节计，超限在入口硬拒绝——病态大文本不进拷贝队列
+        // （粘贴端对文本本就是同步读盘）。归一化字节同时是文本的内容摘要源
+        // （入库的正是这份字节）。
         let (size_bytes, normalized_text): (i64, Option<Vec<u8>>) = if kind == AssetKind::Text {
             if fs::metadata(&req.source)?.len() > TEXT_IMPORT_MAX_BYTES {
                 return Ok(EnqueueOutcome::Unsupported {
@@ -616,30 +595,53 @@ impl Library {
             (fs::metadata(&req.source)?.len() as i64, None)
         };
 
-        // —— 非图片内容等值去重（D61）——
-        // pHash 只覆盖图片（解码才有感知哈希），视频/文本/未知类型此前重复
-        // 导入即双份占盘。非图片一律记 SHA-256 内容摘要并等值查重：视频流式
-        // 读源文件（峰值驻留一个 chunk），文本直接摘要已在内存的归一化字节
-        // （零额外 I/O）。图片不改：pHash 语义原样（AGENTS.md「导入去重必做」
-        // 的图片半边）。代价诚实写明：每个非图片素材多一次顺序读——相比
-        // 「重复素材永久双份占盘」的红线，一次性导入读便宜得多；不做
-        // 「库内无同尺寸就跳过哈希」的预过滤，否则首份素材不落摘要，之后
-        // 同内容文件永远找不到比对目标（同会话/跨会话双漏）。
+        // —— 内容等值去重（D65：全类目，图片不再例外）——
+        // SHA-256 字节等值是唯一无歧义的重复判据，命中即跳过（不重复占盘，
+        // D7 红线），调用方必须点名上报。图片此前只走 pHash（D61 的分工），
+        // 有两个问题：字节相同的重导入也要白付一次解码才被拦下；pHash 距离
+        // 阈值承担了它承担不了的「判死」职责（同窗口连拍截图距离轻易 ≤8，
+        // D60 实证 5 连丢）。现在摘要先行：字节相同直接短路（顺带省掉解码），
+        // 否则继续走解码与相似提示。不做「库内无同尺寸就跳过哈希」的预过滤
+        // （D61 教训：首份素材不落摘要，之后同内容文件永远找不到比对目标）。
         // 诚实边界：同批并发导入同一文件，首份登记会话摘要前第二份已查重的
-        // 极小窗口内两份都会入库——与 pHash 会话路径的窗口一致。
-        let content_hash: Option<[u8; 32]> = if phash_bytes.is_none() {
-            let digest = match normalized_text {
-                Some(bytes) => sha256_bytes(&bytes),
-                None => sha256_file(&req.source)?,
-            };
-            if let Some(existing) = self.find_content_duplicate(&digest)? {
-                return Ok(EnqueueOutcome::Duplicate {
-                    existing_uuid: existing,
-                });
+        // 极小窗口内两份都会入库——窗口语义与 D61 相同。
+        let content_hash: [u8; 32] = match &normalized_text {
+            Some(bytes) => sha256_bytes(bytes),
+            None => sha256_file(&req.source)?,
+        };
+        if let Some(existing) = self.find_content_duplicate(&content_hash)? {
+            return Ok(EnqueueOutcome::Duplicate {
+                existing_uuid: existing,
+            });
+        }
+
+        // —— 解码与相似提示（D65：pHash 从「判死」降级为「提醒」）——
+        // 解码只发生在 Image 类目：Video/Text 天然不解码，Other（未知扩展名）
+        // 也不该拿去 image::open——这与派发语义「Other 不在 v1 派生范围」对齐，
+        // 旧实现之外的扩展一律不试解码。
+        let phash_bytes: Option<Vec<u8>> = match kind {
+            AssetKind::Image => match decode_for_phash(&req.source) {
+                Ok(img) => phash_of(&img),
+                Err(e) => {
+                    return Ok(EnqueueOutcome::Unsupported {
+                        reason: format!("图片解码失败：{e}"),
+                    });
+                }
+            },
+            AssetKind::Video | AssetKind::Text | AssetKind::Other => None,
+        };
+
+        // 相似查找：内存索引（D37）O(N) 汉明扫描取最近命中，命中后等值索引
+        // 反查 uuid 定位已有素材；会话内新增条目直接从本地 map 解析，不等
+        // 写线程提交。幽灵 hash（索引有、库无此行——并发删除等）放弃该次
+        // 提醒照常导入，宁多一份不可丢素材。
+        let similarity: Option<SimilarityHit> = match &phash_bytes {
+            Some(bytes) => {
+                let incoming =
+                    u64::from_be_bytes(bytes.as_slice().try_into().expect("phash 固定 8 字节"));
+                self.find_similar(incoming)?
             }
-            Some(digest)
-        } else {
-            None
+            None => None,
         };
 
         let uuid = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -671,7 +673,9 @@ impl Library {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
             phash: phash_bytes.clone(),
-            content_hash: content_hash.map(|digest| digest.to_vec()),
+            // D65：全部类目（含图片）都落内容摘要——字节等值查重与后续
+            // 「库内有没有这份数据」类审计都靠它。
+            content_hash: Some(content_hash.to_vec()),
             // 导入阶段不解码媒体，像素尺寸留给派生工序（derive-thumbs）回写。
             width: None,
             height: None,
@@ -697,13 +701,10 @@ impl Library {
             index.hashes.push(hv);
             index.session_uuids.insert(hv, uuid.clone());
         }
-        if let Some(digest) = content_hash {
-            self.content_session
-                .lock()
-                .unwrap()
-                .insert(digest, uuid.clone());
-        }
-
+        self.content_session
+            .lock()
+            .unwrap()
+            .insert(content_hash, uuid.clone());
         // 派发语义：Image/Video/Text 有解码工序，Other 不在 v1 派生范围。
         if let Some(kind) = to_media_kind(kind) {
             self.dispatcher.dispatch(MediaJob {
@@ -721,7 +722,7 @@ impl Library {
             total: size_bytes as u64,
             // 失败回滚时精确清掉本条登记（与上面的 push 同值）。
             session_hash,
-            content_hash,
+            content_hash: Some(content_hash),
         };
         let (lock, cv) = &*self.shared;
         let mut g = lock.lock().unwrap();
@@ -731,13 +732,54 @@ impl Library {
         drop(g);
         cv.notify_all();
 
-        Ok(EnqueueOutcome::Ticket(ImportTicket { id, uuid }))
+        Ok(EnqueueOutcome::Ticket {
+            ticket: ImportTicket { id, uuid },
+            similarity,
+        })
+    }
+
+    /// 相似命中（D65）→ 已存 uuid 与距离：内存索引取阈值内最近 hash，命中
+    /// 后优先会话内登记（免 SQL），否则走等值索引查询；查不到活行（幽灵
+    /// hash）返回 None——放弃该次提醒，宁多一份不可丢素材。
+    /// 无内存索引的对照路径（memory_phash_index=false）全表线性扫描取最近。
+    fn find_similar(&self, incoming: u64) -> Result<Option<SimilarityHit>> {
+        match self.phash_index() {
+            Some(index_mutex) => {
+                let matched = {
+                    let index = index_mutex.lock().unwrap();
+                    index.nearest_within(incoming, SIMILAR_DISTANCE_THRESHOLD)
+                };
+                Ok(matched.and_then(|(stored, distance)| {
+                    self.resolve_similar_uuid(stored, incoming)
+                        .map(|existing_uuid| SimilarityHit {
+                            existing_uuid,
+                            distance,
+                        })
+                }))
+            }
+            None => {
+                let mut best: Option<(String, u32)> = None;
+                for (uuid, existing) in self.store.all_phashes()? {
+                    let stored = u64::from_be_bytes(existing.as_slice().try_into().unwrap());
+                    let distance = phash::hamming_distance(incoming, stored);
+                    if distance <= SIMILAR_DISTANCE_THRESHOLD
+                        && best.as_ref().is_none_or(|(_, bd)| distance < *bd)
+                    {
+                        best = Some((uuid, distance));
+                    }
+                }
+                Ok(best.map(|(existing_uuid, distance)| SimilarityHit {
+                    existing_uuid,
+                    distance,
+                }))
+            }
+        }
     }
 
     /// 命中的已存 hash 解析为现存 uuid：优先会话内登记（免 SQL），否则走
-    /// 等值索引查询。查不到活行返回 None（放弃该次命中继续导入）。
-    fn resolve_duplicate_uuid(&self, stored: u64, incoming: u64) -> Option<String> {
-        if phash::hamming_distance(incoming, stored) > DEDUP_THRESHOLD {
+    /// 等值索引查询。查不到活行返回 None（放弃该次提醒继续导入）。
+    fn resolve_similar_uuid(&self, stored: u64, incoming: u64) -> Option<String> {
+        if phash::hamming_distance(incoming, stored) > SIMILAR_DISTANCE_THRESHOLD {
             return None;
         }
         if let Some(index_mutex) = self.phash_index() {
@@ -755,10 +797,16 @@ impl Library {
 
     /// 内容摘要 → 已存 uuid：先查会话登记（写线程攒批提交前也能命中，与
     /// pHash 会话路径同语义），未中走等值索引。回收站行不参与（与 all_phashes
-    /// 的 D46 语义一致）。
+    /// 的 D46 语义一致）——会话 map 不感知软删/清空，命中必须复核「行存在
+    /// 且未删」，否则「删了/清了之后重导同一文件」会被静默吞掉（D65 回归
+    /// 测试钉死）；复核不过回落 SQL 等值路径兜底。
     fn find_content_duplicate(&self, digest: &[u8; 32]) -> Result<Option<String>> {
-        if let Some(uuid) = self.content_session.lock().unwrap().get(digest) {
-            return Ok(Some(uuid.clone()));
+        let session_hit = self.content_session.lock().unwrap().get(digest).cloned();
+        if let Some(uuid) = session_hit {
+            let alive = self.store.get_asset(&uuid)?.is_some() && !self.store.is_deleted(&uuid)?;
+            if alive {
+                return Ok(Some(uuid));
+            }
         }
         Ok(self.store.uuid_by_content_hash(digest)?)
     }
@@ -822,8 +870,10 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 
 /// pHash 按 32×32 网格采样：小于该尺寸的原图直接采样会越界 panic
 /// （真实 1×1 图标实测崩溃，整段导入进程 101 退出）。先放大到 32×32
-/// 再哈希，极小图也能正常去重，且保证导入永不因尺寸崩溃。
-fn phash_of(img: &image::DynamicImage) -> Vec<u8> {
+/// 再哈希；低信息图（放大后仍近纯色，如 1×1 纯色图标）返回 None——
+/// 不产出不可信 hash（D65 低信息守卫，历史缺陷：此类图 hash 由取整
+/// 噪声决定、与内容无关，曾互判重复静默丢素材）。
+fn phash_of(img: &image::DynamicImage) -> Option<Vec<u8>> {
     let gray = img.to_luma8();
     let gray = if gray.width() < PHASH_MIN_EDGE || gray.height() < PHASH_MIN_EDGE {
         image::imageops::resize(
@@ -835,7 +885,7 @@ fn phash_of(img: &image::DynamicImage) -> Vec<u8> {
     } else {
         gray
     };
-    phash::perceptual_hash_gray(&gray).to_be_bytes().to_vec()
+    phash::reliable_phash(&gray).map(|h| h.to_be_bytes().to_vec())
 }
 
 fn worker_loop(
@@ -1187,19 +1237,167 @@ fn rollback_failed_import(root: &Path, uuid: &str, dest: &Path) {
 mod tests {
     use super::*;
 
+    fn temp_root(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("lib_{tag}_{}_{}", std::process::id(), nanos));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// 结构化图案（与 phash 测试同族公式）：灰度正弦+渐变，pHash 可信。
+    fn structured_png(path: &Path, shift: i16) {
+        let img = image::GrayImage::from_fn(64, 64, |x, y| {
+            let fx = x as f64 / 64.0;
+            let fy = y as f64 / 64.0;
+            let v = 110.0
+                + 40.0 * (std::f64::consts::TAU * 3.0 * fx).sin()
+                + 25.0 * (std::f64::consts::TAU * 2.0 * fy).cos()
+                + 30.0 * fx
+                + shift as f64;
+            image::Luma([v.clamp(0.0, 255.0) as u8])
+        });
+        image::DynamicImage::ImageLuma8(img).save(path).unwrap();
+    }
+
+    fn solid_png(path: &Path, rgb: [u8; 3]) {
+        let img = image::RgbImage::from_fn(64, 64, |_x, _y| image::Rgb(rgb));
+        image::DynamicImage::ImageRgb8(img).save(path).unwrap();
+    }
+
+    fn stripes_png(path: &Path, horizontal: bool) {
+        let img = image::GrayImage::from_fn(64, 64, |x, y| {
+            let coord = if horizontal { y } else { x };
+            let band = (coord / 8).is_multiple_of(2);
+            image::Luma([if band { 220 } else { 35 }])
+        });
+        image::DynamicImage::ImageLuma8(img).save(path).unwrap();
+    }
+
+    /// 导入并等终态（D7：Done 即元数据已落库），返回 (uuid, 相似提醒)。
+    fn import_and_wait(library: &Library, source: &Path) -> (String, Option<SimilarityHit>) {
+        match library
+            .enqueue(ImportRequest {
+                source: source.to_path_buf(),
+                category: Some("测试".to_string()),
+                tags: vec![],
+            })
+            .expect("enqueue 不得失败")
+        {
+            EnqueueOutcome::Ticket { ticket, similarity } => {
+                let state = library
+                    .wait_terminal(&ticket, std::time::Duration::from_secs(30))
+                    .expect("等待终态超时");
+                assert!(matches!(state, CopyState::Done), "导入应成功：{state:?}");
+                (ticket.uuid, similarity)
+            }
+            other => panic!("预期入库，实际 {other:?}"),
+        }
+    }
+
+    // ----- D65 语义：判死权收归字节等值，pHash 只提醒 -----
+
+    #[test]
+    fn byte_identical_image_reimport_is_exact_duplicate() {
+        let root = temp_root("exact_dup");
+        let source = root.join("img.png");
+        structured_png(&source, 0);
+        let library = Library::open(&root).unwrap();
+
+        let (first, similarity) = import_and_wait(&library, &source);
+        assert!(similarity.is_none(), "首份入库不应有相似提醒");
+
+        // 图片现在也落内容摘要（D65）：字节相同 → 精确重复，不再依赖解码。
+        let second = library
+            .enqueue(ImportRequest {
+                source: source.clone(),
+                category: Some("测试".to_string()),
+                tags: vec![],
+            })
+            .unwrap();
+        match second {
+            EnqueueOutcome::Duplicate { existing_uuid } => {
+                assert_eq!(existing_uuid, first, "重复判定应指向首份素材");
+            }
+            other => panic!("字节相同应判精确重复，实际 {other:?}"),
+        }
+
+        let meta = library.store().get_asset(&first).unwrap().unwrap();
+        assert!(
+            meta.content_hash.is_some(),
+            "图片资产也应携带内容摘要（D65 全类目不变量）"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 历史缺陷回归（D65 低信息守卫）：两张颜色完全不同的纯色图，旧实现
+    /// pHash 全为 0 → 第二张被判重复静默丢弃；现在都必须入库且无相似提醒。
+    #[test]
+    fn distinct_flat_color_images_both_import_without_similarity() {
+        let root = temp_root("flat_pair");
+        let red = root.join("red.png");
+        let blue = root.join("blue.png");
+        solid_png(&red, [220, 40, 40]);
+        solid_png(&blue, [40, 60, 220]);
+        let library = Library::open(&root).unwrap();
+
+        let (first, first_sim) = import_and_wait(&library, &red);
+        let (second, second_sim) = import_and_wait(&library, &blue);
+        assert_ne!(first, second, "两张不同的图都必须入库");
+        assert!(
+            first_sim.is_none() && second_sim.is_none(),
+            "纯色图无可信 pHash，不得互报相似"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn near_duplicate_image_imports_and_reports_similarity() {
+        let root = temp_root("near_dup");
+        let a = root.join("a.png");
+        let b = root.join("b.png");
+        structured_png(&a, 0);
+        structured_png(&b, 8); // 轻微亮度平移：phash 测试实测距离 ≤10
+        let library = Library::open(&root).unwrap();
+
+        let (uuid_a, _) = import_and_wait(&library, &a);
+        let (uuid_b, similarity) = import_and_wait(&library, &b);
+        assert_ne!(uuid_a, uuid_b, "近重复素材照常入库，绝不静默丢弃");
+        let hit = similarity.expect("近重复必须带相似提醒");
+        assert_eq!(hit.existing_uuid, uuid_a);
+        assert!(
+            hit.distance <= SIMILAR_DISTANCE_THRESHOLD,
+            "距离读数 {} 应在阈值内",
+            hit.distance
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unrelated_images_import_without_similarity() {
+        let root = temp_root("unrelated");
+        let h = root.join("h.png");
+        let v = root.join("v.png");
+        stripes_png(&h, true);
+        stripes_png(&v, false);
+        let library = Library::open(&root).unwrap();
+
+        let (_, h_sim) = import_and_wait(&library, &h);
+        let (_, v_sim) = import_and_wait(&library, &v);
+        assert!(
+            h_sim.is_none() && v_sim.is_none(),
+            "无关图案距离 ≥16，不应报相似"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// 1×1 极小图：导入不得 panic（历史回归：phash 32×32 网格采样越界，整段导入进程 101 退出）。
     #[test]
     fn tiny_image_import_does_not_panic_and_stores_asset() {
-        let root = std::env::temp_dir().join(format!(
-            "lib_tiny_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = temp_root("tiny");
         // 库根 = 独立临时目录；source 是库目录外的 1×1 图片文件。
         let source = root.join("tiny.png");
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255u8, 0, 0, 255]));
@@ -1213,7 +1411,7 @@ mod tests {
             })
             .expect("极小图导入不得 panic/失败");
         match outcome {
-            EnqueueOutcome::Ticket(ticket) => {
+            EnqueueOutcome::Ticket { ticket, similarity } => {
                 // 元数据落库走异步写队列（D37）——Done 终态保证 meta 必然已提交
                 //（finish_after_copy_ok 在 meta_ready 确认后才置 Done）。
                 let state = library
@@ -1225,6 +1423,10 @@ mod tests {
                 );
                 let meta = library.store().get_asset(&ticket.uuid).unwrap();
                 assert!(meta.is_some(), "极小图也应入库");
+                assert!(
+                    similarity.is_none(),
+                    "1×1 纯色图无可信 pHash，不得产出相似提醒"
+                );
             }
             EnqueueOutcome::Duplicate { .. } => {}
             EnqueueOutcome::Unsupported { reason } => {

@@ -50,7 +50,7 @@ fn import_one(lib: &Library, source: &Path) -> String {
         })
         .unwrap();
     let t = match outcome {
-        EnqueueOutcome::Ticket(t) => t,
+        EnqueueOutcome::Ticket { ticket, .. } => ticket,
         other => panic!("应受理导入，实际 {other:?}"),
     };
     wait_done(lib, &t);
