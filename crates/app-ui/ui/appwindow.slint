@@ -267,6 +267,8 @@ export component AppWindow inherits Window {
     callback target-choice-selected(string);
     callback target-pin-toggled();
     callback settings-toggled();
+    // D67 设置面板显式关闭（点外部不再收起——见挡板注释）。
+    callback settings-closed();
     callback setting-toggled(string);
     callback overlay-dismissed();
     callback import-requested();
@@ -1284,9 +1286,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // 点外部收起：仅在有浮层打开时铺满窗口拦截点击。
-        // D48 扩充：右键菜单/移动到分类/重命名/属性弹窗同样吃这层 dismiss
-        // （壳层在 overlay-dismissed 里按开合优先级逐个关）。
+        // 浮层挡板：任一浮层打开时铺满窗口拦截背景点击（工作流弹窗下 =
+        // 模态死点击，底下控件收不到；点在弹窗面板自身空白处命中挡板同理，
+        // 也不触发收起）。D67 分级收口：壳层在 overlay-dismissed 里只关
+        // 菜单级浮层（右键/范围/导入/移动/目标选择器）；设置/归类/重命名/
+        // 属性/目标重命名/更新不再吃 dismiss——误触背景不丢输入，关闭走
+        // 各自的显式按钮与 Esc。挡板不能摘：摘了背景控件恢复收点，弹窗
+        // 飘着时点瓦片会误触发动作，比误关更糟。
         if root.settings-open || root.import-menu-open
             || root.target-mode == UiEnums.target-mode-choose
             || root.context-menu-open || root.move-menu-open
@@ -1603,6 +1609,23 @@ export component AppWindow inherits Window {
 
             VerticalLayout {
                 padding: 12px;
+                spacing: 8px;
+
+                // 固定头（不随滚动）：「关闭」必须常驻——D67 起点外部不再
+                // 收起本面板，显式出口只剩这个按钮和 Esc。
+                HorizontalLayout {
+                    spacing: 8px;
+                    SectionLabel {
+                        height: 14px;
+                        text: "设置";
+                        horizontal-stretch: 1;
+                    }
+                    FlatButton {
+                        text: "关闭";
+                        glyph: Glyph.close;
+                        clicked => { root.settings-closed(); }
+                    }
+                }
 
                 ScrollView {
                     vertical-stretch: 1;
@@ -1611,11 +1634,6 @@ export component AppWindow inherits Window {
 
                     settings-scroll-col := VerticalLayout {
                         spacing: 10px;
-
-                        SectionLabel {
-                            height: 14px;
-                            text: "设置";
-                        }
 
                         // 通用渲染：行数据全部来自壳层的 SettingRowData 模型（含
                         // 分区标题行），新增设置项只改 Rust 侧描述（SettingSpec）。
@@ -2100,7 +2118,8 @@ export component AppWindow inherits Window {
 
         // —— D56 新版本弹窗：命中动作是「打开发布页」，应用内下载安装明确
         // 推迟（签名校验/安装器自更新是独立大项目，D56）。两段式入场（同
-        // classify）；Esc / 点外部 = 以后再说，跳过此版本单独走回调。
+        // classify）；Esc /「以后再说」= 以后再说，跳过此版本单独走回调
+        // （D67 起点外部只挡不关）。
         if root.update-open: Rectangle {
             property <bool> shown: root.update-shown;
 

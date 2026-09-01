@@ -1756,10 +1756,16 @@ fn main() {
         });
     }
 
-    // Esc：关闭链（归类弹窗→菜单→移动→重命名→属性→清空选区退多选）。
+    // 目标重命名弹层的 pending 键：Esc 关闭链（下方）要 clone，故声明在链前。
+    let pending_target_rename: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    // Esc：关闭链（归类弹窗→更新→菜单级→重命名→属性→目标重命名→设置
+    // →清空选区退多选）。D67：全部浮层可 Esc 收起——点外部不再关工作流
+    // 弹窗后，Esc 是它们与显式按钮并列的键盘出口。
     {
         let crud = crud.clone();
         let import_flow = import_flow.clone();
+        let pending_target_rename = pending_target_rename.clone();
         app.on_escape_pressed(move || {
             let Some(ui) = crud.ui.upgrade() else { return };
             // 归类弹窗是模态最上层，Esc = 取消本次导入。
@@ -1773,6 +1779,17 @@ fn main() {
                 ui.set_update_shown(false);
                 return;
             }
+            // 菜单级浮层（D67 补：此前只有点外部一条路）。
+            if ui.get_import_menu_open() {
+                ui.set_import_menu_open(false);
+                ui.set_import_menu_shown(false);
+                return;
+            }
+            if ui.get_scope_menu_open() {
+                ui.set_scope_menu_shown(false);
+                ui.set_scope_menu_open(false);
+                return;
+            }
             if ui.get_context_menu_open() {
                 ui.set_context_menu_open(false);
             } else if ui.get_move_menu_open() {
@@ -1782,6 +1799,12 @@ fn main() {
                 ui.set_rename_error("".into());
             } else if ui.get_properties_open() {
                 ui.set_properties_open(false);
+            } else if ui.get_target_rename_open() {
+                pending_target_rename.replace(None);
+                ui.set_target_rename_open(false);
+            } else if ui.get_settings_open() {
+                ui.set_settings_shown(false);
+                ui.set_settings_open(false);
             } else if crud.vm.borrow().multi_mode() {
                 crud.vm.borrow_mut().exit_multi();
                 crud.sync_selection();
@@ -2094,8 +2117,8 @@ fn main() {
     }
 
     // D59 目标实例重命名：右键 picker 行 → 弹层 → 保存进 targets.json（原子写）。
-    // pending 键在弹层存续期间持有 selection_key；取消/点外部只关弹层不落数据。
-    let pending_target_rename: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // pending 键在弹层存续期间持有 selection_key；取消/Esc 只关弹层不落数据
+    // （D67 起点外部不再关它；声明在 Esc 关闭链前，链里共用同一 Rc）。
     {
         let ui = app.as_weak();
         let routing = routing.clone();
@@ -2523,6 +2546,17 @@ fn main() {
         });
     }
 
+    // D67 设置面板显式关闭：点外部不再收起（防误触），出口 = 面板头部
+    // 「关闭」按钮或 Esc。
+    {
+        let ui = app.as_weak();
+        app.on_settings_closed(move || {
+            let ui = ui.unwrap();
+            ui.set_settings_shown(false);
+            ui.set_settings_open(false);
+        });
+    }
+
     // D49 主导入：文件对话框多选（素材 + .emo 混选）→ 归类弹窗。
     {
         let import_flow = import_flow.clone();
@@ -2589,34 +2623,22 @@ fn main() {
         });
     }
 
-    // 点击浮层外部：收起设置面板、导入菜单与目标下拉。
+    // 点击浮层外部（挡板，appwindow.slint）：D67 分级——只收菜单级浮层；
+    // 工作流弹窗（设置/归类/重命名/属性/目标重命名/更新）只挡不关，关闭
+    // 走显式按钮与 Esc，误触背景不丢输入。
     {
         let ui = app.as_weak();
         let routing = routing.clone();
         let target_choices = target_choices.clone();
-        let import_flow = import_flow.clone();
         app.on_overlay_dismissed(move || {
             let ui = ui.unwrap();
-            ui.set_settings_open(false);
-            ui.set_settings_shown(false);
             ui.set_import_menu_open(false);
-            ui.set_import_menu_shown(false);
             ui.set_import_menu_shown(false);
             // D51 范围菜单两段式收起（点外部 = 取消开合）。
             ui.set_scope_menu_shown(false);
             ui.set_scope_menu_open(false);
-            // D46–D48 浮层（点击外部=关闭，链式同 Esc）。
             ui.set_context_menu_open(false);
-            import_flow.close();
             ui.set_move_menu_open(false);
-            ui.set_rename_open(false);
-            ui.set_properties_open(false);
-            // D59 目标重命名弹层同吃 dismiss；只关弹层，别名不落盘。
-            pending_target_rename.replace(None);
-            ui.set_target_rename_open(false);
-            // D56 更新弹窗：点外部 = 以后再说（不改「跳过」状态，角标保留）。
-            ui.set_update_open(false);
-            ui.set_update_shown(false);
             if ui.get_target_mode() == ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
                 let mut routing = routing.borrow_mut();
                 routing.toggle_picker();
