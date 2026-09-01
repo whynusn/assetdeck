@@ -802,5 +802,22 @@ if (click_count % 2) == 1 {
 
 **守卫**：workspace test + clippy 归零 + fmt；slint-viewer 渲染 settings 面板（固定头/关闭按钮在位）。
 
+### D68 拼多多商家版画像升格：借号真机实测回填，图片 files 单承载 + 视频诚实不支持（2026-09-01）
+
+**背景**：M8 内置画像里的 `pdd` 是无真机会话的骨架（`paste_sends = []` 占位、无 input_anchor、focus_strategy 三级缺省，注释自认「未取得真实会话」）。用户借来拼多多商家版账号（后台运行）并给出已知事实「拼多多无法通过粘贴将视频等文件，只适配图片素材」，要求按千牛/微信同构标准实测回填。
+
+**真机取证**（2026-09-01，商家工作台客服聊天页；全程注入前核前台、不合成 0x0D、粘后即清空输入框，无任何消息外发）：
+1. **窗口指纹**：单主窗口承载全部功能（聊天是内嵌网页模块，`CChatWebPageBusiness::Init`），类名 `g_wszPDDWindowClass{E77EAED1-...}` 带实例级 GUID 后缀（matcher 的 `{GUID}` 变体规则本就是为它预写的），标题恒定「拼多多工作台」；同进程 38 个顶层窗口（催一催/FaceWnd/ShadeWindow/快捷回复/多多进宝聊天等）类名各异，无一与主类重名。
+2. **粘贴行为**：图片（png/jpg）CF_HDROP 停在输入框内嵌渲染；CF_PNG（注册格式 "PNG"，与产品写法同参）粘贴**无任何反应**——网页层不认；文本正常；视频用户实测不可粘。
+3. **聚焦**（focus_probe 三轮）：CEF 主窗口（Chrome_RenderWidgetHostHWND），激活后焦点停根控件/浮动提示（`MerchantDutyFloatTip`），UIA 全子树 editable=0，prop 条件变体 **109~124ms**（比千牛 83ms 更贵）。
+
+**画像定稿**：`image = ["files"]` 单格式——CF_PNG 在拼多多是死路，png 兜底声明了只会把「素材不在库内」变成假成功的空注入，宁走 `Unsupported` 诚实报错；`video = []`——协商直接 Unsupported，管线报「无法承载」且连剪贴板都不写，不注入必落空的 Ctrl+V（用户明确 v1 只适配图片）；`paste_sends` 全空（图片/文本均停输入框，无即发事实）；`focus_strategy = ["already", "anchor"]`（同微信/千牛裁掉 uia）；`input_anchor = (0.49, 0.92)`——客服输入文本区中心（客户区比例 x 0.29~0.69 / y 0.88~0.96 实测量取，发送按钮 x≈0.63 起横向有余量）。宽松档不声明 require_title：PDD 的 DUI 框架给每个弹窗注册独立类名，「类名全应用共享」的千牛式误绑前提不存在，类名本身已是强身份信号（同微信的宽松理由）。
+
+**取舍记录**：①「无法粘贴视频」不模仿千牛 video×files 的即发保护（那是「粘进去即发送」的实测事实），PDD 是「粘不进去」，两者在 Negotiated 里是不同行：Unsupported（不写剪贴板直接失败）vs WouldSend（写剪贴板但拒绝注入）。②`derive-thumbs` 的 paste.png 派生照旧全量执行（per-asset 与目标无关，对微信/千牛仍必要）。③多开行为同微信：两个主窗口并列最高分 → Ambiguous 进 picker。④冷启动提示文案「请先打开微信/千牛/拼多多商家版等目标应用」补点名。
+
+**落点**：profiles/profiles.builtin.toml（pdd 块重写 + 头部 D22/焦点注释同步，telegram 维持三级缺省不动）；crates/targets/tests/real_im_profiles.rs（真机签名换成 GUID 后缀变体；新增 `builtin_pdd_image_is_files_only_and_video_uncarriable` / `builtin_pdd_focus_strategy_skips_uia_and_anchors_chat_input`）；app-ui main.rs（空目标提示文案）。
+
+**守卫**：workspace test 全绿（real_im_profiles 5 测含 3 个 pdd 事实锁定）+ clippy 归零 + fmt；取证归档 `Documents\Default_Project_probe\pdd-*.png`（hdrop-image/jpg-hdrop/png-noop/text/workbench-layout/input-cleared）。
+
 
 

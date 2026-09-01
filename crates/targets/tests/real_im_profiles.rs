@@ -79,19 +79,69 @@ fn real_qianniu_foreground_resolves_to_qianniu_profile() {
 #[test]
 fn real_pdd_foreground_resolves_to_pdd_profile() {
     let set = load_profiles(BUILTIN, None).unwrap();
+    // 真实拼多多商家版主窗口（2026-09-01 借号枚举）：PddWorkbench.exe /
+    // g_wszPDDWindowClass{GUID 实例后缀} / 标题拼多多工作台。用带后缀的真实
+    // 类名驱动，锁住 matcher 的 {GUID} 变体规则对内置画像生效。
     let resolved = resolve_eligible_snapshot(
         &set,
         &snapshot(
-            656860,
+            198040,
             "PddWorkbench.exe",
-            "g_wszPDDWindowClass",
+            "g_wszPDDWindowClass{E77EAED1-21E4-4F21-AE4C-50A6AE1E47A4}",
             "拼多多工作台",
-            false,
+            true,
             false,
         ),
     )
     .expect("拼多多前台窗口应解析出目标");
     assert_eq!(resolved.profile.id.as_str(), "pdd");
+}
+
+/// 拼多多 2026-09-01 真机实测结论（取证 Default_Project_probe/pdd-*.png）：
+/// 图片（png/jpg）唯一可用承载是 CF_HDROP、文本可用、CF_PNG 粘贴无反应
+/// （网页层不认注册格式 "PNG"），视频等文件无法粘贴上框（用户确认）——
+/// video 行必须为空，让协商走 Unsupported 诚实报错而不是注入必落空的 Ctrl+V。
+#[test]
+fn builtin_pdd_image_is_files_only_and_video_uncarriable() {
+    let set = load_profiles(BUILTIN, None).unwrap();
+    let pdd = set.get(&"pdd".into()).unwrap();
+    assert_eq!(
+        pdd.formats.for_kind(FormatKind::Image),
+        [ClipboardFormat::Files],
+        "CF_PNG 在拼多多实测无效，图片只能交文件引用"
+    );
+    assert_eq!(
+        pdd.formats.for_kind(FormatKind::Video),
+        [],
+        "拼多多收不了视频粘贴，video 行置空 → 协商 Unsupported"
+    );
+    for kind in [FormatKind::Image, FormatKind::Video] {
+        for format in [ClipboardFormat::Files, ClipboardFormat::Png] {
+            assert!(
+                !pdd.paste_sends_format(kind, format),
+                "拼多多图片/视频粘贴均不即发，不得误声明即发保护"
+            );
+        }
+    }
+}
+
+/// 拼多多聚焦实测与微信/千牛同构：UIA 可写候选 0（且 prop 变体 109~124ms），
+/// focus_strategy 裁掉 uia；锚点实测 (0.49, 0.92) 落在客服输入文本区中心。
+#[test]
+fn builtin_pdd_focus_strategy_skips_uia_and_anchors_chat_input() {
+    let set = load_profiles(BUILTIN, None).unwrap();
+    let pdd = set.get(&"pdd".into()).unwrap();
+    assert_eq!(
+        pdd.focus_plan().steps,
+        vec![
+            platform::FocusStep::AlreadyEditable,
+            platform::FocusStep::AnchorClick
+        ],
+        "拼多多 UIA 候选为 0，uia 级别是纯损耗"
+    );
+    let anchor = pdd.focus_anchor().expect("拼多多必须声明输入框锚点");
+    assert!((anchor.x_ratio - 0.49).abs() < f32::EPSILON);
+    assert!((anchor.y_ratio - 0.92).abs() < f32::EPSILON);
 }
 
 #[test]

@@ -2097,7 +2097,8 @@ fn main() {
                 show_notice(
                     &ui,
                     TargetNoticeTone::Warning,
-                    "没有检测到运行中的 IM 窗口，请先打开微信/千牛等目标应用".to_string(),
+                    "没有检测到运行中的 IM 窗口，请先打开微信/千牛/拼多多商家版等目标应用"
+                        .to_string(),
                 );
             }
             sync_target_bar(&ui, &target_choices, routing.snapshot());

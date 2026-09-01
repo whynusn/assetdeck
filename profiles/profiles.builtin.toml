@@ -30,12 +30,16 @@
 # focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "anchor"]。
 # 微信 / 千牛显式去掉 "uia"：实测这两个目标的 UIA 子树里可写 Edit/Document 候选数为 0
 # （微信 descendant count=2、千牛 91 个全不可写），该级别必然失败，白付 22~83ms。
-# pdd / telegram 未取得真机会话，保留三级缺省，不凭猜测裁剪。
+# pdd 2026-09-01 真机实测同样裁掉 "uia"（editable=0，且 prop 条件变体 109~124ms，
+# 比千牛 83ms 更贵）；telegram 未取得真机会话，保留三级缺省，不凭猜测裁剪。
 #
 # 图片格式顺序：全部画像统一 files 优先（D22，2026-08-27 回填完 pdd/telegram）。
 # pdd/telegram 此前残留 ["png", "files"] 是 D22 落地时的回填遗漏——files 优先与
 # 是否实测过该目标无关：它同时压缩对端解码成本（实测微信 files 436ms vs png 2061ms）
 # 和触发侧成本（D41：物化层已不再预读 png_bytes，files 承载是零 IO 路径）。
+# 例外：pdd 的图片 2026-09-01 实测收成 ["files"] 单格式——CF_PNG 粘贴无反应
+# （网页层不认注册格式 "PNG"），png 兜底声明了只会把「素材不在库内」变成
+# 假成功的空注入，宁走 Unsupported 诚实报错。
 
 [[profiles]]
 id = "wechat"
@@ -108,17 +112,41 @@ other = []
 id = "pdd"
 label = "拼多多商家版"
 exe_names = ["PddWorkbench.exe"]
+# 主窗口类名带实例级 GUID 后缀（g_wszPDDWindowClass{E77EAED1-...}，2026-09-01
+# 真机复证），matcher 的 {GUID} 变体规则按前缀命中。宽松档（不声明
+# require_title）：DUI 框架给每个弹窗注册独立类名（FaceWnd/ShadeWindow/
+# CUrgentTip 等 38 个顶层窗口无一与主类重名），「类名全应用共享」的千牛
+# 式误绑前提在这里不存在；而类名本身已是强身份信号（同微信的宽松理由）。
 class_names = ["g_wszPDDWindowClass"]
 title_regexes = ["拼多多工作台"]
 not_ready_title_regexes = ["登录"]
 readiness = "uia_shallow"
 settle_ms = 120
-# 未取得真实会话，暂不声明；一旦实测为即发再补 files。
-paste_sends = []
+# 2026-09-01 借号真机受控实验（商家工作台客服聊天页；注入前核前台、全程无
+# Enter、粘后即清空输入框）：
+# - 图片（png/jpg）CF_HDROP 停在输入框并内嵌渲染（取证 Default_Project_probe/
+#   pdd-hdrop-image.png / pdd-jpg-hdrop.png），无需即发保护；
+# - CF_PNG（注册格式 "PNG"，与产品写法 RegisterClipboardFormatA 同参）粘贴
+#   无任何反应（pdd-png-noop.png，输入框仍空）——png 兜底是死路，见头部注释；
+# - 文本 CF_UNICODETEXT 停在输入框（pdd-text.png）；
+# - 视频等文件用户实测无法粘贴上框（用户 2026-09-01 确认），video 行置空 →
+#   协商 Unsupported，管线报「无法承载」并连剪贴板都不写，不注入必落空的
+#   Ctrl+V。拼多多 v1 只适配图片素材。
+paste_sends = { image = [], video = [], text = [], other = [] }
+# 实测（focus_probe 三轮）：CEF 主窗口（Chrome_RenderWidgetHostHWND），激活后
+# 焦点停在根控件/浮动提示，UIA 全子树 editable=0；prop 条件变体 109~124ms。
+focus_strategy = ["already", "anchor"]
+
+# 客服输入框锚点（1875x1185 客户区实测量取，2026-09-01）：文本区在会话列
+# 下部、工具栏图标行之下、黄色合规提示条之上，客户区比例 x 0.29~0.69 /
+# y 0.88~0.96，锚点取文本区中心；发送按钮在 x≈0.63 起，横向有余量。
+[profiles.input_anchor]
+x_ratio = 0.49
+y_ratio = 0.92
 
 [profiles.formats]
-image = ["files", "png"]
-video = ["files"]
+image = ["files"]
+video = []
 text = ["text"]
 other = []
 
