@@ -236,14 +236,34 @@ fn cmd_measure_rss(args: &[String]) -> i32 {
     emit_report(&margs, &report)
 }
 
+/// 采样窗结束后的收尾宽限窗：轮询等子进程退出，而不是单发一枪。
+const BROWSE_EXIT_GRACE_MS: u64 = 10_000;
+
 fn wait_browse_exit(child: &mut std::process::Child) -> Result<(), String> {
-    match child.try_wait() {
-        Ok(Some(status)) if status.success() => Ok(()),
-        Ok(Some(status)) => Err(format!(
-            "测量失败=红: browse 子进程异常退出({status})，样本不可信"
-        )),
-        Ok(None) => Err("测量失败=红: browse 子进程未在采样窗口内完成浏览脚本(仍存活)".into()),
-        Err(e) => Err(format!("测量失败=红: wait 失败: {e}")),
+    // 不能单次 try_wait（2026-09-01 CI 实证）：采样器按 pid 路由判「已终止」
+    // 收窗后 20ms，句柄路由的 wait 仍报未终止——内核「写退出码」与「置对象
+    // 信号态」是两步，中间的窄窗里单发 try_wait 会把正常收尾误判成红。
+    // 在宽限窗内轮询；耗尽仍在 = 慢机浏览脚本真没跑完，按红收场。
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(BROWSE_EXIT_GRACE_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "测量失败=红: browse 子进程异常退出({status})，样本不可信"
+                ));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "测量失败=红: browse 子进程宽限 10s 后仍未退出浏览脚本(仍存活)".into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("测量失败=红: wait 失败: {e}")),
+        }
     }
 }
 
