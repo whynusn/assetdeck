@@ -62,22 +62,12 @@ pub struct AppSettings {
     /// false = 按下方三组记忆直接套用，不再询问。设置面板可重新打开。
     #[serde(default = "default_ask_classify")]
     pub ask_classify_on_import: bool,
-    /// 记住的包组（.emo/千牛结构目录）方式：per_source | unified | inbox；
-    /// 空串 = 未记忆。统一归入时连分类名一并记（下同）。
+    /// D66 批次记忆：「记住我的选择」落盘的一对。方式串 into | create |
+    /// inbox，空串 = 未记忆；归入/新建时目标 = 分类名（待分类留空）。
     #[serde(default)]
-    pub remember_package_mode: String,
+    pub remember_mode: String,
     #[serde(default)]
-    pub remember_package_category: String,
-    /// 记住的文件夹组方式。
-    #[serde(default)]
-    pub remember_folder_mode: String,
-    #[serde(default)]
-    pub remember_folder_category: String,
-    /// 记住的散文件组方式。
-    #[serde(default)]
-    pub remember_loose_mode: String,
-    #[serde(default)]
-    pub remember_loose_category: String,
+    pub remember_category: String,
     /// D56 自动检查更新：true（默认）= 启动后静默检查（≥24h 节流）；
     /// false = 只能经设置面板手动检查。
     #[serde(default = "default_auto_update_check")]
@@ -170,12 +160,8 @@ impl Default for AppSettings {
             fast_import_mode: default_fast_import(),
             verbose_diagnostics: false,
             ask_classify_on_import: default_ask_classify(),
-            remember_package_mode: String::new(),
-            remember_package_category: String::new(),
-            remember_folder_mode: String::new(),
-            remember_folder_category: String::new(),
-            remember_loose_mode: String::new(),
-            remember_loose_category: String::new(),
+            remember_mode: String::new(),
+            remember_category: String::new(),
             auto_update_check: default_auto_update_check(),
             last_check_unix: 0,
             dismissed_version: String::new(),
@@ -398,12 +384,8 @@ mod tests {
             fast_import_mode: true,
             verbose_diagnostics: false,
             ask_classify_on_import: true,
-            remember_package_mode: String::new(),
-            remember_package_category: String::new(),
-            remember_folder_mode: String::new(),
-            remember_folder_category: String::new(),
-            remember_loose_mode: String::new(),
-            remember_loose_category: String::new(),
+            remember_mode: String::new(),
+            remember_category: String::new(),
             auto_update_check: true,
             last_check_unix: 0,
             dismissed_version: String::new(),

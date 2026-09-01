@@ -768,5 +768,24 @@ if (click_count % 2) == 1 {
 
 **守卫**：phash 低信息单测（AC 能量地板/结构图可信）；library 五测（字节相同判重、纯色对不互判不丢、近重复带提醒、无关不提醒、图片落 content_hash）；e2e 三测（跨批字节相同点名跳过、近重复入库带提醒、纯色对进程级零误判）；sample-library e2e 全量回归（D63 幂等重导语义不变）。
 
+### D66 归类弹窗重构：批次级单决策 + 单输入框检索 + 可解析包静默直通（2026-09-01）
+
+**背景**：D50 归类弹窗按「来源组」逐行问（组内 chips + 统一归入输入框），分类选择靠 ComboBox 逐个滚动，用户点名两条：①无法输入快速定位分类（太慢）；②「总的应该分成三种操作：归入，新建，和待分类」——批次级语义，而逐组三 chip 重复 UI 迷惑。迭代中用户补充定稿：**一个文本框，输入实时匹配已有分类，点候选即归入；匹配不到就点导入，弹提示「已自动创建并导入」**。
+
+**交互定稿（三步收敛）**：
+1. 初版把「三操作」做成每组一行、行行重复三 chip——被用户否（重复 UI 迷惑）。回到 CONTEXT.md 既定原则「归类发生在批次级，每批一次」：**整批一个决策**，来源组信息降级为只读清单行（「本次导入：散文件 4 个 · 文件夹「旅行」 · 素材包「broken」（结构未识别）」，单项组带名、残包组标注）。
+2. 用户提出单输入框方案，采纳并补三处强化：**实时预告行**（打字时即显示「将导入到已有分类「X」/没有同名分类，点导入将新建「X」/留空 = 放入待分类」，导入前结果可见——自动建分类不留无感知，色分 accent/黄/灰）；**大小写不敏感精确匹配取列表规范名**（输入 screenshots 归入已有 Screenshots，不产生大小写重复项）；**待分类保留显式按钮**（取消|放入待分类|导入），空输入点导入同效兜底。
+3. 归入/新建两枚 chip 被「输入框 + 预告行」吸收：confirm 时 `resolve_target` 统一解析（空 → inbox；精确命中 → category:规范名；未命中 → 新建 + Success toast 点名）。输入「待分类」经 `decision_to_mode_field` 归 inbox 指令，不会真的建重名分类。
+
+**静默直通（按包内分类）**：probe 探得 ≥1 分类的 .emo / 千牛结构目录**不弹窗**，壳层直接发 `p\tauto\t` 清单行按包内分类导入（整批皆可解析 = 零点击）。门槛 probe≥1 的理由：探得 0 分类或 probe 失败 = 结构可疑（残包），交用户裁决（进清单行，预填包名 stem）。CLI 清单格式零改动（`<kind>\t<auto|inbox|category:名>\t<path>`，`auto` 本就存在）。
+
+**记忆（R8）收拢**：六个 per-kind 记忆字段 → `remember_mode`/`remember_category` 一对（批次级）。串语义 `category`（含旧 `into`/`create` 兼容映射，指令层同形）/`inbox`；未知串（per_source/unified/乱值）= 没记，重新弹窗。R8 直通条件不变：ask 关 + 有记忆 → 整批套用不弹窗；ask 关但没记忆 → 照常弹窗。预填优先级：记忆分类 > 单一来源组建议名（文件夹名/包 stem）> 空。
+
+**取舍记录**：①「按文件夹名归类」自动方式正式裁撤（用户三操作语义 + D50 遗留魔法行为），降级为「单文件夹导入时输入框预填目录名」的建议；多文件夹各自成类需分两次导入（v1 接受）。②probe 分类数不再进 UI（可解析包静默、残包组里只可能是 None/0，「含 N 个分类」角标是死代码），`SourceGroup.category_count` 字段删除。③归入候选封顶 8 条保留（继续输入收窄）。
+
+**落点**：crates/ui-viewmodels classify.rs（`plan_import` 静默分流 / `manifest_summary` / `dialog_prefill` / `remembered_decision` / `resolve_target`+`ClassifyTarget`（hint/hint_kind 与 confirm 共用真源）/ `filter_category_matches`；`SourceGroup` 瘦身）、settings.rs（记忆字段收拢）；crates/app-ui main.rs（ImportFlow 去 rows 行模型，finalize 分流、confirm(kind,remember)、refresh_matches/refresh_target、do_import 三参 + auto 行、新建 toast）；appwindow.slint（ClassifyRowData 删除，classify-summary/argument/matches/hint/hint-kind 平铺属性，classify-confirmed(int,bool)）；ui_enums.rs + slint UiEnums（classify-hint-*/classify-confirm-* 双侧同步 + 测试锁定）；CONTEXT.md 词汇（归入/新建词条，「统一归入」「按文件夹名归类」降 _Avoid_）。
+
+**守卫**：classify_spec 20 测（静默直通/残包仍问/批次预填/记忆串迁移/清单行格式/resolve_target 大小写规范名/hint 文案锁定/决策→指令映射/候选过滤）；settings_spec 往返含新字段；slint-viewer 渲染三态（新建预告黄/已有预告 accent+候选高亮/空输入待分类）；全 workspace test + clippy 归零。
+
 
 

@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use platform::UrlOpener;
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
-use ui_viewmodels::classify::{self, EntryKind, GroupKind, GroupMode, ImportEntry, SourceGroup};
+use ui_viewmodels::classify::{
+    self, ClassifyTarget, EntryKind, GroupMode, ImportEntry, SourceGroup,
+};
 use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::{
@@ -468,11 +470,12 @@ impl CrudCtx {
 // D49/D50 通用导入流：三入口汇流 → 分类数预扫描 → 归类弹窗 → 清单子进程。
 // ---------------------------------------------------------------------------
 
-/// 弹窗行模型在壳层的持有物 + 决策装配。全部 UI 线程访问。
+/// 弹窗状态在壳层的持有物 + 决策装配。全部 UI 线程访问。
 struct ImportFlow {
     ui: slint::Weak<AppWindow>,
-    rows: Rc<VecModel<ClassifyRowData>>,
     groups: Rc<RefCell<Vec<SourceGroup>>>,
+    /// D66 静默直通包（finalize 分流产物；弹窗确认后与组决策合并成清单）。
+    silent: Rc<RefCell<Vec<std::path::PathBuf>>>,
     entries: Rc<RefCell<Vec<ImportEntry>>>,
     /// 待预扫描条目数（probe 回来一个减一个，归零即 finalize）。
     pending: Rc<Cell<u32>>,
@@ -483,21 +486,8 @@ struct ImportFlow {
     library_root: Option<String>,
 }
 
-fn mode_code(mode: GroupMode) -> i32 {
-    match mode {
-        GroupMode::PerSource => 0,
-        GroupMode::Unified => 1,
-        GroupMode::Inbox => 2,
-    }
-}
-
-fn mode_of(code: i32) -> GroupMode {
-    match code {
-        1 => GroupMode::Unified,
-        2 => GroupMode::Inbox,
-        _ => GroupMode::PerSource,
-    }
-}
+/// 归入候选封顶（弹窗列表限高，超出部分靠继续输入收窄）。
+const MATCH_CAP: usize = 8;
 
 /// 档位 → --mode 值（D37）。
 fn import_mode_arg(settings: &AppSettings) -> &'static str {
@@ -641,80 +631,51 @@ impl ImportFlow {
         }
     }
 
-    /// 全部 probe 就绪：D50 表分组 → 记忆预填 → 全记忆直通 / 弹窗。
+    /// 全部 probe 就绪：D66 分流（可解析包静默直通）→ R8 记忆直通 / 弹窗
+    /// （批次级：只读清单行 + 单输入框 + 实时候选与预告行）。
     fn finalize(self: &Rc<Self>) {
-        let groups = classify::plan_groups(&self.entries.borrow());
-        let groups_len = groups.len();
+        let plan = classify::plan_import(&self.entries.borrow());
+        let groups_len = plan.groups.len();
         logging::info!(
-            "导入 finalize：entries={} groups={} ",
+            "导入 finalize：entries={} silent_packages={} groups={}",
             self.entries.borrow().len(),
+            plan.silent_packages.len(),
             groups_len
         );
-        if groups.is_empty() {
-            logging::warn!("plan_groups 为空（全部条目被过滤？），不弹窗");
+        if groups_len == 0 {
+            // 可解析包全部静默按包内分类直通（D66）：整批 .emo 拖入零点击。
+            if !plan.silent_packages.is_empty() {
+                logging::info!(
+                    "可解析包静默直通：{} 个包按包内分类导入",
+                    plan.silent_packages.len()
+                );
+                self.do_import(&[], None, &plan.silent_packages);
+            } else {
+                logging::warn!("plan_import 两组皆空（全部条目被过滤？），不弹窗");
+            }
             return;
         }
-        let (ask, memories) = {
-            let settings = self.settings.borrow();
-            (
-                settings.ask_classify_on_import,
-                classify::memory_defaults(&groups, &settings),
-            )
-        };
-        if !ask && memories.iter().all(Option::is_some) {
-            // R8：全部组有记忆 → 不弹窗直接套用。
-            logging::info!("R8 记忆直通：跳过弹窗直接导入 {} 组", groups.len());
-            let decisions: Vec<(GroupMode, Option<String>)> = memories
-                .iter()
-                .map(|m| m.clone().expect("all Some 已判"))
-                .collect();
-            self.do_import(&groups, &decisions);
+        if let Some(decision) = classify::remembered_decision(&self.settings.borrow()) {
+            // R8：有批次记忆 → 不弹窗直接套用。
+            logging::info!("R8 记忆直通：跳过弹窗直接导入 {} 组", groups_len);
+            self.do_import(&plan.groups, Some(decision), &plan.silent_packages);
             return;
         }
 
-        let rows: Vec<ClassifyRowData> = groups
-            .iter()
-            .zip(&memories)
-            .map(|(group, memory)| {
-                let (summary, kind_code) = match group.kind {
-                    GroupKind::Package => (
-                        format!("素材包（.emo / 千牛目录）· {} 个", group.paths.len()),
-                        0,
-                    ),
-                    GroupKind::Folder => (format!("文件夹 · {} 个", group.paths.len()), 1),
-                    GroupKind::Loose => (format!("散文件 · {} 个", group.paths.len()), 2),
-                };
-                let (chosen, unified) = memory
-                    .clone()
-                    .map(|(mode, category)| (mode_code(mode), category.unwrap_or_default()))
-                    .unwrap_or((mode_code(group.default_mode), String::new()));
-                ClassifyRowData {
-                    kind: kind_code,
-                    summary: summary.into(),
-                    category_count: group.category_count.map_or(-1, |n| n as i32),
-                    default_mode: mode_code(group.default_mode),
-                    chosen_mode: chosen,
-                    unified_name: unified.into(),
-                }
-            })
-            .collect();
-        *self.groups.borrow_mut() = groups;
-        self.rows.set_vec(rows);
-
+        *self.groups.borrow_mut() = plan.groups.clone();
+        *self.silent.borrow_mut() = plan.silent_packages;
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        let candidates: Vec<slint::SharedString> = self
-            .categories
-            .borrow()
-            .iter()
-            .skip(1) // 下标 0 = 「全部」，不是分类
-            .cloned()
-            .map(slint::SharedString::from)
-            .collect();
-        ui.set_classify_categories(slint::ModelRc::from(Rc::new(VecModel::from(candidates))));
+        ui.set_classify_summary(classify::manifest_summary(&plan.groups).into());
+        ui.set_classify_argument(
+            classify::dialog_prefill(&plan.groups, &self.settings.borrow())
+                .unwrap_or_default()
+                .into(),
+        );
+        self.refresh_target(&ui);
         ui.set_classify_open(true);
-        logging::info!("归类弹窗已置位 classify_open（rows={groups_len}）");
+        logging::info!("归类弹窗已置位 classify_open（groups={groups_len}）");
         // 入场动效下一帧翻转（D53 结论：init 技巧无效，首帧前置位不触发过渡）。
         let weak = self.ui.clone();
         CLASSIFY_ANIM_TIMER.with(|slot| {
@@ -751,91 +712,134 @@ impl ImportFlow {
         });
     }
 
-    fn set_row_mode(&self, index: usize, code: i32) {
-        if let Some(mut row) = self.rows.row_data(index) {
-            row.chosen_mode = code;
-            self.rows.set_row_data(index, row);
-        }
+    /// 输入同步：argument 落属性 → 重滤候选 + 刷新实时预告行。
+    fn set_name(&self, name: slint::SharedString) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        ui.set_classify_argument(name.clone());
+        self.refresh_matches(&ui, &name);
+        self.refresh_target(&ui);
     }
 
-    fn set_row_name(&self, index: usize, name: slint::SharedString) {
-        if let Some(mut row) = self.rows.row_data(index) {
-            row.unified_name = name;
-            self.rows.set_row_data(index, row);
-        }
+    /// 候选点选 = 用列表规范名回填输入框（与输入同路，预告行随之转「已有分类」）。
+    fn set_picked(&self, name: slint::SharedString) {
+        self.set_name(name);
     }
 
-    /// 「导入」确认：勾了记住就先落设置，再拼清单文件起子进程；「取消」路径
-    /// 只 close，不产生任何库副作用。
-    fn confirm(self: &Rc<Self>, remember: bool) {
+    /// 候选重滤（全类目来自壳层 categories，skip(1) 跳「全部」表头）。
+    fn refresh_matches(&self, ui: &AppWindow, typed: &str) {
+        let candidates: Vec<String> = self.categories.borrow().iter().skip(1).cloned().collect();
+        let hits = classify::filter_category_matches(&candidates, typed, MATCH_CAP);
+        ui.set_classify_matches(ModelRc::from(Rc::new(VecModel::from(
+            hits.into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        ))));
+    }
+
+    /// 实时预告行：输入框内容 → 目标解析（与 confirm 共用 resolve_target，
+    /// 导入前把结果说清楚）。
+    fn refresh_target(&self, ui: &AppWindow) {
+        let candidates: Vec<String> = self.categories.borrow().iter().skip(1).cloned().collect();
+        let typed = ui.get_classify_argument();
+        let target = classify::resolve_target(&candidates, typed.as_str());
+        ui.set_classify_hint(target.hint().into());
+        ui.set_classify_hint_kind(match &target {
+            ClassifyTarget::Inbox => ui_enums::CLASSIFY_HINT_INBOX,
+            ClassifyTarget::Existing(_) => ui_enums::CLASSIFY_HINT_EXISTING,
+            ClassifyTarget::Fresh(_) => ui_enums::CLASSIFY_HINT_NEW,
+        });
+    }
+
+    /// 「导入」确认：kind = UiEnums.classify-confirm-*（0 按输入解析，
+    /// 1 直入待分类）。勾了记住先落设置；自动建分类时 toast 点名。
+    fn confirm(self: &Rc<Self>, kind: i32, remember: bool) {
         let groups = self.groups.borrow().clone();
-        let decisions: Vec<(GroupMode, Option<String>)> = (0..self.rows.row_count())
-            .filter_map(|i| self.rows.row_data(i))
-            .map(|row| {
-                let mode = mode_of(row.chosen_mode);
-                let category = if mode == GroupMode::Unified {
-                    let name = row.unified_name.trim().to_string();
-                    if name.is_empty() {
-                        None
-                    } else {
-                        Some(name)
-                    }
-                } else {
-                    None
-                };
-                (mode, category)
-            })
-            .collect();
-        if remember {
-            self.remember_choices(&groups, &decisions);
-        }
-        self.do_import(&groups, &decisions);
-        self.close();
-    }
-
-    /// R8：把每行决策写进设置（方式 + 统一归入的分类名）并关掉询问。
-    fn remember_choices(&self, groups: &[SourceGroup], decisions: &[(GroupMode, Option<String>)]) {
-        {
-            let mut settings = self.settings.borrow_mut();
-            settings.ask_classify_on_import = false;
-            for (group, (mode, category)) in groups.iter().zip(decisions) {
-                let mode_str = match mode {
-                    GroupMode::PerSource => "per_source",
-                    GroupMode::Unified => "unified",
-                    GroupMode::Inbox => "inbox",
-                };
-                let category_value = category.clone().unwrap_or_default();
-                match group.kind {
-                    GroupKind::Package => {
-                        settings.remember_package_mode = mode_str.to_string();
-                        settings.remember_package_category = category_value;
-                    }
-                    GroupKind::Folder => {
-                        settings.remember_folder_mode = mode_str.to_string();
-                        settings.remember_folder_category = category_value;
-                    }
-                    GroupKind::Loose => {
-                        settings.remember_loose_mode = mode_str.to_string();
-                        settings.remember_loose_category = category_value;
+        let silent = self.silent.borrow().clone();
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let decision = match kind {
+            ui_enums::CLASSIFY_CONFIRM_INBOX => (GroupMode::Inbox, None),
+            ui_enums::CLASSIFY_CONFIRM_RESOLVE => {
+                let candidates: Vec<String> = self
+                    .categories
+                    .borrow()
+                    .iter()
+                    .skip(1) // 下标 0 = 「全部」，不是分类
+                    .cloned()
+                    .collect();
+                match classify::resolve_target(&candidates, ui.get_classify_argument().as_str()) {
+                    ClassifyTarget::Inbox => (GroupMode::Inbox, None),
+                    ClassifyTarget::Existing(name) => (GroupMode::Into, Some(name)),
+                    ClassifyTarget::Fresh(name) => {
+                        // 无感知红线：自动建分类必须点名（输入「待分类」= inbox
+                        // 指令，不会真的建重名分类）。
+                        if name != classify::INBOX_CATEGORY {
+                            show_notice(
+                                &ui,
+                                TargetNoticeTone::Success,
+                                format!("未精确匹配到已有分类，已自动创建「{name}」并导入"),
+                            );
+                        }
+                        (GroupMode::Create, Some(name))
                     }
                 }
             }
+            other => {
+                logging::warn!("classify-confirmed 未知 kind={other}，按待分类处理");
+                (GroupMode::Inbox, None)
+            }
+        };
+        if remember {
+            self.remember_choice(&decision);
+        }
+        self.do_import(&groups, Some(decision), &silent);
+        self.close();
+    }
+
+    /// R8：把批次决策写进设置（方式 + 分类名）并关掉询问。
+    fn remember_choice(&self, decision: &(GroupMode, Option<String>)) {
+        {
+            let mut settings = self.settings.borrow_mut();
+            settings.ask_classify_on_import = false;
+            settings.remember_mode = match decision.0 {
+                GroupMode::Inbox => "inbox",
+                GroupMode::Into | GroupMode::Create => "category",
+            }
+            .to_string();
+            settings.remember_category = decision.1.clone().unwrap_or_default();
         }
         if let Err(error) = self.settings.borrow().save(&self.settings_path) {
             logging::warn!("记忆归类选择写入设置失败: {error}");
         }
     }
 
-    /// 决策 → 清单文件 → `--import-paths` 子进程管线（进度条/失败提示/缩略图
-    /// 派生与旧两入口全同路）。
-    fn do_import(&self, groups: &[SourceGroup], decisions: &[(GroupMode, Option<String>)]) {
+    /// 决策 + 静默直通包 → 清单文件 → `--import-paths` 子进程管线（进度条/
+    /// 失败提示/缩略图派生与旧两入口全同路）。批次级一个决策；decision 为
+    /// None = 只发静默直通行（整批可解析包）。
+    fn do_import(
+        &self,
+        groups: &[SourceGroup],
+        decision: Option<(GroupMode, Option<String>)>,
+        silent_packages: &[std::path::PathBuf],
+    ) {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
         let mut lines = String::new();
         let mut total = 0usize;
-        for (group, (mode, category)) in groups.iter().zip(decisions) {
-            let mode_field = classify::decision_to_mode_field(*mode, category.as_deref());
+        // D66 静默直通包：p\tauto\t = 按包内分类，先于弹窗决策行。
+        for path in silent_packages {
+            lines.push_str(&format!("p\tauto\t{}\n", path.display()));
+            total += 1;
+        }
+        let mode_field = decision
+            .as_ref()
+            .map(|(mode, category)| classify::decision_to_mode_field(*mode, category.as_deref()))
+            .unwrap_or_else(|| "inbox".to_string());
+        for group in groups {
             for path in &group.paths {
                 let kind_char = if path.is_dir() {
                     "d"
@@ -1521,8 +1525,8 @@ fn main() {
     // D49/D50 通用导入流（三入口汇流 → 预扫描 → 归类弹窗 → 清单子进程）。
     let import_flow = Rc::new(ImportFlow {
         ui: app.as_weak(),
-        rows: Rc::new(VecModel::default()),
         groups: Rc::new(RefCell::new(Vec::new())),
+        silent: Rc::new(RefCell::new(Vec::new())),
         entries: Rc::new(RefCell::new(Vec::new())),
         pending: Rc::new(Cell::new(0)),
         settings: settings.clone(),
@@ -1531,7 +1535,6 @@ fn main() {
         importing: importing.clone(),
         library_root: library_root.clone(),
     });
-    app.set_classify_rows(ModelRc::from(import_flow.rows.clone()));
     // 最近一次动作目标（右键命中的那张 / 重命名与属性打开的那张）。菜单收起
     // 不清它——下一次菜单或操作条动作会重新设定，读侧只在弹窗里回显。
     let menu_target: Rc<RefCell<Option<AssetId>>> = Rc::new(RefCell::new(None));
@@ -1635,17 +1638,17 @@ fn main() {
         });
     }
 
-    // D50 归类弹窗回调：行内决策 / 取消 / 确认导入。
+    // D66 归类弹窗回调：输入同步 / 候选点选 / 取消 / 确认导入。
     {
         let flow = import_flow.clone();
-        app.on_classify_row_mode_changed(move |index, code| {
-            flow.set_row_mode(index.max(0) as usize, code);
+        app.on_classify_name_changed(move |name| {
+            flow.set_name(name);
         });
     }
     {
         let flow = import_flow.clone();
-        app.on_classify_row_name_changed(move |index, name| {
-            flow.set_row_name(index.max(0) as usize, name);
+        app.on_classify_picked(move |name| {
+            flow.set_picked(name);
         });
     }
     {
@@ -1656,8 +1659,8 @@ fn main() {
     }
     {
         let flow = import_flow.clone();
-        app.on_classify_confirmed(move |remember| {
-            flow.confirm(remember);
+        app.on_classify_confirmed(move |kind, remember| {
+            flow.confirm(kind, remember);
         });
     }
     // D65 导入结果弹窗：两段式出场（同 classify——先收 shown 播反向过渡，

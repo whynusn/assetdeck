@@ -74,6 +74,16 @@ pub const IMPORT_RESULT_EXACT: i32 = 0;
 pub const IMPORT_RESULT_SIMILAR: i32 = 1;
 pub const IMPORT_RESULT_FAILED: i32 = 2;
 
+/// D66 归类弹窗预告行形态 → UiEnums.classify-hint-*（待分类 / 已有 / 新建）。
+/// 数值与 ui_viewmodels::classify::ClassifyTarget::hint_kind 的产出约定一致。
+pub const CLASSIFY_HINT_INBOX: i32 = 0;
+pub const CLASSIFY_HINT_EXISTING: i32 = 1;
+pub const CLASSIFY_HINT_NEW: i32 = 2;
+
+/// D66「导入」按钮语义 → UiEnums.classify-confirm-*（按输入解析 / 直入待分类）。
+pub const CLASSIFY_CONFIRM_RESOLVE: i32 = 0;
+pub const CLASSIFY_CONFIRM_INBOX: i32 = 1;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +105,10 @@ mod tests {
         assert_eq!(IMPORT_RESULT_EXACT, 0);
         assert_eq!(IMPORT_RESULT_SIMILAR, 1);
         assert_eq!(IMPORT_RESULT_FAILED, 2);
+        assert_eq!(CLASSIFY_HINT_INBOX, 0);
+        assert_eq!(CLASSIFY_HINT_EXISTING, 1);
+        assert_eq!(CLASSIFY_HINT_NEW, 2);
+        assert_eq!(CLASSIFY_CONFIRM_RESOLVE, 0);
+        assert_eq!(CLASSIFY_CONFIRM_INBOX, 1);
     }
 }
