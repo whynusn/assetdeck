@@ -16,6 +16,17 @@ path = "src/main.rs"
 flate2 = "1"
 tar = "0.4"
 
+# exe 资源图标（Windows 专用，见 build.rs）；MIT，过主仓 deny licenses 白名单。
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# gnu 构建脚本把资源路径换 8.3 短路径规避 windres 空格坑（见 build.rs）。
+[target.'cfg(all(windows, target_env = "gnu"))'.build-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

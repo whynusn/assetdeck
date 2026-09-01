@@ -97,6 +97,9 @@ export struct ImportResultRowData {
 
 export component AppWindow inherits Window {
     title: "素材管理器";
+    // 窗口图标（标题栏/任务栏/Alt-Tab）：路径相对本文件指向仓库根 assets/。
+    // Explorer/快捷方式用的 exe 资源图标不在这里，由 build.rs 经 winresource 另嵌。
+    icon: @image-url("../../../assets/window-icon.png");
     preferred-width: 1000px;
     preferred-height: 700px;
     background: Theme.bg-app;
