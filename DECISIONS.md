@@ -859,6 +859,18 @@ if (click_count % 2) == 1 {
 
 **守卫**：workspace test 全绿（classify_spec 16 例、settings_spec 6 例含 describe/ specs 同构断言）+ clippy 归零（抓出 settings_path 死字段连带清理）+ fmt；slint-viewer 渲染弹窗实证复选框移除后布局完好（候选列表/预告行/按钮行无空洞）。
 
+### D72 一键发版：installer 版本元数据推导自主 workspace + scripts/release.ps1 单命令发版序（2026-09-02）
+
+**背景与决策**：D57 定的发版序（升版→推 main→打 tag→推 tag）有两个人工缝：①installer 独立 workspace 的内部版本号冻结在 0.1.0（原注释「勿当第二版本真相源」），而 winresource 缺省 FileVersion 取本 crate 的 CARGO_PKG_VERSION——每个安装包内嵌的版本元数据都是陈旧值；②升版涉及手改 Cargo.toml + 手跑 cargo update + 手打 tag，漏一步即返工。用户定盘：**版本号一处维护、发版一条命令**。旧决策的问题不在「防两源漂移」的动机，而在手段——宣布第二字段无效并冻结，等于容忍它永远撒谎；正确形态是唯一真相源 + 其余全部推导。
+
+**决策**：
+1. **installer 版本元数据改推导**：installer/build.rs 编译期读 `../Cargo.toml` 的 `[workspace.package].version`，显式 `.set("FileVersion"/"ProductVersion")`（gnu/msvc 两分支同改）；读取失败回落 CARGO_PKG_VERSION + `cargo:warning`（构建不炸但元数据陈旧，warning 必须可见）。⚠ 一旦 build.rs 打印任何 `cargo:rerun-if-changed`，cargo 就**只**按列出的路径重跑 build.rs——故主清单与 `../assets/app-icon.ico` 必须一并钉入，否则换图标不再触发资源重嵌。installer/Cargo.toml 的 version 字段就此永久冻结 0.1.0：从「被忽略的第二真相源」变成「无需维护的派生消费点」，注释按新语义改写。
+2. **scripts/release.ps1 <version> [-Subject 主题] [-DryRun]**：校验段全过才动手（x.y.z 格式→树干净→在 main→本地/远程 tag 不存在→旧≠新）→ 写 Cargo.toml（根清单第一条 `^version` 行即 [workspace.package] 的，与 package.ps1 同一假设、两处须同步改）→ cargo update --workspace → commit（显式路径 Cargo.toml+Cargo.lock）→ push main → annotated tag（vX.Y.Z：主题）→ push tag。CI 的 tag==Cargo.toml 版本强校验继续兜底错版。release.ps1 文件必须 **UTF-8 带 BOM**（PS 5.1 对无 BOM 按 GBK 解码，中文全乱码），且只可用 Write/Edit 工具改写。
+
+**验证**：package.ps1 全流程重建 0.1.4，artifacts 安装包内嵌 FileVersion/ProductVersion 实测 = 0.1.4（gnu windres 8.3 短路径与 .set 互不干扰）；release.ps1 格式错误/树不干净/DryRun 计划三路径实测通过（真实写推路径 v0.1.5 首跑）。附带事故档：installer 经 include_bytes! 以 `dist.tar.gz` 为构建输入——它虽是可再生中间产物，但脱离 package.ps1 单跑 `cargo build`（installer 目录）也需要它，**清理工作区时不可删**（2026-09-02 清理事故已由 package.ps1 重建修复）。
+
+**落点**：installer/build.rs、installer/Cargo.toml（注释改口径）、scripts/release.ps1（新）、.gitignore（/.mimosa/ 工具运行态）。
+
 
 
 

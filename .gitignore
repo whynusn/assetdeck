@@ -29,3 +29,6 @@ Cargo.lock.bak
 /Default_Project_probe/
 /dsh-fix-web-profile/
 
+# 工具运行态（mimosa 安全扫描插件的 hook 状态）
+/.mimosa/
+
