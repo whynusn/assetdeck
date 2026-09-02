@@ -38,6 +38,9 @@ thread_local! {
     static NOTICE_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     /// D56 更新弹窗两段式入场（同 CLASSIFY_ANIM_TIMER 模式）。
     static UPDATE_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
+    /// D73 运行中间隔检查的节拍器：Repeated 每 10min 醒一次只评估到期与否，
+    /// 到期才发起静默检查（网络请求仍 24h 至多一次）。Timer 非 Send，UI 线程持有。
+    static UPDATE_CHECK_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     /// D56 更新检查的 UI 线程装配句柄。worker 线程经 invoke_from_event_loop
     /// 弹回 UI 线程后从这里取回 VM/设置 Rc——Rc 非 Send，不能跨线程携带；
     /// 收尾闭包只带 Weak + 纯数据（Send），Rc 在 UI 线程侧取。
@@ -3811,23 +3814,59 @@ fn main() {
         });
     }
 
-    // D56 静默检查：开关开启且距上次 ≥24h 才发起。后台线程跑网络，结果经
-    // 事件循环回 UI——失败只记日志（VM 静默档），不打扰启动过程。
+    // D56 静默检查（启动档）+ D73 运行中间隔档：两处共用同一到期谓词
+    // （auto_update_check 开且距上次 ≥24h）。启动档立即评一次；间隔档靠
+    // Repeated Timer 每 10min 醒来重评——轮询的只有时钟，网络请求仍然
+    // 24h 至多一次；任何检查（含手动）发起即刷新节流钟，下一次自动顺延。
+    // 失败零打扰只记日志（VM 静默档），不打扰使用过程。
     {
-        let stored = settings.borrow();
-        let now = ui_viewmodels::unix_now_secs();
-        if stored
-            .last_check_unix
-            .saturating_add(ui_viewmodels::CHECK_INTERVAL_SECS)
-            <= now
-            && stored.auto_update_check
-        {
-            logging::info!(
-                "静默检查更新（上次检查 {} 秒前）",
-                now - stored.last_check_unix
+        let ui = app.as_weak();
+        let feeds_path = feeds_path.clone();
+        let spawn_due_check = move |ui: slint::Weak<AppWindow>| {
+            let (vm, settings) = UPDATE_WIRING.with(|slot| {
+                let guard = slot.borrow();
+                let wiring = guard.as_ref().expect("更新装配未初始化");
+                (wiring.vm.clone(), wiring.settings.clone())
+            });
+            if vm.borrow().is_checking() {
+                return; // 在途检查（手动/上一拍静默）未回，不叠加
+            }
+            let (due, last) = {
+                let stored = settings.borrow();
+                (
+                    ui_viewmodels::silent_check_due(
+                        stored.last_check_unix,
+                        ui_viewmodels::unix_now_secs(),
+                        stored.auto_update_check,
+                    ),
+                    stored.last_check_unix,
+                )
+            };
+            if due {
+                logging::info!(
+                    "静默检查更新（上次检查 {} 秒前）",
+                    ui_viewmodels::unix_now_secs() - last
+                );
+                spawn_update_check(ui, feeds_path.clone(), true);
+            }
+        };
+
+        // 启动档：立即评估一次（D56 原行为）。
+        spawn_due_check(app.as_weak());
+
+        // 间隔档：节拍器常驻，每拍只做纯时钟判断，到期才发检查。
+        let tick_ui = ui.clone();
+        UPDATE_CHECK_TIMER.with(|slot| {
+            slot.borrow().start(
+                TimerMode::Repeated,
+                std::time::Duration::from_secs(600),
+                move || {
+                    if let Some(app) = tick_ui.upgrade() {
+                        spawn_due_check(app.as_weak());
+                    }
+                },
             );
-            spawn_update_check(app.as_weak(), feeds_path.clone(), true);
-        }
+        });
     }
 
     grid.sync();

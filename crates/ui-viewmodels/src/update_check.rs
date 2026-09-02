@@ -22,6 +22,14 @@ pub const DEFAULT_FEEDS: &[&str] =
 /// 源持续不可达时每次启动都白打一发，不是用户想要的「检查」。
 pub const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
+/// 静默检查到期谓词（D73）：启动档与运行中间隔档共用同一把尺——
+/// 开关开启且距上次检查 ≥24h 才算到期。任何检查（含手动）发起即刷新
+/// `last_check_unix`，因此手动检查会把下一次自动检查顺延满 24h，
+/// 这是「按发起过计」节流语义的自然结果。
+pub fn silent_check_due(last_check_unix: u64, now_unix: u64, auto_enabled: bool) -> bool {
+    auto_enabled && last_check_unix.saturating_add(CHECK_INTERVAL_SECS) <= now_unix
+}
+
 /// 单源网络超时（毫秒）。检查在后台线程执行，慢只影响结果何时回来，不阻塞 UI。
 pub const FETCH_TIMEOUT_MS: u64 = 10_000;
 
@@ -688,5 +696,24 @@ mod tests {
             vm.status_text(now - 7_200, now),
             format!("上次检查：{}", relative_time(7_200))
         );
+    }
+
+    #[test]
+    fn silent_check_due_boundary_is_inclusive_24h() {
+        let last = 10_000_000u64;
+        // 恰满 24h = 到期（saturating_add 后 <= now，与启动档原判定逐字一致）。
+        assert!(silent_check_due(last, last + CHECK_INTERVAL_SECS, true));
+        // 差 1 秒 = 不到期。
+        assert!(!silent_check_due(
+            last,
+            last + CHECK_INTERVAL_SECS - 1,
+            true
+        ));
+        // 从未检查过（last=0）必然到期。
+        assert!(silent_check_due(0, CHECK_INTERVAL_SECS, true));
+        // 时钟回拨（now < last）不崩也不误报：saturating 语义下未到期。
+        assert!(!silent_check_due(last + 100, last, true));
+        // 开关关闭永不自动检查。
+        assert!(!silent_check_due(0, u64::MAX, false));
     }
 }

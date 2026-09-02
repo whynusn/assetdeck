@@ -37,8 +37,8 @@ pub use update_apply::{
     DOWNLOAD_TIMEOUT_MS, INSTALLER_ASSET_PREFIX, MAX_DOWNLOAD_BYTES, SUMS_ASSET_NAME,
 };
 pub use update_check::{
-    check_update, load_feeds, relative_time, unix_now_secs, CheckOutcome, ReleaseAsset,
-    ReleaseInfo, UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS,
+    check_update, load_feeds, relative_time, silent_check_due, unix_now_secs, CheckOutcome,
+    ReleaseAsset, ReleaseInfo, UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS,
     FETCH_TIMEOUT_MS,
 };
 

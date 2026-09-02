@@ -871,6 +871,16 @@ if (click_count % 2) == 1 {
 
 **落点**：installer/build.rs、installer/Cargo.toml（注释改口径）、scripts/release.ps1（新）、.gitignore（/.mimosa/ 工具运行态）。
 
+### D73 更新检查触发补全：运行中间隔档（2026-09-02）
+
+**背景与决策**：D56 的静默检查只在启动时评估一次「到期与否」——窗口常驻多日不再触发，用户点名补「进入应用自动触发 + 时间间隔触发」。查明现状：启动档已有（`auto_update_check` 开关 + `last_check_unix` 24h 节流双门），手动档已有；缺的只有运行中间隔。
+
+**决策**：Slint Repeated Timer 每 600s 醒一次，只做纯时钟判断——到期（`silent_check_due(last, now, auto_enabled)`）且不在途（`is_checking`）才发起静默检查。与「禁 Timer 轮询」纪律的边界：该纪律禁的是**等待外部条件**的轮询重试（窗口就绪/进程退出类，一律 WinEvent/回调）；每日更新检查是时钟驱动的日程任务，节拍器轮询的对象是时钟本身，网络请求仍 24h 至多一次，10min 粒度只影响触发相位不影响频率。到期谓词下沉 ui-viewmodels 成纯函数，启动档与间隔档共用同一把尺（避免两处判定漂移）；手动检查发起即刷新节流钟（D56「按发起过计」语义不变），下一次自动检查顺延满 24h；开关关闭时节拍器空转，每拍一次布尔判断零成本。
+
+**落点**：ui-viewmodels update_check.rs（`silent_check_due` + 边界单测：恰满 24h 到期、差 1 秒不到、last=0 必到、时钟回拨 saturating 不误报、开关关永不触发）；app-ui main.rs（`UPDATE_CHECK_TIMER` thread_local + 启动档与间隔档共用 `spawn_due_check` 闭包——闭包内 `feeds_path` 必须 clone，按值捕获会 FnOnce 化、节拍器第二拍即断）。
+
+**守卫**：update_check 域 24 测例全绿（新增边界 1 例）+ workspace test 全绿 + clippy 归零 + fmt。
+
 
 
 
