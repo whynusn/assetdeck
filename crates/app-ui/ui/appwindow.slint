@@ -2219,10 +2219,11 @@ export component AppWindow inherits Window {
         }
 
         // D66 导入归类弹窗：居中卡片，行 = 来源组，三操作（归入/新建/待分类）。
-        // 归入展开 = 检索框 + 候选列表（ScrollView 高度钉 min(150px, 内容高)
-        // 防塌陷，update 弹窗同款坑）；新建展开 = 预填名输入。可解析包已由
-        // 壳层静默直通（D66），不再有「按包内分类」操作项。入场下一帧翻转
-        // （shown 由壳层在 open 后置位），出场两段式（shown 先收、open 延迟一拍收）。
+        // 归入展开 = 检索框 + 候选列表（ScrollView 高度钉 min(166px, 内容高)
+        // 整行裁齐防塌陷 + 防切行，update 弹窗同款坑）；新建展开 = 预填名输入。
+        // 可解析包已由壳层静默直通（D66），不再有「按包内分类」操作项。入场
+        // 下一帧翻转（shown 由壳层在 open 后置位），出场两段式（shown 先收、
+        // open 延迟一拍收）。
         if root.classify-open: Rectangle {
             property <bool> shown: root.classify-shown;
 
@@ -2274,10 +2275,13 @@ export component AppWindow inherits Window {
                     accepted(text) => { root.classify-name-changed(text); }
                 }
 
-                // 候选列表：ScrollView 高度钉 min(150px, 内容高)，不钉会塌成
-                // 内建 min-height（update 弹窗同款坑）。
+                // 候选列表：ScrollView 高度钉 min(166px, 内容高)，不钉会塌成
+                // 内建 min-height（update 弹窗同款坑）。166px = 6 行整行裁齐
+                // （行 26px + 间距 2px → 5 行 138px / 6 行 166px）——钉 150px
+                // 会把第 6 行拦腰截断，文字切一半像渲染坏了；候选封顶 8 条
+                // （MATCH_CAP），超出的靠列表内滚动，弹窗高度恒定。
                 if root.classify-matches.length > 0: ScrollView {
-                    height: Math.min(150px, matches-col.preferred-height);
+                    height: Math.min(166px, matches-col.preferred-height);
                     viewport-width: self.visible-width;
                     viewport-height: matches-col.preferred-height;
 
