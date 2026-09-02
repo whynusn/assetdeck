@@ -639,7 +639,7 @@ if (click_count % 2) == 1 {
 - 框选橡皮筋（见 D47）；编辑标签、大图预览浮层（见 D48）；备注（notes）字段与备注搜索
 - 瀑布流方向感知预取 + 空闲预算提升（症状驱动；D54 落地后观察再定）
 - 「来源建议分类 + 单键确认」（A4 的另一半）
-- 应用内更新下载安装（见 D56）
+- ~~应用内更新下载安装~~（D70 落地，2026-09-02；签名校验 ed25519 仍后置）
 
 ### D57 构建链硬化（2026-08-29）
 
@@ -830,6 +830,20 @@ if (click_count % 2) == 1 {
 **行为变化**：存量 `settings.toml` 里的 `ask_classify_on_import/remember_*` 键被 serde 静默忽略（结构体无这些字段），曾经关掉询问的用户回到每次必弹——这正是本决策的意图，不做迁移。`dialog_prefill` 去掉 settings 参数，预填回落单一来源组建议名（目录名/包 stem），混合组留空不变。
 
 **落点**：appwindow.slint（CheckBox 删 + import 减项 + 回调改单参）；app-ui main.rs（R8 直通块/confirm remember 参/remember_choice/settings_path 死字段——它唯一读者是 remember_choice）；ui-viewmodels classify.rs（remembered_decision 删、dialog_prefill 签名收窄）、settings.rs（三字段 + default_ask_classify + value_of/slot_mut/detail_for/SETTING_SPECS 行）；classify_spec.rs（4 个记忆用例删、prefill 用例改签名）、settings_spec.rs（roundtrip 字面量减项）。
+
+### D70 应用内自更新：统一安装器路径——下载→校验→退位移交（2026-09-02）
+
+**背景**：D56 推迟项重启。定盘前重估了便携版原地替换方案，被两个事实否掉：①dist 有 **4 个 exe**（asset-manager/decode-worker/sample-library/derive-thumbs），运行中 worker 会撞文件锁，rename 舞步要从「换一个 exe」膨胀成「编排四个」；②便携包是 zip，壳层解包要引 `zip` crate（新依赖）。而 dist.tar.gz 的解包器**本来就存在**——自研安装器（installer crate），且其 payload 是 `include_bytes!` 内嵌，**一个 installer exe 就等于完整新版本**。
+
+**决策（统一路径）**：安装版与便携版走同一条链——下载 `assetdeck-installer-<ver>.exe` → SHA-256 校验 → spawn `--silent --install-dir=<exe 所在目录> --wait-pid=<本进程 pid>` → 本进程 `exit(0)`。安装版多刷一次快捷方式（无害保新）；便携版加 `--no-shortcuts`。模式判定 = exe 目录是否等于安装器默认目录（`%LOCALAPPDATA%\Programs\素材管理器`）；判错的差异上限是「快捷方式没刷新」，无破坏性。安装器**持 PROCESS_SYNCHRONIZE 句柄等老进程退出再解包**（`OpenProcess`+`WaitForSingleObject`，30s 上限；找不到进程=已退直接走）——内核对象等待不是轮询，运行中 exe 的文件锁由「先退出、安装器后解包」的时序消解，全程零 rename、零 zip 依赖。
+
+**供应链**：对照 release 附件 `SHA256SUMS.txt`（D57 已随包产出上传）校验，**缺清单拒绝更新**、不符即中止并留错误行；哈希走 BCrypt CNG（`windows-sys` 已在编译树，零新 crate，密码学原语绝不手写）。sha256 防的是下载损坏/截断；HTTPS（schannel + 系统代理）防传输窃改；**ed25519 签名校验仍后置**（密钥保管是独立工程），与本清单划清边界。
+
+**落地**：platform 增 `HttpFileDownloader` trait + `Win32FileDownloader`（同 WinHTTP 栈：AUTOMATIC_PROXY 跟系统代理、每相位超时、64 KiB 块边收边写盘不驻留内存、`read==0` 标签跳出防「available>0 但 read==0」死循环、512 MiB 异常上限、取消旗标逐块检查）；`crypto::sha256_file_hex`（BCrypt 流式喂块，FIPS 向量单测）。installer 增 `--wait-pid=`。ui-viewmodels 增 `update_apply` 模块：release 清单 `assets[]` 解析进 `ReleaseInfo`（缺失/为空不算坏源——镜像可能只回填 tag）、精确名挑附件（宁可报缺也不模糊匹配装错文件）、sha256sum 标准格式解析（`*` 二进制标记/大小写归一/坏行跳过）、`UpdateApplyVm` 四态状态机（Idle/Downloading/Launching/Failed；**Idle 态吞迟到失败**——取消后的下载线程错误不得把弹窗拽回错误态）。app-ui：弹窗四态（初始三按钮/下载中进度条+取消/启动中不可逆无按钮/失败红字+重试；下载中收 notes 防高度抖动），下载线程 100ms 节流回弹进度（格式化留在 VM 侧可测），**Esc 在下载中 = 先取消再关弹窗**——弹窗关了下载若继续，完成时会毫无预兆退出应用；导入进行中禁止更新（worker 子进程持有 exe）。设置零新增字段。
+
+**落点**：platform lib.rs/win32.rs/Cargo.toml（+Cryptography feature）；installer main.rs/Cargo.toml（+Threading feature）；ui-viewmodels update_check.rs（assets 解析）/update_apply.rs（新模块 11 测例）/lib.rs；app-ui appwindow.slint（弹窗四态+update-later 回调删——按钮已不存在）/main.rs（UpdateWiring 扩 apply_vm+cancel Arc、spawn_update_install/cancel_update_download/is_installer_install、三回调）。
+
+**守卫**：workspace test 全绿（platform 18 含 FIPS 向量、ui-viewmodels 76 含 assets 解析与状态机迁移）+ installer workspace clippy/test 全绿 + 三 crate clippy 归零（`&PathBuf`→`&Path`、手写 Default 改派生均为 clippy 抓出）+ slint-viewer 四态渲染裁剪放大逐态验视（进度条比例、错误行 danger 色、启动态无按钮、无截断叠压）。**遗留**：镜像默认清单仍留白（D56 原话实测再定）——2026-09-02 实测当日本机代理出口断（连主源基线也超时，ghfast.top/gh-proxy.com/moeyy.xyz 三候选不可达），不具备实测条件，维持「GitHub 主源 + update_feeds.toml 覆盖」现状。
 
 **守卫**：workspace test 全绿（classify_spec 16 例、settings_spec 6 例含 describe/ specs 同构断言）+ clippy 归零（抓出 settings_path 死字段连带清理）+ fmt；slint-viewer 渲染弹窗实证复选框移除后布局完好（候选列表/预告行/按钮行无空洞）。
 

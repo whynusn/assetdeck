@@ -29,12 +29,23 @@ pub const FETCH_TIMEOUT_MS: u64 = 10_000;
 /// 万行文档；发布页才是完整变更日志的家。
 const NOTES_MAX_CHARS: usize = 4000;
 
+/// 一个发布附件（D70）：release 清单 `assets[]` 里的一项。自更新只按
+/// 精确文件名挑（安装器 exe + 校验和清单），其余附件无视。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub url: String,
+}
+
 /// 一次成功解析的发布清单。`version` 保留原始 tag（如 "v0.2.0"），展示直用。
+/// `assets` 为空不算坏源（镜像站可能只回填 tag，此时应用内更新不可用、
+/// 「打开发布页」仍是出路）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseInfo {
     pub version: String,
     pub notes: String,
     pub url: String,
+    pub assets: Vec<ReleaseAsset>,
 }
 
 /// 一次检查的结局。`Failed` 只在手动检查时对用户可见（静默档记日志即止）。
@@ -103,10 +114,28 @@ pub fn parse_release_json(text: &str) -> Result<ReleaseInfo, String> {
         .get("html_url")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let assets = value
+        .get("assets")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name")?.as_str()?.trim().to_string();
+                    let asset_url = item.get("browser_download_url")?.as_str()?.to_string();
+                    if name.is_empty() || asset_url.is_empty() {
+                        return None;
+                    }
+                    Some(ReleaseAsset { name, url: asset_url })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(ReleaseInfo {
         version: tag.to_string(),
         notes: truncate_chars(notes),
         url: url.to_string(),
+        assets,
     })
 }
 
@@ -400,6 +429,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_release_json_extracts_release_assets() {
+        let text = r#"{
+            "tag_name": "v0.2.0",
+            "assets": [
+                {"name": "assetdeck-portable-0.2.0.zip", "browser_download_url": "https://dl/a.zip"},
+                {"name": "assetdeck-installer-0.2.0.exe", "browser_download_url": "https://dl/a.exe"},
+                {"name": "SHA256SUMS.txt", "browser_download_url": "https://dl/sums"},
+                {"name": "缺 URL 的残缺项"},
+                {"name": " ", "browser_download_url": "https://dl/blank-name"}
+            ]
+        }"#;
+        let info = parse_release_json(text).unwrap();
+        assert_eq!(info.assets.len(), 3);
+        assert_eq!(info.assets[0].name, "assetdeck-portable-0.2.0.zip");
+        assert_eq!(info.assets[2].url, "https://dl/sums");
+    }
+
+    #[test]
+    fn parse_release_json_without_assets_is_not_a_bad_source() {
+        // 镜像站可能只回填 tag；assets 缺失/为空只是「应用内更新不可用」，
+        // 不是坏源——源回落不应被触发。
+        let info = parse_release_json(&release_json("v0.2.0")).unwrap();
+        assert!(info.assets.is_empty());
+        let empty = parse_release_json(r#"{"tag_name":"v0.2.0","assets":[]}"#).unwrap();
+        assert!(empty.assets.is_empty());
+    }
+
+    #[test]
     fn parse_release_json_truncates_long_notes() {
         let long = "很".repeat(NOTES_MAX_CHARS + 100);
         let text = format!(r#"{{"tag_name":"v1.0.0","body":"{long}"}}"#);
@@ -422,6 +479,7 @@ mod tests {
                 version: "v0.2.0".into(),
                 notes: "修复若干问题".into(),
                 url: "https://github.com/x/y/releases/tag/v0.2.0".into(),
+                assets: Vec::new(),
             })
         );
         assert_eq!(
@@ -550,6 +608,7 @@ mod tests {
                     version: "v0.2.0".into(),
                     notes: String::new(),
                     url: "https://example.com".into(),
+                    assets: Vec::new(),
                 }),
                 true
             ),
@@ -568,6 +627,7 @@ mod tests {
                 version: "v0.2.0".into(),
                 notes: String::new(),
                 url: String::new(),
+                assets: Vec::new(),
             }),
             true,
         );
@@ -580,6 +640,7 @@ mod tests {
                     version: "v0.2.0".into(),
                     notes: String::new(),
                     url: String::new(),
+                    assets: Vec::new(),
                 }),
                 true
             ),
@@ -599,6 +660,7 @@ mod tests {
                     version: "v0.2.0".into(),
                     notes: String::new(),
                     url: String::new(),
+                    assets: Vec::new(),
                 }),
                 false
             ),

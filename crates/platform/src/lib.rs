@@ -9,7 +9,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 剪贴板载荷：变体与目标剪贴板格式一一对应（协商规则见 pipeline::negotiate）。
 ///
@@ -126,6 +126,8 @@ pub enum PlatformError {
     Window(String),
     /// 网络请求失败（DNS/连接/超时/HTTP 状态非 2xx/响应体超限或非法编码）。
     Network(String),
+    /// 哈希/摘要计算失败（D70 更新包校验；BCrypt CNG 侧错误）。
+    Crypto(String),
     /// 外部链接或程序经系统默认方式打开失败（ShellExecute 返回值 ≤ 32）。
     External(String),
     Io(std::io::Error),
@@ -138,6 +140,7 @@ impl fmt::Display for PlatformError {
             PlatformError::Inject(msg) => write!(f, "输入注入错误: {msg}"),
             PlatformError::Window(msg) => write!(f, "窗口操作错误: {msg}"),
             PlatformError::Network(msg) => write!(f, "网络错误: {msg}"),
+            PlatformError::Crypto(msg) => write!(f, "哈希计算错误: {msg}"),
             PlatformError::External(msg) => write!(f, "外部打开失败: {msg}"),
             PlatformError::Io(e) => write!(f, "IO 错误: {e}"),
         }
@@ -386,6 +389,27 @@ pub trait HttpTextFetcher {
 /// 默认浏览器」这一意图收拢到平台层；用户取消之外的失败返回 Err。
 pub trait UrlOpener {
     fn open_url(&self, url: &str) -> Result<()>;
+}
+
+/// 下载进度回调实参：(已接收字节, 总字节)。`total` 为 0 表示对端未报
+/// Content-Length，进度条按不确定态处理，字节数照常上报。
+pub type DownloadProgress<'a> = &'a mut dyn FnMut(u64, u64);
+
+/// 文件流式下载端（D70 应用内自更新）。与 [`HttpTextFetcher`] 同栈不同职责：
+/// 响应体必须**边收边写盘**落到 `dest`（安装包几十 MB，不得整体驻留内存——
+/// 空闲 RSS 预算是选型的根本理由），逐块上报进度；`cancel` 置位后尽快中止
+/// （中止语义 = Err 返回，调用方负责区分「用户取消」与真失败）。
+/// 半成品文件留给调用方处置（覆盖式重下即自愈，不做临时文件体操）。
+pub trait HttpFileDownloader {
+    fn download_to_file(
+        &self,
+        url: &str,
+        dest: &Path,
+        timeout_ms: u64,
+        max_bytes: u64,
+        progress: DownloadProgress<'_>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64>;
 }
 
 // 平台实现模块：声明本身不带条件门，「仅 Windows」的门在该文件内部，

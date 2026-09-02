@@ -12,6 +12,7 @@ pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
 pub mod target_runtime;
 pub mod theme;
+pub mod update_apply;
 pub mod update_check;
 
 pub use catalog_loader::{
@@ -30,9 +31,14 @@ pub use target_bar_vm::{
     TargetPasteNotice, TargetRoutingVm,
 };
 pub use theme::{DarkThemeProvider, LightThemeProvider, ThemeProvider, ThemeTokens};
+pub use update_apply::{
+    hash_matches, installer_asset_name, parse_sha256_sums, pick_asset, UpdateApplyVm,
+    DOWNLOAD_TIMEOUT_MS, INSTALLER_ASSET_PREFIX, MAX_DOWNLOAD_BYTES, SUMS_ASSET_NAME,
+};
 pub use update_check::{
-    check_update, load_feeds, relative_time, unix_now_secs, CheckOutcome, ReleaseInfo,
-    UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS, FETCH_TIMEOUT_MS,
+    check_update, load_feeds, relative_time, unix_now_secs, CheckOutcome, ReleaseAsset,
+    ReleaseInfo, UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS,
+    FETCH_TIMEOUT_MS,
 };
 
 pub use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps};

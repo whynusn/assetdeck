@@ -18,6 +18,13 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath,
 };
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+};
+
 // windows 0.62 起不再预生成 CLSID 常量；Shell Link 对象的 CLSID 是稳定 COM 契约。
 const CLSID_SHELL_LINK: GUID = GUID::from_u128(0x00021401_0000_0000_C000_000000000046);
 
@@ -30,6 +37,7 @@ fn main() {
     let mut silent = false;
     let mut with_shortcuts = true;
     let mut install_dir = install_dir();
+    let mut wait_pid: Option<u32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -43,8 +51,25 @@ fn main() {
             _ => {
                 if let Some(dir) = arg.strip_prefix("--install-dir=") {
                     install_dir = PathBuf::from(dir);
+                } else if let Some(pid) = arg.strip_prefix("--wait-pid=") {
+                    wait_pid = pid.parse().ok();
                 }
             }
+        }
+    }
+
+    // D70 应用内自更新衔接：老进程 spawn 本安装器后随即退出，但退出有耗时，
+    // 直接解包会撞上运行中 exe 的文件锁（Windows 锁写不锁改名）。持
+    // PROCESS_SYNCHRONIZE 句柄等信号——内核对象等待，不是 sleep 轮询；
+    // OpenProcess 找不到进程 = 对方已退，直接往下走。
+    if let Some(pid) = wait_pid {
+        if let Err(err) = wait_for_process_exit(pid, WAIT_EXIT_TIMEOUT_MS) {
+            let _ = message_box(
+                "更新失败",
+                &format!("等待旧版本退出超时，请关闭素材管理器后重新安装。\n\n{err}"),
+                MB_ICONERROR | MB_OK,
+            );
+            std::process::exit(1);
         }
     }
 
@@ -76,6 +101,42 @@ fn main() {
             MB_ICONINFORMATION | MB_OK,
         );
     }
+}
+
+/// 等老进程退出的上限。老进程 spawn 本安装器后随即退出，正常毫秒级；
+/// 上限只对「卡死不退」的异常现场兜底——用户需要明确报错而不是无限等。
+const WAIT_EXIT_TIMEOUT_MS: u32 = 30_000;
+
+/// 等 pid 对应进程退出（D70）。持 PROCESS_SYNCHRONIZE 句柄等信号，
+/// 事件驱动。进程不存在与等待失败都按「已退出」放行：后续解包若真撞锁，
+/// install() 的错误框会给出可读现场；唯一 Err 路径是超时。
+#[cfg(windows)]
+fn wait_for_process_exit(pid: u32, timeout_ms: u32) -> Result<(), String> {
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return Ok(());
+        }
+        struct HandleGuard(*mut core::ffi::c_void);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+        let _guard = HandleGuard(handle);
+        match WaitForSingleObject(handle, timeout_ms) {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(format!("进程 {pid} 在 {timeout_ms}ms 内未退出")),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn wait_for_process_exit(_pid: u32, _timeout_ms: u32) -> Result<(), String> {
+    Ok(())
 }
 
 fn install_dir() -> PathBuf {

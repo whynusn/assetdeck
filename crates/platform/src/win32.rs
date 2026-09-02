@@ -2989,12 +2989,15 @@ pub mod http {
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
         WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
         WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+        WINHTTP_FLAG_SECURE, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_QUERY_STATUS_CODE,
     };
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    use crate::{HttpTextFetcher, PlatformError, Result, UrlOpener};
+    use crate::{
+        DownloadProgress, HttpFileDownloader, HttpTextFetcher, PlatformError, Result, UrlOpener,
+    };
 
     /// 响应体上限：release 清单 JSON 是 KB 量级（超长 notes 也远够），对端
     /// 异常时不得无界吃内存。
@@ -3192,6 +3195,202 @@ pub mod http {
         }
     }
 
+    /// 流式文件下载器（D70）：与 [`Win32HttpFetcher`] 同一条 WinHTTP 栈
+    /// （AUTOMATIC_PROXY 跟系统代理、每相位超时），差异只在消费端——
+    /// 响应体按 64 KiB 块边收边写盘，不驻留内存。
+    pub struct Win32FileDownloader;
+
+    /// 读块大小。64 KiB：对三十 MB 量级的安装包，这是「进度回调足够密」
+    /// 与「系统调用不碎」的折中。
+    const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+    impl HttpFileDownloader for Win32FileDownloader {
+        fn download_to_file(
+            &self,
+            url: &str,
+            dest: &std::path::Path,
+            timeout_ms: u64,
+            max_bytes: u64,
+            progress: DownloadProgress<'_>,
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> Result<u64> {
+            use std::io::Write;
+
+            let (secure, host, port, path) = split_url(url)?;
+            let host_w = wide(&host);
+            let path_w = wide(&path);
+            let verb_w = wide("GET");
+            // 与 fetch_text 同一头串：api.github.com 系镜像与 objects.githubusercontent.com
+            // 都不吃无 User-Agent 的裸请求。
+            let headers_w = wide(concat!(
+                "User-Agent: assetdeck-updater/",
+                env!("CARGO_PKG_VERSION"),
+                "\r\nAccept: */*\r\n"
+            ));
+            let timeout = timeout_ms.clamp(1_000, 60_000) as i32;
+
+            unsafe {
+                let session = HttpHandle(WinHttpOpen(
+                    wide(concat!("assetdeck-updater/", env!("CARGO_PKG_VERSION"))).as_ptr(),
+                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                ));
+                if session.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "WinHttpOpen 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
+
+                let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
+                if connection.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "连接 {host} 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
+                let request = HttpHandle(WinHttpOpenRequest(
+                    connection.0,
+                    verb_w.as_ptr(),
+                    path_w.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    flags,
+                ));
+                if request.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "构造请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                if WinHttpSendRequest(
+                    request.0,
+                    headers_w.as_ptr(),
+                    headers_w.len() as u32 - 1,
+                    ptr::null(),
+                    0,
+                    0,
+                    0,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "发送请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                if WinHttpReceiveResponse(request.0, ptr::null_mut()) == 0 {
+                    return Err(PlatformError::Network(format!(
+                        "接收响应失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let mut status: u32 = 0;
+                let mut status_size = std::mem::size_of::<u32>() as u32;
+                let mut index: u32 = 0;
+                if WinHttpQueryHeaders(
+                    request.0,
+                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    ptr::null(),
+                    &mut status as *mut u32 as *mut core::ffi::c_void,
+                    &mut status_size,
+                    &mut index,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "读状态码失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                if !(200..300).contains(&status) {
+                    return Err(PlatformError::Network(format!("HTTP {status}（{host}）")));
+                }
+
+                // Content-Length 查不到（chunked/代理剥离）不致命：total=0 走
+                // 不确定态，字节数照常上报，上限封顶由 max_bytes 兜底。
+                let mut total: u64 = 0;
+                let mut total_size = std::mem::size_of::<u32>() as u32;
+                let mut header_index: u32 = 0;
+                if WinHttpQueryHeaders(
+                    request.0,
+                    WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                    ptr::null(),
+                    &mut total as *mut u64 as *mut core::ffi::c_void,
+                    &mut total_size,
+                    &mut header_index,
+                ) == 0
+                {
+                    total = 0;
+                }
+
+                // 覆盖式打开：上次取消/失败留下的半成品直接截断重写，
+                // 不做临时文件+改名的体操（失败路径本来就是重下自愈）。
+                let file = std::fs::File::create(dest).map_err(PlatformError::Io)?;
+                let mut writer = std::io::BufWriter::with_capacity(DOWNLOAD_CHUNK_BYTES, file);
+                let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+                let mut received: u64 = 0;
+
+                'download: loop {
+                    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(PlatformError::Network("下载已取消".into()));
+                    }
+                    let mut available: u32 = 0;
+                    if WinHttpQueryDataAvailable(request.0, &mut available) == 0 {
+                        return Err(PlatformError::Network(format!(
+                            "探测数据量失败 (错误码 {})",
+                            last_error()
+                        )));
+                    }
+                    if available == 0 {
+                        break;
+                    }
+                    let mut pending = available;
+                    while pending > 0 {
+                        let want = pending.min(buf.len() as u32);
+                        let mut read: u32 = 0;
+                        if WinHttpReadData(
+                            request.0,
+                            buf.as_mut_ptr() as *mut core::ffi::c_void,
+                            want,
+                            &mut read,
+                        ) == 0
+                        {
+                            return Err(PlatformError::Network(format!(
+                                "读取响应失败 (错误码 {})",
+                                last_error()
+                            )));
+                        }
+                        if read == 0 {
+                            // 连接关闭：必须整体收尾，回到外层会在
+                            // 「available>0 但 read==0」上原地打转。
+                            break 'download;
+                        }
+                        writer
+                            .write_all(&buf[..read as usize])
+                            .map_err(PlatformError::Io)?;
+                        received += read as u64;
+                        if received > max_bytes {
+                            return Err(PlatformError::Network(format!(
+                                "下载超出 {max_bytes} 字节上限，疑似异常响应"
+                            )));
+                        }
+                        progress(received, total);
+                        pending -= read;
+                    }
+                }
+                writer.flush().map_err(PlatformError::Io)?;
+                Ok(received)
+            }
+        }
+    }
+
     pub struct Win32UrlOpener;
 
     impl UrlOpener for Win32UrlOpener {
@@ -3259,4 +3458,156 @@ pub mod http {
     }
 }
 
-pub use http::{Win32HttpFetcher, Win32UrlOpener};
+/// SHA-256 文件摘要（D70 更新包校验）。走 BCrypt CNG：密码学原语绝不手写，
+/// 也零新 crate（windows-sys 已在编译树）。流式分块喂数据，大文件不进内存。
+pub mod crypto {
+    use std::path::Path;
+
+    use windows_sys::Win32::Security::Cryptography::{
+        BCryptCloseAlgorithmProvider, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash,
+        BCryptGetProperty, BCryptHashData, BCryptOpenAlgorithmProvider, BCRYPT_HASH_HANDLE,
+        BCRYPT_OBJECT_LENGTH, BCRYPT_SHA256_ALGORITHM,
+    };
+
+    use crate::{PlatformError, Result};
+
+    /// 读块大小：256 KiB。校验只跑一次每更新，内存增量瞬态且远低于预算。
+    const READ_CHUNK_BYTES: usize = 256 * 1024;
+    /// SHA-256 摘要长度是 FIPS 固定值，不是可查询的实现细节。
+    const SHA256_DIGEST_BYTES: usize = 32;
+
+    fn nt_success(status: i32) -> bool {
+        status == 0
+    }
+
+    /// 64 字符小写十六进制串。文件不存在/读失败返回 Io，BCrypt 侧失败返回 Crypto。
+    pub fn sha256_file_hex(path: &Path) -> Result<String> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path).map_err(PlatformError::Io)?;
+        unsafe {
+            let mut alg: *mut core::ffi::c_void = std::ptr::null_mut();
+            if !nt_success(BCryptOpenAlgorithmProvider(
+                &mut alg,
+                BCRYPT_SHA256_ALGORITHM,
+                std::ptr::null(),
+                0,
+            )) {
+                return Err(PlatformError::Crypto("打开 SHA256 算法提供方失败".into()));
+            }
+            struct AlgGuard(*mut core::ffi::c_void);
+            impl Drop for AlgGuard {
+                fn drop(&mut self) {
+                    unsafe { BCryptCloseAlgorithmProvider(self.0, 0) };
+                }
+            }
+            let _alg = AlgGuard(alg);
+
+            // 哈希对象长度是实现相关值，按属性查询后开缓冲——不写魔法数。
+            let mut cb_object: u32 = 0;
+            let mut cb_result: u32 = 0;
+            if !nt_success(BCryptGetProperty(
+                alg,
+                BCRYPT_OBJECT_LENGTH,
+                &mut cb_object as *mut u32 as *mut u8,
+                std::mem::size_of::<u32>() as u32,
+                &mut cb_result,
+                0,
+            )) {
+                return Err(PlatformError::Crypto("查询哈希对象长度失败".into()));
+            }
+            let mut hash_object = vec![0u8; cb_object as usize];
+
+            let mut hash: BCRYPT_HASH_HANDLE = std::ptr::null_mut();
+            if !nt_success(BCryptCreateHash(
+                alg,
+                &mut hash,
+                hash_object.as_mut_ptr(),
+                cb_object,
+                std::ptr::null(),
+                0,
+                0,
+            )) {
+                return Err(PlatformError::Crypto("创建哈希对象失败".into()));
+            }
+            struct HashGuard(BCRYPT_HASH_HANDLE);
+            impl Drop for HashGuard {
+                fn drop(&mut self) {
+                    unsafe { BCryptDestroyHash(self.0) };
+                }
+            }
+            let _hash = HashGuard(hash);
+
+            let mut buf = vec![0u8; READ_CHUNK_BYTES];
+            loop {
+                let read = file.read(&mut buf).map_err(PlatformError::Io)?;
+                if read == 0 {
+                    break;
+                }
+                if !nt_success(BCryptHashData(hash, buf.as_mut_ptr(), read as u32, 0)) {
+                    return Err(PlatformError::Crypto("喂数据进哈希失败".into()));
+                }
+            }
+
+            let mut digest = [0u8; SHA256_DIGEST_BYTES];
+            if !nt_success(BCryptFinishHash(
+                hash,
+                digest.as_mut_ptr(),
+                SHA256_DIGEST_BYTES as u32,
+                0,
+            )) {
+                return Err(PlatformError::Crypto("取摘要失败".into()));
+            }
+            Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::sha256_file_hex;
+
+        #[test]
+        fn sha256_matches_known_vectors() {
+            let dir = std::env::temp_dir().join("assetdeck-platform-sha256-test");
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let empty = dir.join("empty.bin");
+            std::fs::write(&empty, b"").unwrap();
+            assert_eq!(
+                sha256_file_hex(&empty).unwrap(),
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+
+            // FIPS 180-2 "abc" 向量 + 跨块输入（> 1 读块）验证分块喂送正确。
+            let abc = dir.join("abc.bin");
+            std::fs::write(&abc, b"abc").unwrap();
+            assert_eq!(
+                sha256_file_hex(&abc).unwrap(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+
+            let big = dir.join("big.bin");
+            let chunk = [0xABu8; 1024];
+            let mut big_bytes = Vec::with_capacity(1024 * 1024);
+            for _ in 0..1024 {
+                big_bytes.extend_from_slice(&chunk);
+            }
+            std::fs::write(&big, &big_bytes).unwrap();
+            let hex = sha256_file_hex(&big).unwrap();
+            assert_eq!(hex.len(), 64);
+            assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+
+        #[test]
+        fn sha256_missing_file_is_io_error() {
+            let missing = std::env::temp_dir().join("assetdeck-sha256-不存在.bin");
+            assert!(matches!(
+                sha256_file_hex(&missing),
+                Err(crate::PlatformError::Io(_))
+            ));
+        }
+    }
+}
+
+pub use crypto::sha256_file_hex;
+pub use http::{Win32FileDownloader, Win32HttpFetcher, Win32UrlOpener};

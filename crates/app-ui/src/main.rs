@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use platform::UrlOpener;
+use platform::{HttpFileDownloader, HttpTextFetcher, UrlOpener};
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
 use ui_viewmodels::classify::{
     self, ClassifyTarget, EntryKind, GroupMode, ImportEntry, SourceGroup,
@@ -44,9 +44,13 @@ thread_local! {
     static UPDATE_WIRING: RefCell<Option<UpdateWiring>> = const { RefCell::new(None) };
 }
 
-/// D56 更新检查在 UI 线程持有的共享件（见 [`UPDATE_WIRING`]）。
+/// D56/D70 更新链路在 UI 线程持有的共享件（见 [`UPDATE_WIRING`]）。
+/// vm/apply_vm 是 UI 线程专属 Rc；cancel 用 Arc——下载线程（Send 域）要
+/// 持有同一份取消旗标，UI 线程与线程双侧都能 store/load。
 struct UpdateWiring {
     vm: Rc<RefCell<ui_viewmodels::UpdateCheckVm>>,
+    apply_vm: Rc<RefCell<ui_viewmodels::UpdateApplyVm>>,
+    cancel: Arc<AtomicBool>,
     settings: Rc<RefCell<AppSettings>>,
     settings_path: Rc<std::path::PathBuf>,
 }
@@ -1259,6 +1263,264 @@ fn apply_update_outcome(
     logging::info!("更新检查收尾 silent={silent} action={action:?}");
 }
 
+/// 取消在途更新下载（UI 线程，D70）：置取消旗标 → VM 回 Idle → 弹窗回
+/// 初始态。下载线程稍后以 Err 退出，其迟到的失败被 VM 的 Idle 态吞掉
+/// （见 UpdateApplyVm::mark_failed），不会把弹窗拽回错误态。
+fn cancel_update_download(ui: &AppWindow) {
+    let (apply_vm, cancel) = UPDATE_WIRING.with(|slot| {
+        let guard = slot.borrow();
+        let wiring = guard.as_ref().expect("更新装配未初始化");
+        (wiring.apply_vm.clone(), wiring.cancel.clone())
+    });
+    if !apply_vm.borrow().is_downloading() {
+        return;
+    }
+    cancel.store(true, Ordering::SeqCst);
+    apply_vm.borrow_mut().reset();
+    ui.set_update_downloading(false);
+    ui.set_update_progress(0.0);
+    ui.set_update_progress_text("".into());
+    logging::info!("已取消更新下载");
+}
+
+/// exe 目录是否为安装器的默认安装目录（D70 模式判定）。判定结果只决定
+/// 是否给安装器传 `--no-shortcuts`——两种形态的解包目标都是 exe 所在目录，
+/// 判错的差异上限是「快捷方式没刷新」，无破坏性。
+fn is_installer_install(exe_dir: &std::path::Path) -> bool {
+    let known = std::env::var_os("LOCALAPPDATA")
+        .map(|base| {
+            std::path::PathBuf::from(base)
+                .join("Programs")
+                .join("素材管理器")
+        })
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|base| {
+                std::path::PathBuf::from(base)
+                    .join("AppData")
+                    .join("Local")
+                    .join("Programs")
+                    .join("素材管理器")
+            })
+        });
+    matches!(known, Some(path) if exe_dir == path)
+}
+
+/// 应用内更新（D70 统一安装器路径）：下载新 `assetdeck-installer-<ver>.exe`
+/// （其 payload 内嵌 dist.tar.gz，一个文件即完整新版本）→ SHA-256 校验 →
+/// spawn `--silent --install-dir=<exe 目录> --wait-pid=<本进程>` → 本进程
+/// 退出。安装器持 PROCESS_SYNCHRONIZE 句柄等老进程退出后接管解包与重启，
+/// 运行中 exe 的文件锁由「先退出、安装器后解包」的时序消解。
+/// 须在 UI 线程调用；网络全在后台线程，进度经 invoke_from_event_loop 回弹。
+fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
+    let (check_vm, apply_vm, cancel) = UPDATE_WIRING.with(|slot| {
+        let guard = slot.borrow();
+        let wiring = guard.as_ref().expect("更新装配未初始化");
+        (
+            wiring.vm.clone(),
+            wiring.apply_vm.clone(),
+            wiring.cancel.clone(),
+        )
+    });
+    if apply_vm.borrow().is_busy() {
+        return;
+    }
+    if importing.load(Ordering::SeqCst) {
+        if let Some(app) = ui.upgrade() {
+            show_notice(
+                &app,
+                TargetNoticeTone::Error,
+                "素材导入进行中，导入完成后再更新".to_string(),
+            );
+        }
+        return;
+    }
+    let Some(release) = check_vm.borrow().available().cloned() else {
+        return;
+    };
+    let installer_name = ui_viewmodels::installer_asset_name(&release.version);
+    let Some(installer_asset) =
+        ui_viewmodels::pick_asset(&release.assets, &installer_name).cloned()
+    else {
+        let message = "发布清单缺少安装包，无法应用内更新".to_string();
+        logging::warn!("{message}");
+        apply_vm.borrow_mut().begin_download();
+        apply_vm.borrow_mut().mark_failed(message.clone());
+        if let Some(app) = ui.upgrade() {
+            app.set_update_apply_error(message.into());
+        }
+        return;
+    };
+    let Some(sums_asset) = ui_viewmodels::pick_asset(&release.assets, ui_viewmodels::SUMS_ASSET_NAME)
+        .cloned()
+    else {
+        let message = "发布清单缺少校验和清单（SHA256SUMS.txt）".to_string();
+        logging::warn!("{message}");
+        apply_vm.borrow_mut().begin_download();
+        apply_vm.borrow_mut().mark_failed(message.clone());
+        if let Some(app) = ui.upgrade() {
+            app.set_update_apply_error(message.into());
+        }
+        return;
+    };
+
+    let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+    else {
+        return;
+    };
+    let installer_mode = is_installer_install(&exe_dir);
+    // 固定名覆盖写：临时目录里永远至多一份更新安装器，不累积历史版本。
+    let dest = std::env::temp_dir().join("assetdeck-installer-update.exe");
+    let pid = std::process::id();
+
+    apply_vm.borrow_mut().begin_download();
+    cancel.store(false, Ordering::SeqCst);
+    if let Some(app) = ui.upgrade() {
+        app.set_update_downloading(true);
+        app.set_update_progress(0.0);
+        app.set_update_progress_text("准备下载…".into());
+        app.set_update_apply_error("".into());
+    }
+    logging::info!(
+        "应用内更新开始 version={} installer={} mode={}",
+        release.version,
+        installer_asset.url,
+        if installer_mode { "installer" } else { "portable" }
+    );
+
+    let ui_weak = ui.clone();
+    let installer_url = installer_asset.url;
+    let sums_url = sums_asset.url;
+    std::thread::spawn(move || {
+        // 进度节流：100ms 一跳；首块与收尾块（received==total）必发。
+        // 格式化留在 VM（可测），线程只回传原始字节数。
+        const PROGRESS_MIN_INTERVAL: std::time::Duration =
+            std::time::Duration::from_millis(100);
+        let last_tick = std::cell::Cell::new(
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        );
+
+        let report_failure = |weak: slint::Weak<AppWindow>, message: String| {
+            let _ = slint::invoke_from_event_loop(move || {
+                let apply_vm = UPDATE_WIRING.with(|slot| {
+                    slot.borrow().as_ref().expect("更新装配未初始化").apply_vm.clone()
+                });
+                apply_vm.borrow_mut().mark_failed(message.clone());
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_update_downloading(false);
+                    ui.set_update_progress(0.0);
+                    ui.set_update_progress_text("".into());
+                    if let Some(error) = apply_vm.borrow().failure() {
+                        ui.set_update_apply_error(error.to_string().into());
+                    }
+                }
+            });
+        };
+
+        let run = || -> Result<(), String> {
+            let fetcher = platform::win32::Win32HttpFetcher;
+            let sums_text = fetcher
+                .fetch_text(&sums_url, ui_viewmodels::DOWNLOAD_TIMEOUT_MS)
+                .map_err(|error| format!("获取校验和清单失败: {error}"))?;
+            let expected = ui_viewmodels::parse_sha256_sums(&sums_text)
+                .into_iter()
+                .find(|(_, name)| name == &installer_name)
+                .map(|(hash, _)| hash)
+                .ok_or_else(|| "校验和清单缺少安装包条目".to_string())?;
+
+            let downloader = platform::win32::Win32FileDownloader;
+            let weak_for_progress = ui_weak.clone();
+            downloader
+                .download_to_file(
+                    &installer_url,
+                    &dest,
+                    ui_viewmodels::DOWNLOAD_TIMEOUT_MS,
+                    ui_viewmodels::MAX_DOWNLOAD_BYTES,
+                    &mut |received, total| {
+                        let now = std::time::Instant::now();
+                        if received == total
+                            || now.duration_since(last_tick.get()) >= PROGRESS_MIN_INTERVAL
+                        {
+                            last_tick.set(now);
+                            let weak = weak_for_progress.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                let apply_vm = UPDATE_WIRING.with(|slot| {
+                                    slot.borrow()
+                                        .as_ref()
+                                        .expect("更新装配未初始化")
+                                        .apply_vm
+                                        .clone()
+                                });
+                                apply_vm.borrow_mut().set_progress(received, total);
+                                if let Some(ui) = weak.upgrade() {
+                                    let vm = apply_vm.borrow();
+                                    ui.set_update_progress(vm.progress_ratio());
+                                    if let Some(text) = vm.progress_text() {
+                                        ui.set_update_progress_text(text.into());
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    &cancel,
+                )
+                .map_err(|error| format!("下载安装包失败: {error}"))?;
+
+            let actual = platform::win32::sha256_file_hex(&dest)
+                .map_err(|error| format!("计算安装包摘要失败: {error}"))?;
+            if !ui_viewmodels::hash_matches(&expected, &actual) {
+                return Err(format!(
+                    "安装包 SHA-256 校验不符（期望 {expected}，实际 {actual}），已中止更新"
+                ));
+            }
+            Ok(())
+        };
+
+        if let Err(message) = run() {
+            if cancel.load(Ordering::SeqCst) {
+                logging::info!("更新下载已取消，丢弃半成品");
+                return;
+            }
+            logging::warn!("应用内更新失败: {message}");
+            report_failure(ui_weak, message);
+            return;
+        }
+
+        // 校验通过 → 移交安装器。--install-dir 指向 exe 所在目录：安装版即
+        // 原安装目录，便携版即便携目录；安装版多刷一次快捷方式（无害且保新）。
+        let mut command = std::process::Command::new(&dest);
+        command
+            .arg("--silent")
+            .arg("--install-dir")
+            .arg(&exe_dir)
+            .arg(format!("--wait-pid={pid}"));
+        if !installer_mode {
+            command.arg("--no-shortcuts");
+        }
+        match command.spawn() {
+            Err(error) => {
+                report_failure(ui_weak, format!("无法启动安装器: {error}"));
+            }
+            Ok(_) => {
+                logging::info!("安装器已启动，移交更新（wait-pid={pid}）");
+                let _ = slint::invoke_from_event_loop(move || {
+                    let apply_vm = UPDATE_WIRING.with(|slot| {
+                        slot.borrow().as_ref().expect("更新装配未初始化").apply_vm.clone()
+                    });
+                    apply_vm.borrow_mut().mark_launching();
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_update_downloading(false);
+                        ui.set_update_launching(true);
+                    }
+                    logging::info!("应用内更新完成移交，进程退出");
+                    std::process::exit(0);
+                });
+            }
+        }
+    });
+}
+
 fn main() {
     // D38：日志初始化。目录 = exe 同目录 logs/（便携约定：跟 settings.toml 同一
     // 推理——无库根时贴 exe 走）。初始化失败只降级不阻断启动。
@@ -1370,11 +1632,16 @@ fn main() {
     let update_vm = Rc::new(RefCell::new(ui_viewmodels::UpdateCheckVm::new(
         settings.borrow().dismissed_version.clone(),
     )));
+    // D70 应用内更新：应用段状态机 + 取消旗标（Arc，下载线程同持）。
+    let update_apply_vm = Rc::new(RefCell::new(ui_viewmodels::UpdateApplyVm::new()));
+    let update_cancel = Arc::new(AtomicBool::new(false));
     app.set_app_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
     // 装配句柄进 UI 线程槽：worker 收尾闭包（只带 Send 数据）回 UI 后取用。
     UPDATE_WIRING.with(|slot| {
         *slot.borrow_mut() = Some(UpdateWiring {
             vm: update_vm.clone(),
+            apply_vm: update_apply_vm.clone(),
+            cancel: update_cancel.clone(),
             settings: settings.clone(),
             settings_path: settings_path.clone(),
         })
@@ -1744,8 +2011,13 @@ fn main() {
                 import_flow.close();
                 return;
             }
-            // D56 新版本弹窗：Esc = 以后再说（不改「跳过」状态）。
+            // D56 新版本弹窗：Esc = 以后再说（不改「跳过」状态）；下载中
+            // Esc = 取消下载再关弹窗（D70）——弹窗关了下载若继续，完成时会
+            // 毫无预兆地退出应用，不可接受。
             if ui.get_update_open() {
+                if ui.get_update_downloading() {
+                    cancel_update_download(&ui);
+                }
                 ui.set_update_open(false);
                 ui.set_update_shown(false);
                 return;
@@ -2897,14 +3169,6 @@ fn main() {
     }
     {
         let ui = app.as_weak();
-        app.on_update_later(move || {
-            let Some(ui) = ui.upgrade() else { return };
-            ui.set_update_open(false);
-            ui.set_update_shown(false);
-        });
-    }
-    {
-        let ui = app.as_weak();
         let update_vm = update_vm.clone();
         let settings = settings.clone();
         let settings_path = settings_path.clone();
@@ -2933,6 +3197,31 @@ fn main() {
                     .into(),
             );
             logging::info!("已跳过版本 {version}");
+        });
+    }
+
+    // D70 应用内更新：立即更新（失败重试走同一回调）与取消下载。
+    {
+        let ui = app.as_weak();
+        let update_vm = update_vm.clone();
+        let apply_vm = update_apply_vm.clone();
+        let importing_flag = importing.clone();
+        app.on_update_install_requested(move || {
+            if apply_vm.borrow().is_busy() {
+                return; // 在途防抖（按钮禁用是壳层职责，这里兜底）
+            }
+            if update_vm.borrow().available().is_none() {
+                return; // 无命中更新（弹窗残留）时无动作
+            }
+            spawn_update_install(&ui, &importing_flag);
+        });
+    }
+    {
+        let ui = app.as_weak();
+        app.on_update_cancel_install(move || {
+            if let Some(ui) = ui.upgrade() {
+                cancel_update_download(&ui);
+            }
         });
     }
 
