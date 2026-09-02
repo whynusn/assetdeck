@@ -10,6 +10,10 @@
 //! 便携目录只多带一个 `--no-shortcuts`。运行中 exe 的文件锁由
 //! 「先退出、安装器等信号」的时序消解，不需要 rename 舞步。
 
+use std::path::Path;
+
+use serde::Deserialize;
+
 use super::update_check::ReleaseAsset;
 
 /// 发布附件命名与 scripts/package.ps1 / ci.yml 对齐：分发产物一律 ASCII 名
@@ -24,6 +28,87 @@ pub const DOWNLOAD_TIMEOUT_MS: u64 = 30_000;
 /// 下载量异常上限。当前安装包约 30 MB，给数量级余量防对端异常无界吃盘；
 /// 真包超限属于发版事故，宁可失败也不静默吞下。
 pub const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 内置下载镜像前缀（D71）。gh-proxy 系约定：前缀直接拼在原始 URL 前。
+/// 公共镜像易主/限速是常态，清单只求「多一条路」不求「永远可用」——任何一个
+/// 失灵都不影响正确性：测速落选/下载失败顺延下一候选、原始 URL 永远压轴、
+/// SHA-256 校验兜底镜像内容。默认启用系用户决策（D71），不再等逐一手测。
+pub const DEFAULT_DOWNLOAD_MIRRORS: &[&str] = &[
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://github.moeyy.xyz/",
+];
+
+/// 下载镜像清单：`update_feeds.toml` 的 `download_mirrors = [...]` 覆盖内置。
+/// 与 `feeds` 键语义**有意不同**：键存在即全量采纳（空数组 = 关闭镜像加速、
+/// 只直连原始源——这是一等用户意图），键缺失才回落内置。清单写坏回落内置
+/// 并留警告，与 `load_feeds` 同纪律：坏配置不把更新链路整个弄哑。
+pub fn load_download_mirrors(config: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct MirrorConfig {
+        #[serde(default)]
+        download_mirrors: Option<Vec<String>>,
+    }
+
+    let default = || {
+        DEFAULT_DOWNLOAD_MIRRORS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let Ok(text) = std::fs::read_to_string(config) else {
+        return default();
+    };
+    match toml::from_str::<MirrorConfig>(&text) {
+        Ok(config) => match config.download_mirrors {
+            Some(mirrors) => mirrors, // 键存在即采纳，空数组 = 只直连
+            None => default(),
+        },
+        Err(error) => {
+            log::warn!("{} 解析失败（{error}），回落内置下载镜像", config.display());
+            default()
+        }
+    }
+}
+
+/// 候选源清单：镜像前缀依序改写原始 URL，原始 URL 永远压轴兜底——镜像
+/// 全灭时更新链路仍与 D70 直连行为等价。
+pub fn mirror_candidates(mirrors: &[String], original_url: &str) -> Vec<String> {
+    let mut out: Vec<String> = mirrors
+        .iter()
+        .filter(|m| m.starts_with("http://") || m.starts_with("https://"))
+        .map(|m| format!("{m}{original_url}"))
+        .collect();
+    out.push(original_url.to_string());
+    out
+}
+
+/// 候选源展示标签 = 主机名（`scheme://host[:port]/…` 的 host 段）。解析不出
+/// 时退回整串——标签只进 UI 文案与日志，不参与决策。
+pub fn mirror_label(candidate_url: &str) -> String {
+    let Some(rest) = candidate_url.split_once("://").map(|(_, rest)| rest) else {
+        return candidate_url.to_string();
+    };
+    let host_end = rest.find(['/', ':']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.is_empty() {
+        candidate_url.to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+/// 测速排名：返回按「最快优先」排序的候选下标。健康者按取样耗时升序；
+/// 探测失败（含超时）不淘汰——保持原序垫底，全网速时仍有兜底机会。
+/// `elapsed_ms[i] = None` 表示第 i 个候选探测失败。
+pub fn rank_by_probe(elapsed_ms: &[Option<u64>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..elapsed_ms.len()).collect();
+    order.sort_by_key(|&index| match elapsed_ms[index] {
+        Some(ms) => (0, ms, index),
+        None => (1, 0, index),
+    });
+    order
+}
 
 /// 版本 tag → 安装器附件名。tag 形如 "v0.2.0"（CI 强校验 tag == Cargo.toml
 /// 版本，产物文件名取无 v 的裸版本，见 package.ps1 `$Version`）。
@@ -315,5 +400,79 @@ mod tests {
         assert!(vm.is_downloading());
         assert_eq!(vm.failure(), None);
         assert_eq!(vm.progress_ratio(), 0.0);
+    }
+
+    #[test]
+    fn load_download_mirrors_missing_file_uses_builtin() {
+        let mirrors = load_download_mirrors(Path::new("Z:/不存在/update_feeds.toml"));
+        assert_eq!(
+            mirrors,
+            DEFAULT_DOWNLOAD_MIRRORS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn load_download_mirrors_key_present_overrides_even_when_empty() {
+        let dir = std::env::temp_dir().join("assetdeck-update-mirrors-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 键存在（空数组）= 一等意图「关闭镜像加速」，不得回落内置。
+        let path = dir.join("empty.toml");
+        std::fs::write(&path, "download_mirrors = []").unwrap();
+        assert_eq!(load_download_mirrors(&path), Vec::<String>::new());
+
+        // 键缺失 = 用内置（feeds 键在同一文件里不该影响本键）。
+        let path = dir.join("feeds-only.toml");
+        std::fs::write(&path, "feeds = [\"https://a/api\"]").unwrap();
+        assert_eq!(load_download_mirrors(&path).len(), DEFAULT_DOWNLOAD_MIRRORS.len());
+
+        // 键存在（非空）= 全量覆盖。
+        let path = dir.join("custom.toml");
+        std::fs::write(&path, "download_mirrors = [\"https://m1/\"]").unwrap();
+        assert_eq!(load_download_mirrors(&path), vec!["https://m1/".to_string()]);
+
+        // 文件写坏 = 回落内置（坏配置不弄哑更新链路）。
+        let path = dir.join("broken.toml");
+        std::fs::write(&path, "download_mirrors = 不是数组").unwrap();
+        assert_eq!(
+            load_download_mirrors(&path).len(),
+            DEFAULT_DOWNLOAD_MIRRORS.len()
+        );
+    }
+
+    #[test]
+    fn mirror_candidates_rewrite_then_original_last() {
+        let mirrors = vec!["https://m1/".to_string(), "not-a-url".to_string()];
+        let candidates = mirror_candidates(&mirrors, "https://github.com/a/b.bin");
+        assert_eq!(
+            candidates,
+            vec![
+                "https://m1/https://github.com/a/b.bin".to_string(),
+                // 非法前缀（无 scheme）被滤掉，不产生不可达候选。
+                "https://github.com/a/b.bin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_label_extracts_host() {
+        assert_eq!(mirror_label("https://ghfast.top/https://github.com/a/b"), "ghfast.top");
+        assert_eq!(mirror_label("https://github.com/a/b"), "github.com");
+        assert_eq!(mirror_label("http://m1.example:8080/x"), "m1.example");
+        // 解析不出退回整串（标签只进文案，不参与决策）。
+        assert_eq!(mirror_label("no-scheme"), "no-scheme");
+    }
+
+    #[test]
+    fn rank_by_probe_fastest_first_failures_keep_order_at_tail() {
+        // 健康者按耗时升序；失败者（None）不淘汰，保持原序垫底。
+        let probes = vec![Some(300), None, Some(120), Some(120), None];
+        assert_eq!(rank_by_probe(&probes), vec![2, 3, 0, 1, 4]);
+        assert_eq!(rank_by_probe(&[]), Vec::<usize>::new());
+        // 同耗时按下标稳定序（并列不抖动）。
+        assert_eq!(rank_by_probe(&[Some(5), Some(5)]), vec![0, 1]);
     }
 }

@@ -845,6 +845,18 @@ if (click_count % 2) == 1 {
 
 **守卫**：workspace test 全绿（platform 18 含 FIPS 向量、ui-viewmodels 76 含 assets 解析与状态机迁移）+ installer workspace clippy/test 全绿 + 三 crate clippy 归零（`&PathBuf`→`&Path`、手写 Default 改派生均为 clippy 抓出）+ slint-viewer 四态渲染裁剪放大逐态验视（进度条比例、错误行 danger 色、启动态无按钮、无截断叠压）。**遗留**：镜像默认清单仍留白（D56 原话实测再定）——2026-09-02 实测当日本机代理出口断（连主源基线也超时，ghfast.top/gh-proxy.com/moeyy.xyz 三候选不可达），不具备实测条件，维持「GitHub 主源 + update_feeds.toml 覆盖」现状。
 
+### D71 下载镜像层：并行测速择优 + 锚定校验 + 原始压轴（2026-09-02）
+
+**背景与决策**：D70 下载直连 GitHub，国内「检查能通、下载吃力」。用户定盘：备用多个镜像源、下载时自动用最快。与 D56「不竞速」哲学的边界——竞速禁的是**全量并发下载**（白烧带宽与 GitHub 限流配额），测速只取每个候选前 64 KiB（Range 请求，8s 上限），总损耗 ≈ 候选数 × 64 KiB，换来「最快源」的真实信号。
+
+**机制**：①候选 = 内置镜像前缀改写原始 URL（gh-proxy 系约定：前缀直拼）+ **原始 URL 永远压轴**——镜像全灭时行为与 D70 直连等价，镜像层不可能让更新变得更不可用。②并行测速（`thread::scope`，WinHTTP 同栈新 `probe_sample`：Range 取样、不支持 Range 的对端回 200 也只读取样即止、416 按探测失败顺延），健康者按取样耗时升序、失败者不淘汰原序垫底；唯一候选（镜像被关）跳过测速直连。③**SHA256SUMS 锚定原始源**：信任锚不跟着镜像走——SUMS 永远先试原始源（清单仅几百字节，10s 上限），失败才降级「经镜像取得」并留 warn；锚住 SUMS 后，任何镜像的滞后/被篡改内容都会在哈希比对处现形并**顺延下一候选**（哈希不符也是换源信号，日志记「内容疑似滞后或被篡改」）。残余风险（镜像 SUMS 与镜像安装包同源同滞后的自洽旧版对）如实留档：批 C ed25519 签名前无解，降级告警保可诊断。④清单缺条目、本地摘要计算失败是恒定错误，换源无解，直接失败不空转。
+
+**配置**：`update_feeds.toml` 增 `download_mirrors = [...]` 键，与 `feeds` 键语义**有意不同**——键存在即全量采纳（**空数组 = 关闭镜像加速只直连**，一等用户意图），键缺失回落内置三镜像（ghfast.top / gh-proxy.com / github.moeyy.xyz），文件写坏回落内置并告警（坏配置不弄哑更新链路）。内置默认系用户决策直接启用（不再等逐一手测），安全性由「测速落选 + 下载失败顺延 + 原始压轴 + 哈希兜底」四层护栏承接，不依赖镜像的可用性承诺。UI 阶段文案：测速中「正在选择最快下载源…」→「已选择最快源 ghfast.top（312ms）」→ 下载态进度条接管。
+
+**落点**：platform lib.rs（trait 增 `probe_sample`）/win32.rs（WinHTTP Range 取样实现，第三份请求机械展开——故意不抽公共助手，不给 D56 已验证路径卷重构风险）；ui-viewmodels update_apply.rs（`DEFAULT_DOWNLOAD_MIRRORS`/`load_download_mirrors`/`mirror_candidates`/`mirror_label`/`rank_by_probe` 五件纯逻辑）；app-ui main.rs（下载线程重构：并行测速 + SUMS 锚定 + 逐候选下载换源，恒定错误与可换源错误分流）。
+
+**守卫**：三 crate clippy 归零 + workspace 测试全绿（ui-viewmodels 37 更新域测例，新增清单语义四态/候选改写过滤/标签解析/排名稳定性）。
+
 **守卫**：workspace test 全绿（classify_spec 16 例、settings_spec 6 例含 describe/ specs 同构断言）+ clippy 归零（抓出 settings_path 死字段连带清理）+ fmt；slint-viewer 渲染弹窗实证复选框移除后布局完好（候选列表/预告行/按钮行无空洞）。
 
 

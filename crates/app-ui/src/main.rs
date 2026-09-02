@@ -1312,13 +1312,20 @@ fn is_installer_install(exe_dir: &std::path::Path) -> bool {
 /// 运行中 exe 的文件锁由「先退出、安装器后解包」的时序消解。
 /// 须在 UI 线程调用；网络全在后台线程，进度经 invoke_from_event_loop 回弹。
 fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
-    let (check_vm, apply_vm, cancel) = UPDATE_WIRING.with(|slot| {
+    let (check_vm, apply_vm, cancel, feeds_config_path) = UPDATE_WIRING.with(|slot| {
         let guard = slot.borrow();
         let wiring = guard.as_ref().expect("更新装配未初始化");
+        // D71 下载镜像清单与检查源共用 update_feeds.toml（settings 同目录约定）。
+        let feeds_config_path = wiring
+            .settings_path
+            .parent()
+            .map(|dir| dir.join("update_feeds.toml"))
+            .unwrap_or_else(|| std::path::PathBuf::from("update_feeds.toml"));
         (
             wiring.vm.clone(),
             wiring.apply_vm.clone(),
             wiring.cancel.clone(),
+            feeds_config_path,
         )
     });
     if apply_vm.borrow().is_busy() {
@@ -1397,6 +1404,12 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
         // 格式化留在 VM（可测），线程只回传原始字节数。
         const PROGRESS_MIN_INTERVAL: std::time::Duration =
             std::time::Duration::from_millis(100);
+        // D71 镜像测速参数：64 KiB 取样、8s 上限——超 8s 拿不到 64KiB 的源
+        // 不配当「最快」，落选但不淘汰（全灭时仍有兜底资格）。
+        const PROBE_TIMEOUT_MS: u64 = 8_000;
+        const PROBE_SAMPLE_BYTES: u32 = 64 * 1024;
+        // SUMS 锚定原始源的专用上限：清单只有几百字节，10s 足够礼貌。
+        const SUMS_ANCHOR_TIMEOUT_MS: u64 = 10_000;
         let last_tick = std::cell::Cell::new(
             std::time::Instant::now() - std::time::Duration::from_secs(1),
         );
@@ -1417,23 +1430,108 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
                 }
             });
         };
+        // 阶段文案直写属性（进度行在下载态会被 VM 的 progress_text 接管，
+        // 测速/选源阶段还没有字节数，这里借同一行展示阶段）。
+        let set_phase = |text: &str| {
+            let _ = slint::invoke_from_event_loop({
+                let weak = ui_weak.clone();
+                let text = text.to_string();
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_progress_text(text.into());
+                    }
+                }
+            });
+        };
 
         let run = || -> Result<(), String> {
             let fetcher = platform::win32::Win32HttpFetcher;
-            let sums_text = fetcher
-                .fetch_text(&sums_url, ui_viewmodels::DOWNLOAD_TIMEOUT_MS)
-                .map_err(|error| format!("获取校验和清单失败: {error}"))?;
-            let expected = ui_viewmodels::parse_sha256_sums(&sums_text)
-                .into_iter()
-                .find(|(_, name)| name == &installer_name)
-                .map(|(hash, _)| hash)
-                .ok_or_else(|| "校验和清单缺少安装包条目".to_string())?;
-
             let downloader = platform::win32::Win32FileDownloader;
-            let weak_for_progress = ui_weak.clone();
-            downloader
-                .download_to_file(
-                    &installer_url,
+
+            // ① 候选源 = 镜像前缀改写 + 原始 URL 压轴；并行测速选最快（D71）。
+            // 唯一候选（镜像被配置关闭）时跳过测速，直连即可。
+            let mirrors = ui_viewmodels::load_download_mirrors(&feeds_config_path);
+            let candidates = ui_viewmodels::mirror_candidates(&mirrors, &installer_url);
+            let mut probe_ms: Vec<Option<u64>> = Vec::new();
+            let mut sums_from_origin: Option<String> = None;
+            if candidates.len() > 1 {
+                set_phase("正在选择最快下载源…");
+                std::thread::scope(|scope| {
+                    let mut probes = Vec::new();
+                    for url in &candidates {
+                        probes.push(scope.spawn(|| {
+                            downloader
+                                .probe_sample(url, PROBE_TIMEOUT_MS, PROBE_SAMPLE_BYTES, &cancel)
+                                .ok()
+                        }));
+                    }
+                    // ② SHA256SUMS 锚定原始源（信任锚不跟着镜像走）；
+                    // 失败才降级为「经镜像取得」并留告警，签名（批 C）前
+                    // 这是镜像内容可信度的根。
+                    let origin = scope.spawn(|| {
+                        fetcher.fetch_text(&sums_url, SUMS_ANCHOR_TIMEOUT_MS).ok()
+                    });
+                    for probe in probes {
+                        probe_ms.push(probe.join().unwrap_or(None));
+                    }
+                    sums_from_origin = origin.join().unwrap_or(None);
+                });
+            } else {
+                probe_ms.push(None);
+            }
+            if cancel.load(Ordering::SeqCst) {
+                return Err("下载已取消".into());
+            }
+            let order = ui_viewmodels::rank_by_probe(&probe_ms);
+            let winner = order[0];
+            match probe_ms[winner] {
+                Some(ms) => set_phase(&format!(
+                    "已选择最快源 {}（{ms}ms）",
+                    ui_viewmodels::mirror_label(&candidates[winner])
+                )),
+                None => set_phase("开始直连下载…"),
+            }
+
+            // ③ 逐候选：下载 → 校验。网络失败与哈希不符（镜像滞后/被篡改）
+            // 都顺延下一候选；清单缺条目与本地摘要失败是恒定错误，换源无解。
+            let mut sums_loaded: Option<String> = sums_from_origin;
+            let mut expected: Option<String> = None;
+            let mut attempts: Vec<String> = Vec::new();
+            for &index in &order {
+                let url = &candidates[index];
+                let label = ui_viewmodels::mirror_label(url);
+                if cancel.load(Ordering::SeqCst) {
+                    return Err("下载已取消".into());
+                }
+                if expected.is_none() {
+                    if sums_loaded.is_none() {
+                        match fetcher.fetch_text(url, ui_viewmodels::DOWNLOAD_TIMEOUT_MS) {
+                            Ok(text) => {
+                                sums_loaded = Some(text);
+                                logging::warn!(
+                                    "SHA256SUMS 原始源不可达，经镜像 {label} 取得（降级）"
+                                );
+                            }
+                            Err(error) => {
+                                attempts.push(format!("{label}: 清单获取失败（{error}）"));
+                                continue;
+                            }
+                        }
+                    }
+                    let text = sums_loaded.as_deref().expect("清单已装载");
+                    match ui_viewmodels::parse_sha256_sums(text)
+                        .into_iter()
+                        .find(|(_, name)| name == &installer_name)
+                    {
+                        Some((hash, _)) => expected = Some(hash),
+                        None => return Err("校验和清单缺少安装包条目".into()),
+                    }
+                }
+                set_phase(&format!("正在从 {label} 下载…"));
+                logging::info!("尝试下载源 {label}");
+                let weak_for_progress = ui_weak.clone();
+                if let Err(error) = downloader.download_to_file(
+                    url,
                     &dest,
                     ui_viewmodels::DOWNLOAD_TIMEOUT_MS,
                     ui_viewmodels::MAX_DOWNLOAD_BYTES,
@@ -1464,17 +1562,24 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
                         }
                     },
                     &cancel,
-                )
-                .map_err(|error| format!("下载安装包失败: {error}"))?;
+                ) {
+                    attempts.push(format!("{label}: {error}"));
+                    continue;
+                }
 
-            let actual = platform::win32::sha256_file_hex(&dest)
-                .map_err(|error| format!("计算安装包摘要失败: {error}"))?;
-            if !ui_viewmodels::hash_matches(&expected, &actual) {
-                return Err(format!(
-                    "安装包 SHA-256 校验不符（期望 {expected}，实际 {actual}），已中止更新"
-                ));
+                let actual = platform::win32::sha256_file_hex(&dest)
+                    .map_err(|error| format!("计算安装包摘要失败: {error}"))?;
+                let expected_hash = expected.as_deref().expect("校验和已在下载前就绪");
+                if !ui_viewmodels::hash_matches(expected_hash, &actual) {
+                    attempts.push(format!(
+                        "{label}: SHA-256 不符（内容疑似滞后或被篡改）"
+                    ));
+                    continue;
+                }
+                logging::info!("安装包校验通过 source={label}");
+                return Ok(());
             }
-            Ok(())
+            Err(format!("所有下载源均失败——{}", attempts.join("；")))
         };
 
         if let Err(message) = run() {

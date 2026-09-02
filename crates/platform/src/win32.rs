@@ -3204,7 +3204,177 @@ pub mod http {
     /// 与「系统调用不碎」的折中。
     const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
+    /// 测速取样（D71）：与 download_to_file 同一套请求机械的第三份展开——
+    /// 故意不抽公共助手：三处差异都在中途行为上（收进内存/写盘/取样即止），
+    /// 参数化会把 D56 已验证的路径卷进重构风险，收益不抵。
+    impl Win32FileDownloader {
+        fn probe_sample_impl(
+            &self,
+            url: &str,
+            timeout_ms: u64,
+            sample_bytes: u32,
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> Result<u64> {
+            let (secure, host, port, path) = split_url(url)?;
+            let host_w = wide(&host);
+            let path_w = wide(&path);
+            let verb_w = wide("GET");
+            // Range 只当提速与取样截断用：不支持 Range 的对端回 200 全量，
+            // 下面的读取循环按 sample_bytes 上限自然截断，无需区分 206/200。
+            let headers_w = wide(&format!(
+                concat!(
+                    "User-Agent: assetdeck-updater/",
+                    env!("CARGO_PKG_VERSION"),
+                    "\r\nAccept: */*\r\nRange: bytes=0-{}\r\n"
+                ),
+                sample_bytes.saturating_sub(1)
+            ));
+            let timeout = timeout_ms.clamp(1_000, 60_000) as i32;
+            let started = std::time::Instant::now();
+
+            unsafe {
+                let session = HttpHandle(WinHttpOpen(
+                    wide(concat!("assetdeck-updater/", env!("CARGO_PKG_VERSION"))).as_ptr(),
+                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                ));
+                if session.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "WinHttpOpen 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
+
+                let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
+                if connection.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "连接 {host} 失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
+                let request = HttpHandle(WinHttpOpenRequest(
+                    connection.0,
+                    verb_w.as_ptr(),
+                    path_w.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    flags,
+                ));
+                if request.0.is_null() {
+                    return Err(PlatformError::Network(format!(
+                        "构造请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                if WinHttpSendRequest(
+                    request.0,
+                    headers_w.as_ptr(),
+                    headers_w.len() as u32 - 1,
+                    ptr::null(),
+                    0,
+                    0,
+                    0,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "发送请求失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                if WinHttpReceiveResponse(request.0, ptr::null_mut()) == 0 {
+                    return Err(PlatformError::Network(format!(
+                        "接收响应失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+
+                let mut status: u32 = 0;
+                let mut status_size = std::mem::size_of::<u32>() as u32;
+                let mut index: u32 = 0;
+                if WinHttpQueryHeaders(
+                    request.0,
+                    WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    ptr::null(),
+                    &mut status as *mut u32 as *mut core::ffi::c_void,
+                    &mut status_size,
+                    &mut index,
+                ) == 0
+                {
+                    return Err(PlatformError::Network(format!(
+                        "读状态码失败 (错误码 {})",
+                        last_error()
+                    )));
+                }
+                // 2xx 之外（含 416 Range 拒绝）按探测失败处理，候选顺延。
+                if !(200..300).contains(&status) {
+                    return Err(PlatformError::Network(format!("HTTP {status}（{host}）")));
+                }
+
+                let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+                let mut received: u64 = 0;
+                'sample: loop {
+                    if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(PlatformError::Network("测速已取消".into()));
+                    }
+                    let mut available: u32 = 0;
+                    if WinHttpQueryDataAvailable(request.0, &mut available) == 0 {
+                        return Err(PlatformError::Network(format!(
+                            "探测数据量失败 (错误码 {})",
+                            last_error()
+                        )));
+                    }
+                    if available == 0 {
+                        break;
+                    }
+                    let mut pending = available;
+                    while pending > 0 {
+                        let want = pending.min(buf.len() as u32);
+                        let mut read: u32 = 0;
+                        if WinHttpReadData(
+                            request.0,
+                            buf.as_mut_ptr() as *mut core::ffi::c_void,
+                            want,
+                            &mut read,
+                        ) == 0
+                        {
+                            return Err(PlatformError::Network(format!(
+                                "读取响应失败 (错误码 {})",
+                                last_error()
+                            )));
+                        }
+                        if read == 0 {
+                            break 'sample;
+                        }
+                        received += read as u64;
+                        if received >= sample_bytes as u64 {
+                            break 'sample;
+                        }
+                        pending -= read;
+                    }
+                }
+                Ok(started.elapsed().as_millis() as u64)
+            }
+        }
+    }
+
     impl HttpFileDownloader for Win32FileDownloader {
+        fn probe_sample(
+            &self,
+            url: &str,
+            timeout_ms: u64,
+            sample_bytes: u32,
+            cancel: &std::sync::atomic::AtomicBool,
+        ) -> Result<u64> {
+            self.probe_sample_impl(url, timeout_ms, sample_bytes, cancel)
+        }
+
         fn download_to_file(
             &self,
             url: &str,

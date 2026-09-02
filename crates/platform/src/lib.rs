@@ -410,6 +410,18 @@ pub trait HttpFileDownloader {
         progress: DownloadProgress<'_>,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<u64>;
+
+    /// 下载测速取样（D71 镜像择优）：Range 请求取前 `sample_bytes` 字节并
+    /// 计时，返回从发起请求到取样完成的毫秒数。对端不支持 Range 时回 200
+    /// 全量响应——只读 `sample_bytes` 即中止，不落盘不耗尽；文件比取样还小
+    /// 时提前 EOF 也算成功。失败（含取消置位）返回 Err。
+    fn probe_sample(
+        &self,
+        url: &str,
+        timeout_ms: u64,
+        sample_bytes: u32,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<u64>;
 }
 
 // 平台实现模块：声明本身不带条件门，「仅 Windows」的门在该文件内部，

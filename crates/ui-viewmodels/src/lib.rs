@@ -32,7 +32,8 @@ pub use target_bar_vm::{
 };
 pub use theme::{DarkThemeProvider, LightThemeProvider, ThemeProvider, ThemeTokens};
 pub use update_apply::{
-    hash_matches, installer_asset_name, parse_sha256_sums, pick_asset, UpdateApplyVm,
+    hash_matches, installer_asset_name, load_download_mirrors, mirror_candidates, mirror_label,
+    parse_sha256_sums, pick_asset, rank_by_probe, UpdateApplyVm, DEFAULT_DOWNLOAD_MIRRORS,
     DOWNLOAD_TIMEOUT_MS, INSTALLER_ASSET_PREFIX, MAX_DOWNLOAD_BYTES, SUMS_ASSET_NAME,
 };
 pub use update_check::{
