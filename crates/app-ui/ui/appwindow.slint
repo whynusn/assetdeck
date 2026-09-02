@@ -342,9 +342,10 @@ export component AppWindow inherits Window {
     callback update-later();
     callback update-skip-version();
 
-    // 目标条右侧提示：讲「现在能不能上框、下一步该点哪里」，不说内部状态名
-    // （旧文案「就绪/需确认/未选择目标」与 chip 的「未识别目标」三词一义，
-    // 用户无从对应）。每档都落在一个可执行的下一步上。
+    // 目标提示：讲「现在能不能上框、下一步该点哪里」，不说内部状态名
+    //（旧文案「就绪/需确认/未选择目标」与 chip 的「未识别目标」三词一义，
+    // 用户无从对应）。每档都落在一个可执行的下一步上。渲染位置紧贴目标
+    // 胶囊左侧且仅在非就绪态出现（就绪态收进胶囊 Tooltip，见命令栏）。
     property <string> target-hint: root.target-mode == UiEnums.target-mode-ready
         ? "就绪 · 双击素材即可上框"
         : root.target-mode == UiEnums.target-mode-needs-confirmation
@@ -406,9 +407,11 @@ export component AppWindow inherits Window {
         }
 
         VerticalLayout {
-            // 顶部工具栏：标题/总数 + 检索器 + 设置入口。
+            // 单行命令栏（原「工具栏 + 目标条」两行合并，省下 52px 给内容区）。
+            // 一行三个信息区按工作流排布：左「在看什么」（计数 · 视图）→ 中「找」
+            // （融合式检索器）→ 右「上框去哪」（目标胶囊，核心链路升格进主栏）。
             // 不写 alignment:start：默认 stretch 下弹性占位才能吃掉剩余宽度，
-            // 把检索器/设置推到最右（alignment:start 会把所有元素压到左半边）。
+            // 把右簇推到最右（alignment:start 会把所有元素压到左半边）。
             Rectangle {
                 height: 48px;
                 background: Theme.bg-bar;
@@ -416,20 +419,11 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     padding-left: 14px;
                     padding-right: 14px;
-                    spacing: 10px;
+                    spacing: 8px;
 
-                    Icon {
-                        y: (parent.height - self.height) / 2;
-                        commands: Glyph.layers;
-                        tint: Theme.accent;
-                        width: 18px;
-                        height: 18px;
-                    }
-
-                    // 顶栏不再重复窗口标题「素材管理器」，改成当前库视图的读数：
-                    // 「共 N 项」为主，当前分类/检索范围为次，一眼看清「现在在看什么」。
-                    // 视图标签做成 chip（描边胶囊）：与计数是两类信息（多少 vs 在哪看），
-                    // 黏排会被误读成一句话（「共 10 项全部」）。
+                    // —— 左簇：视图读数。计数为主、当前视图为次，句子式黏排
+                    //（中点隔开）——旧 chip 描边删掉：计数和视图本是一句话的两段。
+                    // 原左端 layers 图标与窗口标题栏 logo 重复，一并删。
                     Text {
                         text: root.total-text;
                         vertical-alignment: center;
@@ -438,33 +432,145 @@ export component AppWindow inherits Window {
                         font-weight: 600;
                     }
 
-                    view-chip := Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        height: 22px;
-                        border-radius: 11px;
-                        border-width: 1px;
-                        border-color: Theme.line;
-                        background: Theme.bg-raised;
-                        width: Math.min(view-chip-text.preferred-width + 16px, 280px);
+                    Text {
+                        text: "·";
+                        vertical-alignment: center;
+                        color: Theme.text-3;
+                        font-size: 12px;
+                    }
 
-                        view-chip-text := Text {
-                            x: 8px;
-                            width: parent.width - 16px;
-                            text: root.filter-label;
-                            vertical-alignment: center;
-                            color: Theme.text-2;
-                            font-size: 11px;
-                            overflow: elide;
+                    Text {
+                        text: root.filter-label;
+                        vertical-alignment: center;
+                        color: Theme.text-2;
+                        font-size: 12px;
+                        overflow: elide;
+                        max-width: 240px;
+                    }
+
+                    // —— 检索器（融合胶囊）：放大镜 + 范围段 + 输入区收进同一个
+                    // 描边容器，消灭旧版「图标 + 范围chip + 输入框」三件套的框中框，
+                    // 也消掉与左簇视图「全部」的同词异义并置（此处的全部明确隶属于
+                    // 搜索）。宽度弹性 150–320px，窄窗先压检索器；高度显式钉 30px
+                    //（不钉会被 HorizontalLayout 纵向拉满整行，真机截图教训）。
+                    search-capsule := Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        height: 30px;
+                        min-width: 150px;
+                        max-width: 320px;
+                        horizontal-stretch: 1;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: root.scope-menu-open || search-input.has-focus ? Theme.accent
+                            : capsule-hover.has-hover ? Theme.line-strong : Theme.line;
+                        background: Theme.bg-input;
+
+                        animate border-color { duration: 120ms; }
+
+                        // 垫底探针：悬停提亮描边；点空白处把焦点交给输入区。
+                        // 声明在最前（最底层），不抢范围段/输入区的命中。
+                        capsule-hover := TouchArea {
+                            mouse-cursor: MouseCursor.text;
+                            clicked => {
+                                search-input.focus();
+                            }
                         }
 
-                        Tooltip {
-                            text: @markdown("当前视图：分类、回收站或检索结果");
+                        Icon {
+                            x: 9px;
+                            y: (parent.height - self.height) / 2;
+                            commands: Glyph.search;
+                            tint: search-input.has-focus ? Theme.accent : Theme.text-3;
+                            width: 13px;
+                            height: 13px;
+                        }
+
+                        // 范围段：点击弹四选一菜单（壳层缓存查询，切档即重跑）。
+                        // 元素名保留 scope-anchor：范围菜单浮层按其绝对坐标锚定。
+                        scope-anchor := Rectangle {
+                            x: 27px;
+                            y: 0;
+                            height: parent.height;
+                            width: scope-text.preferred-width + 17px;
+
+                            scope-text := Text {
+                                y: (parent.height - self.height) / 2;
+                                text: root.search-scope == 1 ? "文件名"
+                                    : root.search-scope == 2 ? "分类"
+                                    : root.search-scope == 3 ? "标签"
+                                    : "全部";
+                                color: root.scope-menu-open ? Theme.accent : Theme.text-2;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Icon {
+                                x: scope-text.preferred-width + 3px;
+                                y: (parent.height - self.height) / 2;
+                                width: 10px;
+                                height: 10px;
+                                commands: Glyph.chevron-down;
+                                tint: Theme.text-3;
+                            }
+
+                            TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.scope-menu-toggled();
+                                }
+                            }
+
+                            Tooltip {
+                                text: @markdown("搜索范围：全部=名称+分类+标签；其余档位只搜对应名称");
+                            }
+                        }
+
+                        // 范围段与输入区之间的发丝分隔。
+                        Rectangle {
+                            x: scope-anchor.x + scope-anchor.width + 1px;
+                            y: (parent.height - self.height) / 2;
+                            width: 1px;
+                            height: 14px;
+                            background: Theme.line;
+                        }
+
+                        search-input := TextInput {
+                            x: scope-anchor.x + scope-anchor.width + 9px;
+                            y: (parent.height - self.height) / 2;
+                            width: parent.width - self.x - 9px;
+                            height: 18px;
+                            font-size: 12px;
+                            color: Theme.text;
+                            selection-background-color: Theme.accent-soft;
+                            selection-foreground-color: Theme.text;
+                            text <=> root.search-text;
+                            // 1.17.1 的 TextInput.edited 无参（区别于 LineEdit），
+                            // 文本经 self.text 转发。
+                            edited => {
+                                root.search-changed(self.text);
+                            }
+                        }
+
+                        // 占位说明：TextInput 无内建 placeholder，空文本时补一行。
+                        if root.search-text == "": Text {
+                            x: search-input.x + 1px;
+                            width: search-input.width;
+                            y: (parent.height - self.height) / 2;
+                            text: root.search-scope == 1 ? "搜索文件名"
+                                : root.search-scope == 2 ? "搜索分类名"
+                                : root.search-scope == 3 ? "搜索标签名"
+                                : "搜索名称、分类或标签";
+                            color: Theme.text-3;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
 
-                    // 弹性占位，把检索器与设置推到最右。
+                    // 弹性占位把右簇推到最右；检索器同时参与拉伸（150–320px），
+                    // 富余宽度优先给检索器，其余落到这里。
                     Rectangle {
-                        horizontal-stretch: 1;
+                        horizontal-stretch: 2;
                     }
 
                     // D47 顶栏「选择」：进入/退出多选模式的显式入口。
@@ -518,73 +624,126 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Icon {
-                        y: (parent.height - self.height) / 2;
-                        commands: Glyph.search;
-                        tint: search-input.has-focus ? Theme.accent : Theme.text-3;
-                        width: 15px;
-                        height: 15px;
-                    }
+                    // —— 目标胶囊（核心链路 D13 的常驻入口）：靶心图标 + 状态点 +
+                    // 目标名 + 展开箭头，与「锁定仓」熔进同一枚胶囊——内部 1px 发丝线
+                    // 把「换目标」「锁目标」分成两个命中区，外观读作一件事：
+                    // 「上框去哪、锁不锁」。choose 态描边转 accent 催促选择。
+                    target-chip := Rectangle {
+                        property <bool> lock-enabled: root.target-mode != UiEnums.target-mode-empty;
+                        property <string> lock-tip: lock-touch.has-hover
+                            ? (root.target-pinned
+                                ? "已锁定：只上框到这个窗口，不随前台切换"
+                                : "未锁定：自动跟随最近使用的 IM 窗口")
+                            : root.target-mode == UiEnums.target-mode-ready
+                                ? "已就绪 · 双击素材即可上框"
+                                : "切换上框目标窗口";
 
-                    // D51 范围 chip：点击弹四选一菜单（壳层缓存查询，切档即重跑）。
-                    scope-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
-                        width: scope-chip.preferred-width + 24px;
                         height: 30px;
+                        width: Math.max(170px, Math.min(300px, target-label.preferred-width + 104px));
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: root.target-mode == UiEnums.target-mode-choose ? Theme.accent
+                            : chip-touch.has-hover ? Theme.line-strong
+                            : Theme.line;
+                        background: chip-touch.pressed ? Theme.bg-raised-press
+                            : chip-touch.has-hover ? Theme.bg-raised-hover
+                            : Theme.bg-raised;
 
-                        scope-chip := Rectangle {
-                            x: (parent.width - self.preferred-width) / 2;
-                            border-radius: Theme.radius;
-                            border-width: 1px;
-                            border-color: root.scope-menu-open ? Theme.accent : Theme.line;
-                            background: root.scope-menu-open ? Theme.accent-soft : Theme.bg-input;
-                            preferred-width: scope-text.preferred-width + 26px;
+                        animate background, border-color { duration: 120ms; }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 38px;
+                            spacing: 7px;
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Glyph.target;
+                                tint: root.target-mode == UiEnums.target-mode-choose ? Theme.accent : Theme.text-3;
+                                width: 13px;
+                                height: 13px;
+                            }
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: root.target-health-color;
+                            }
+
+                            target-label := Text {
+                                text: root.target-label;
+                                horizontal-stretch: 1;
+                                color: Theme.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: root.target-mode == UiEnums.target-mode-choose ? Glyph.chevron-up : Glyph.chevron-down;
+                                tint: Theme.text-3;
+                                width: 12px;
+                                height: 12px;
+                            }
+                        }
+
+                        // 胶囊主体的命中区（声明在锁定仓之下：仓区点击归仓——
+                        // press 只投最顶层元素）。
+                        chip-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.target-chip-clicked();
+                            }
+                        }
+
+                        // 锁定仓：胶囊右端 30px 独立命中区（分隔线 + 锁形图标）。
+                        Rectangle {
+                            x: parent.width - self.width;
+                            y: 0;
+                            width: 30px;
                             height: parent.height;
 
-                            chev := Icon {
-                                x: self.preferred-width - 14px;
+                            Rectangle {
+                                x: 0;
                                 y: (parent.height - self.height) / 2;
-                                width: 10px;
-                                height: 10px;
-                                commands: Glyph.chevron-down;
-                                tint: Theme.text-3;
+                                width: 1px;
+                                height: 14px;
+                                background: Theme.line;
                             }
-                            scope-text := Text {
-                                x: 8px;
-                                text: root.search-scope == 1 ? "文件名"
-                                    : root.search-scope == 2 ? "分类"
-                                    : root.search-scope == 3 ? "标签"
-                                    : "全部";
-                                color: root.scope-menu-open ? Theme.accent : Theme.text-2;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                            TouchArea {
-                                clicked => { root.scope-menu-toggled(); }
-                            }
-                        }
-                        Tooltip {
-                            text: @markdown("搜索范围：全部=名称+分类+标签；其余档位只搜对应名称");
-                        }
-                    }
 
-                    // 检索器：对分类名/标签名做模糊匹配。高度必须显式钉 30px——
-                    // 不钉会被 HorizontalLayout 纵向拉满整行（48px），比同排控件
-                    // 高一圈还顶进标题栏（真机截图教训）；宽度自适应 150–320px，
-                    // 窄窗口先压缩检索框而不是互相叠压。
-                    search-input := LineEdit {
-                        y: (parent.height - self.height) / 2;
-                        height: 30px;
-                        min-width: 150px;
-                        max-width: 320px;
-                        horizontal-stretch: 1;
-                        placeholder-text: root.search-scope == 1 ? "搜索文件名"
-                            : root.search-scope == 2 ? "搜索分类名"
-                            : root.search-scope == 3 ? "搜索标签名"
-                            : "搜索名称、分类或标签";
-                        text <=> root.search-text;
-                        edited(value) => {
-                            root.search-changed(value);
+                            Icon {
+                                x: (parent.width - self.width) / 2 + 1px;
+                                y: (parent.height - self.height) / 2;
+                                commands: root.target-pinned ? Glyph.lock : Glyph.unlock;
+                                tint: !target-chip.lock-enabled ? Theme.text-3
+                                    : root.target-pinned ? Theme.accent : Theme.text-2;
+                                width: 13px;
+                                height: 13px;
+                            }
+
+                            lock-touch := TouchArea {
+                                enabled: target-chip.lock-enabled;
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.target-pin-toggled();
+                                }
+                            }
+                        }
+
+                        // 单枚 Tooltip 按悬停分区讲当下的话术：仓上讲锁定，
+                        // 其余讲就绪/切换——只放一枚，避免同位两枚互相覆盖。
+                        // @markdown 只吃字符串字面量，动态话术先落属性再插值。
+                        // 单枚 Tooltip 按悬停分区讲当下的话术：仓上讲锁定，
+                        // 其余讲就绪/切换——只放一枚，避免同位两枚互相覆盖。
+                        // 话术落 target-chip.lock-tip 再插值：@markdown 只吃
+                        // 字符串字面量，且自定义属性直接挂在 Tooltip 上会在
+                        // 编译期触发 NamedReference 死元素 panic（1.17.1 实测）。
+                        Tooltip {
+                            text: @markdown("\{target-chip.lock-tip}");
                         }
                     }
 
@@ -616,110 +775,32 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-            }
 
-            // 目标条：当前目标始终可见；点击 chip 展开垂直下拉浮层（不下推布局）。
-            // 左簇=操作件（标签/chip/锁定），右簇=就绪说明（右对齐），整行左右平衡。
-            Rectangle {
-                height: 52px;
-                background: Theme.bg-panel;
+                // 目标提示（仅不在就绪态时出现）：绝对定位悬在中段弹性区、
+                // 右对齐「选择」按钮，紧邻右侧的目标胶囊——先读说明再读控件，
+                // 修掉旧版把提示放逐到行尾最右缘的阅读断裂。就绪态不渲染：
+                // 绿点即「就绪」，完整话术收进胶囊 Tooltip。
+                // 刻意不进 HorizontalLayout：1.17.1 布局器里 Text 的 min 一直
+                // 是文本 preferred（min-width: 0 压不动），高 DPI 窄窗上会把
+                // 右簇整个挤出窗外（真窗冒烟实测）；悬在布局外后宽度由左右
+                // 邻居位置钳定，随窗口收缩，不参与布局求解。
+                if root.target-mode != UiEnums.target-mode-ready: Text {
+                    x: select-anchor.x - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    width: Math.min(220px, Math.max(0px, select-anchor.x - search-capsule.x - search-capsule.width - 24px));
+                    text: root.target-hint;
+                    horizontal-alignment: right;
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    overflow: elide;
+                }
 
-                HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 10px;
-
-                    SectionLabel {
-                        text: "上框目标";
-                    }
-
-                    target-chip := Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        width: 268px;
-                        height: 30px;
-                        border-radius: Theme.radius;
-                        border-width: 1px;
-                        border-color: root.target-mode == UiEnums.target-mode-choose ? Theme.accent
-                            : chip-touch.has-hover ? Theme.line-strong
-                            : Theme.line;
-                        background: chip-touch.pressed ? Theme.bg-raised-press
-                            : chip-touch.has-hover ? Theme.bg-raised-hover
-                            : Theme.bg-raised;
-
-                        animate background, border-color { duration: 120ms; }
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 8px;
-                            spacing: 8px;
-
-                            Rectangle {
-                                y: (parent.height - self.height) / 2;
-                                width: 8px;
-                                height: 8px;
-                                border-radius: 4px;
-                                background: root.target-health-color;
-                            }
-
-                            Text {
-                                text: root.target-label;
-                                horizontal-stretch: 1;
-                                color: Theme.text;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            Icon {
-                                y: (parent.height - self.height) / 2;
-                                commands: root.target-mode == UiEnums.target-mode-choose ? Glyph.chevron-up : Glyph.chevron-down;
-                                tint: Theme.text-3;
-                                width: 14px;
-                                height: 14px;
-                            }
-                        }
-
-                        chip-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            clicked => {
-                                root.target-chip-clicked();
-                            }
-                        }
-
-                        Tooltip {
-                            text: @markdown("切换上框目标窗口");
-                        }
-                    }
-
-                    Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        width: 30px;
-                        height: 30px;
-
-                        IconButton {
-                            glyph: root.target-pinned ? Glyph.lock : Glyph.unlock;
-                            tip: root.target-pinned
-                                ? "已锁定：只上框到这个窗口，不随前台切换"
-                                : "未锁定：自动跟随最近使用的 IM 窗口";
-                            active: root.target-pinned;
-                            // 还没选目标时锁定无意义，禁用以免用户误以为锁了个空目标。
-                            enabled: root.target-mode != UiEnums.target-mode-empty;
-                            clicked => {
-                                root.target-pin-toggled();
-                            }
-                        }
-                    }
-
-                    // 说明文案占满剩余宽度并右对齐：不再挤在 chip 旁边。
-                    Text {
-                        text: root.target-hint;
-                        vertical-alignment: center;
-                        horizontal-alignment: right;
-                        horizontal-stretch: 1;
-                        color: Theme.text-3;
-                        font-size: 11px;
-                        overflow: elide;
-                    }
+                // 栏底发丝线：单栏化后与内容区（bg-panel）的分界靠它立住。
+                Rectangle {
+                    y: parent.height - self.height;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.line;
                 }
             }
 
@@ -1321,7 +1402,9 @@ export component AppWindow inherits Window {
             }
 
             opacity: shown ? 1.0 : 0.0;
-            x: target-chip.absolute-position.x;
+            // 锚在目标胶囊下方；胶囊已随命令栏移到窗口右缘，窄窗下 300px 浮层
+            // 会右溢出窗——按右缘钳制（与右键菜单 1828 行同款手法）。
+            x: Math.min(target-chip.absolute-position.x, root.width - 312px);
             y: target-chip.absolute-position.y + target-chip.height + 6px + (shown ? 0px : -6px);
             width: 300px;
             height: choices-layout.preferred-height;
