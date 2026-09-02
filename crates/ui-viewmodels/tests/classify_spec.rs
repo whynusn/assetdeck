@@ -1,5 +1,5 @@
 //! D66 归类弹窗 VM 红灯规格：批次级三操作 + 可解析包静默直通 + 混选
-//! 分流 + 批次记忆 + 归入检索 + 只读清单行。
+//! 分组 + 归入检索 + 只读清单行。
 //!
 //! 词汇（D66）：归入… / 新建… / 待分类；「按包内分类」只作为静默直通语义
 //! 存在，不再是弹窗操作项。批次级 = 一批素材只做一次决策，不逐组问。
@@ -10,7 +10,6 @@ use ui_viewmodels::classify::{
     decision_to_mode_field, filter_category_matches, plan_import, resolve_target, ClassifyTarget,
     EntryKind, GroupKind, GroupMode, ImportEntry,
 };
-use ui_viewmodels::settings::AppSettings;
 
 fn entry(path: &str, kind: EntryKind, count: Option<usize>) -> ImportEntry {
     ImportEntry {
@@ -164,67 +163,19 @@ fn all_entries_filtered_yields_nothing() {
     std::fs::remove_file(txt).unwrap();
 }
 
-// ----- R8 批次记忆（D66）：整批一对（方式/目标）+ 批次默认 -----
-
-fn settings_with_memory(mode: &str, category: &str) -> AppSettings {
-    AppSettings {
-        ask_classify_on_import: false,
-        remember_mode: mode.into(),
-        remember_category: category.into(),
-        ..AppSettings::default()
-    }
-}
+// ----- 弹窗预填：单一来源组用建议名，混合组留空 -----
 
 #[test]
-fn remembered_decision_skips_the_dialog() {
-    for mode_str in ["category", "into", "create"] {
-        // 单输入框时代归入/新建指令同形（category:X），新旧串都认。
-        let s = settings_with_memory(mode_str, "相册");
-        assert_eq!(
-            ui_viewmodels::classify::remembered_decision(&s),
-            Some((GroupMode::Into, Some("相册".into()))),
-            "记忆成对落盘，批次级直接套用（串 = {mode_str}）"
-        );
-    }
-    let inbox = settings_with_memory("inbox", "");
-    assert_eq!(
-        ui_viewmodels::classify::remembered_decision(&inbox),
-        Some((GroupMode::Inbox, None))
-    );
-}
-
-#[test]
-fn legacy_memory_strings_are_treated_as_unremembered() {
-    // D50 时代的 per_source/unified 与空串/乱值 = 没记（弹窗重新问）。
-    for legacy in ["per_source", "unified", "nonsense", ""] {
-        let s = settings_with_memory(legacy, "相册");
-        assert_eq!(ui_viewmodels::classify::remembered_decision(&s), None);
-    }
-}
-
-#[test]
-fn dialog_prefill_follows_memory_then_single_group_name() {
+fn dialog_prefill_follows_single_group_name() {
     let folder = plan_import(&[entry("C:/相册", EntryKind::Directory, None)]);
     assert_eq!(
-        ui_viewmodels::classify::dialog_prefill(&folder.groups, &AppSettings::default()),
+        ui_viewmodels::classify::dialog_prefill(&folder.groups),
         Some("相册".into()),
         "单文件夹预填目录名"
     );
-    let remembered = settings_with_memory("category", "表情");
-    assert_eq!(
-        ui_viewmodels::classify::dialog_prefill(&folder.groups, &remembered),
-        Some("表情".into()),
-        "有记忆用记忆分类，盖过目录名建议"
-    );
-    let remembered_inbox = settings_with_memory("inbox", "");
-    assert_eq!(
-        ui_viewmodels::classify::dialog_prefill(&folder.groups, &remembered_inbox),
-        Some("相册".into()),
-        "inbox 记忆不预填，退回组建议名"
-    );
     let broken = plan_import(&[entry("C:/broken.emo", EntryKind::EmoPackage, None)]);
     assert_eq!(
-        ui_viewmodels::classify::dialog_prefill(&broken.groups, &AppSettings::default()),
+        ui_viewmodels::classify::dialog_prefill(&broken.groups),
         Some("broken".into()),
         "残包预填包名 stem"
     );
@@ -239,37 +190,11 @@ fn mixed_batch_prefills_nothing() {
         entry("C:/相册", EntryKind::Directory, None),
     ]);
     assert_eq!(
-        ui_viewmodels::classify::dialog_prefill(&plan.groups, &AppSettings::default()),
+        ui_viewmodels::classify::dialog_prefill(&plan.groups),
         None,
         "混合组不预填（批次级只做一次决策，输入框留给用户）"
     );
     std::fs::remove_file(png).unwrap();
-}
-
-#[test]
-fn restoring_the_ask_toggle_discards_memory_effect() {
-    let mut s = settings_with_memory("inbox", "");
-    // 设置面板「导入时询问归类」重新打开（D28 toggle 机制）。
-    assert!(s.toggle("ask_classify_on_import"));
-    assert!(s.ask_classify_on_import);
-    assert_eq!(
-        ui_viewmodels::classify::remembered_decision(&s),
-        None,
-        "开着询问 = 记忆一律不生效"
-    );
-}
-
-#[test]
-fn ask_toggle_is_described_in_settings_panel() {
-    // D28 机制：describe 覆盖、toggle 翻转、文案非空。
-    let s = AppSettings::default();
-    let views = s.describe();
-    let view = views
-        .iter()
-        .find(|v| v.key == "ask_classify_on_import")
-        .expect("设置面板应有「导入时询问归类」行");
-    assert!(view.checked, "默认询问");
-    assert!(!view.detail.is_empty());
 }
 
 // ----- D66：批次清单行（弹窗只读首行，替代逐组重复卡片） -----

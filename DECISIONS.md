@@ -821,3 +821,18 @@ if (click_count % 2) == 1 {
 
 
 
+### D69 删除「记住我的选择」整机制：归类弹窗每次必弹（2026-09-01）
+
+**背景**：用户发现弹窗族的「记住我的选择，不再询问」没有意义且影响不可逆（设置面板找不到可逆项）。盘点确认全项目唯一 checkbox 在归类弹窗：勾一次 → `ask_classify_on_import=false` + `remember_mode/remember_category` 落盘，此后**所有**导入静默套用同一对决策（R8 记忆直通），且没有任何 UI 可以清掉记忆重新询问。用户的裁决是直接删除而非增强：「直接删了所有记住项的开关，我认为这些都没必要」。
+
+**决策**：三件套一起删——①弹窗 `remember-box` CheckBox 与 `classify-confirmed(int, bool)` 第二参；②`remembered_decision`/`remember_choice`/记忆直通块（finalize 里 R8 分支）；③设置项 `ask_classify_on_import`（唯一用途是放行记忆直通，「关闭后按记住的方式直接导入」的文案随记忆删除已不成立，留行即留死开关）。**保留**更新弹窗「跳过此版本」：它是按钮不是开关，按版本号自限（新版自动恢复提醒）、手动检查不受影响，与「记住选择永久改变后续行为」不同类。删除后归类弹窗**每次导入必弹**，天然可逆（取消即可），无需任何撤销闭环。
+
+**行为变化**：存量 `settings.toml` 里的 `ask_classify_on_import/remember_*` 键被 serde 静默忽略（结构体无这些字段），曾经关掉询问的用户回到每次必弹——这正是本决策的意图，不做迁移。`dialog_prefill` 去掉 settings 参数，预填回落单一来源组建议名（目录名/包 stem），混合组留空不变。
+
+**落点**：appwindow.slint（CheckBox 删 + import 减项 + 回调改单参）；app-ui main.rs（R8 直通块/confirm remember 参/remember_choice/settings_path 死字段——它唯一读者是 remember_choice）；ui-viewmodels classify.rs（remembered_decision 删、dialog_prefill 签名收窄）、settings.rs（三字段 + default_ask_classify + value_of/slot_mut/detail_for/SETTING_SPECS 行）；classify_spec.rs（4 个记忆用例删、prefill 用例改签名）、settings_spec.rs（roundtrip 字面量减项）。
+
+**守卫**：workspace test 全绿（classify_spec 16 例、settings_spec 6 例含 describe/ specs 同构断言）+ clippy 归零（抓出 settings_path 死字段连带清理）+ fmt；slint-viewer 渲染弹窗实证复选框移除后布局完好（候选列表/预告行/按钮行无空洞）。
+
+
+
+

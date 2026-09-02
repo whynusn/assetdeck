@@ -480,7 +480,6 @@ struct ImportFlow {
     /// 待预扫描条目数（probe 回来一个减一个，归零即 finalize）。
     pending: Rc<Cell<u32>>,
     settings: Rc<RefCell<AppSettings>>,
-    settings_path: Rc<std::path::PathBuf>,
     categories: Rc<RefCell<Vec<String>>>,
     importing: Arc<AtomicBool>,
     library_root: Option<String>,
@@ -655,13 +654,6 @@ impl ImportFlow {
             }
             return;
         }
-        if let Some(decision) = classify::remembered_decision(&self.settings.borrow()) {
-            // R8：有批次记忆 → 不弹窗直接套用。
-            logging::info!("R8 记忆直通：跳过弹窗直接导入 {} 组", groups_len);
-            self.do_import(&plan.groups, Some(decision), &plan.silent_packages);
-            return;
-        }
-
         *self.groups.borrow_mut() = plan.groups.clone();
         *self.silent.borrow_mut() = plan.silent_packages;
         let Some(ui) = self.ui.upgrade() else {
@@ -669,7 +661,7 @@ impl ImportFlow {
         };
         ui.set_classify_summary(classify::manifest_summary(&plan.groups).into());
         ui.set_classify_argument(
-            classify::dialog_prefill(&plan.groups, &self.settings.borrow())
+            classify::dialog_prefill(&plan.groups)
                 .unwrap_or_default()
                 .into(),
         );
@@ -753,8 +745,8 @@ impl ImportFlow {
     }
 
     /// 「导入」确认：kind = UiEnums.classify-confirm-*（0 按输入解析，
-    /// 1 直入待分类）。勾了记住先落设置；自动建分类时 toast 点名。
-    fn confirm(self: &Rc<Self>, kind: i32, remember: bool) {
+    /// 1 直入待分类）。自动建分类时 toast 点名。
+    fn confirm(self: &Rc<Self>, kind: i32) {
         let groups = self.groups.borrow().clone();
         let silent = self.silent.borrow().clone();
         let Some(ui) = self.ui.upgrade() else {
@@ -792,28 +784,8 @@ impl ImportFlow {
                 (GroupMode::Inbox, None)
             }
         };
-        if remember {
-            self.remember_choice(&decision);
-        }
         self.do_import(&groups, Some(decision), &silent);
         self.close();
-    }
-
-    /// R8：把批次决策写进设置（方式 + 分类名）并关掉询问。
-    fn remember_choice(&self, decision: &(GroupMode, Option<String>)) {
-        {
-            let mut settings = self.settings.borrow_mut();
-            settings.ask_classify_on_import = false;
-            settings.remember_mode = match decision.0 {
-                GroupMode::Inbox => "inbox",
-                GroupMode::Into | GroupMode::Create => "category",
-            }
-            .to_string();
-            settings.remember_category = decision.1.clone().unwrap_or_default();
-        }
-        if let Err(error) = self.settings.borrow().save(&self.settings_path) {
-            logging::warn!("记忆归类选择写入设置失败: {error}");
-        }
     }
 
     /// 决策 + 静默直通包 → 清单文件 → `--import-paths` 子进程管线（进度条/
@@ -1530,7 +1502,6 @@ fn main() {
         entries: Rc::new(RefCell::new(Vec::new())),
         pending: Rc::new(Cell::new(0)),
         settings: settings.clone(),
-        settings_path: settings_path.clone(),
         categories: filter_categories.clone(),
         importing: importing.clone(),
         library_root: library_root.clone(),
@@ -1659,8 +1630,8 @@ fn main() {
     }
     {
         let flow = import_flow.clone();
-        app.on_classify_confirmed(move |kind, remember| {
-            flow.confirm(kind, remember);
+        app.on_classify_confirmed(move |kind| {
+            flow.confirm(kind);
         });
     }
     // D65 导入结果弹窗：两段式出场（同 classify——先收 shown 播反向过渡，

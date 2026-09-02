@@ -3,8 +3,7 @@
 //! 壳层把对话框/拖放拿到的路径 + probe 计数归纳成 [`ImportEntry`] 列表，
 //! [`plan_import`] 把「probe 确认包内分类可解析」的包（.emo / 千牛结构目录
 //! 且探得 ≥1 个分类）分流为**静默按包内分类直通**（D66：不弹窗），余下的
-//! 产出弹窗分组行（D66 三操作：归入 / 新建 / 待分类）；记忆决策（R8）由
-//! [`memory_defaults`] 依据 [`AppSettings`] 给出；确认后
+//! 产出弹窗分组行（D66 三操作：归入 / 新建 / 待分类）；确认后
 //! [`decision_to_mode_field`] 把每行决策翻译成 `sample-library
 //! --import-paths` 清单行的 mode 字段。
 //!
@@ -12,7 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::settings::AppSettings;
 use media::is_importable;
 // 壳层（app-ui）不直接依赖 store：待分类名经此再导出，内部引用同用此名。
 pub use store::INBOX_CATEGORY;
@@ -138,39 +136,9 @@ pub fn plan_import(entries: &[ImportEntry]) -> ImportPlan {
     plan
 }
 
-// ---------------------------------------------------------------------------
-// R8 批次记忆（D66）：整批一个决策；「记住我的选择」只落一对（方式/目标）
-// ---------------------------------------------------------------------------
-
-/// 已记住的批次决策（None = 照常弹窗）。`ask_classify_on_import` 开着（默认）
-/// = None；方式串未知（手改 TOML / D50 时代 per_source|unified 残留）= 没记。
-/// 单输入框时代归入/新建在指令层同形（category:X），新串 "category" 与旧串
-/// "into"/"create" 一并认作分类语义。
-pub fn remembered_decision(settings: &AppSettings) -> Option<(GroupMode, Option<String>)> {
-    if settings.ask_classify_on_import {
-        return None;
-    }
-    let mode = match settings.remember_mode.as_str() {
-        "inbox" => GroupMode::Inbox,
-        "category" | "into" | "create" => GroupMode::Into,
-        _ => return None,
-    };
-    let category = if settings.remember_category.is_empty() {
-        None
-    } else {
-        Some(settings.remember_category.clone())
-    };
-    Some((mode, category))
-}
-
-/// 弹窗打开时输入框的预填：有记忆用记忆分类（inbox 记忆 = 不预填）；
-/// 否则单一来源组用其建议名（文件夹名/包 stem）；混合组留空。
-pub fn dialog_prefill(groups: &[SourceGroup], settings: &AppSettings) -> Option<String> {
-    match remembered_decision(settings) {
-        Some((GroupMode::Inbox, _)) | None => {}
-        Some((_, Some(category))) => return Some(category),
-        Some((_, None)) => {}
-    }
+/// 弹窗打开时输入框的预填：单一来源组用其建议名（文件夹名/包 stem）；
+/// 混合组留空（批次级只做一次决策，输入框留给用户）。
+pub fn dialog_prefill(groups: &[SourceGroup]) -> Option<String> {
     if let [group] = groups {
         return group.suggested_name.clone();
     }

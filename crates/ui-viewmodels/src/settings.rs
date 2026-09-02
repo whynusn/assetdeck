@@ -58,16 +58,6 @@ pub struct AppSettings {
     /// 临时开启后 Debug/Trace（上框/轮询等高频事件）全部落盘，排查完再关。
     #[serde(default)]
     pub verbose_diagnostics: bool,
-    /// D50 R8「导入时询问归类」：true（默认）= 每次导入弹归类弹窗；
-    /// false = 按下方三组记忆直接套用，不再询问。设置面板可重新打开。
-    #[serde(default = "default_ask_classify")]
-    pub ask_classify_on_import: bool,
-    /// D66 批次记忆：「记住我的选择」落盘的一对。方式串 into | create |
-    /// inbox，空串 = 未记忆；归入/新建时目标 = 分类名（待分类留空）。
-    #[serde(default)]
-    pub remember_mode: String,
-    #[serde(default)]
-    pub remember_category: String,
     /// D56 自动检查更新：true（默认）= 启动后静默检查（≥24h 节流）；
     /// false = 只能经设置面板手动检查。
     #[serde(default = "default_auto_update_check")]
@@ -83,10 +73,6 @@ pub struct AppSettings {
 }
 
 fn default_auto_update_check() -> bool {
-    true
-}
-
-fn default_ask_classify() -> bool {
     true
 }
 
@@ -159,9 +145,6 @@ impl Default for AppSettings {
             sidebar_width: default_sidebar_width(),
             fast_import_mode: default_fast_import(),
             verbose_diagnostics: false,
-            ask_classify_on_import: default_ask_classify(),
-            remember_mode: String::new(),
-            remember_category: String::new(),
             auto_update_check: default_auto_update_check(),
             last_check_unix: 0,
             dismissed_version: String::new(),
@@ -223,7 +206,6 @@ impl AppSettings {
             "ui_animations" => self.ui_animations,
             "fast_import_mode" => self.fast_import_mode,
             "verbose_diagnostics" => self.verbose_diagnostics,
-            "ask_classify_on_import" => self.ask_classify_on_import,
             "auto_update_check" => self.auto_update_check,
             _ => false,
         }
@@ -239,7 +221,6 @@ impl AppSettings {
             "ui_animations" => Some(&mut self.ui_animations),
             "fast_import_mode" => Some(&mut self.fast_import_mode),
             "verbose_diagnostics" => Some(&mut self.verbose_diagnostics),
-            "ask_classify_on_import" => Some(&mut self.ask_classify_on_import),
             "auto_update_check" => Some(&mut self.auto_update_check),
             _ => None,
         }
@@ -262,7 +243,6 @@ impl AppSettings {
             "ui_animations" => "关闭后弹层立即展开，不播过渡动画。",
             "fast_import_mode" => "多线程高速导入；关闭后转后台慢速，不抢前台。",
             "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
-            "ask_classify_on_import" => "每次导入前询问归类；关闭后按记住的方式直接导入。",
             "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",
             _ => "",
         }
@@ -311,12 +291,6 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
         "send_after_paste",
         "上框后自动发送",
         "上框行为",
-        SettingKind::Toggle,
-    ),
-    SettingSpec::new(
-        "ask_classify_on_import",
-        "导入时询问归类",
-        "导入",
         SettingKind::Toggle,
     ),
     SettingSpec::new(
@@ -383,9 +357,6 @@ mod tests {
             sidebar_width: 300.0,
             fast_import_mode: true,
             verbose_diagnostics: false,
-            ask_classify_on_import: true,
-            remember_mode: String::new(),
-            remember_category: String::new(),
             auto_update_check: true,
             last_check_unix: 0,
             dismissed_version: String::new(),
@@ -420,7 +391,6 @@ mod tests {
                 "ui_animations" => settings.ui_animations,
                 "fast_import_mode" => settings.fast_import_mode,
                 "verbose_diagnostics" => settings.verbose_diagnostics,
-                "ask_classify_on_import" => settings.ask_classify_on_import,
                 "auto_update_check" => settings.auto_update_check,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };

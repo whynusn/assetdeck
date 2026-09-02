@@ -3,7 +3,7 @@
 // 配色/圆角/图标一律走 theme.slint 的令牌与字形表；输入框、按钮、进度条用内置
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
-import { Button, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox, CheckBox } from "std-widgets.slint";
+import { Button, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
 import { Theme, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
@@ -210,7 +210,7 @@ export component AppWindow inherits Window {
     callback classify-picked(string);
     callback classify-canceled();
     // kind = UiEnums.classify-confirm-*：0 按输入解析（归入/新建）1 直入待分类。
-    callback classify-confirmed(int, bool);
+    callback classify-confirmed(int);
 
     // —— D65 导入结果弹窗 ——
     // 去重/相似/失败的持久点名面板：瞬时通知条会自动消隐，而「素材去哪了」
@@ -2323,16 +2323,12 @@ export component AppWindow inherits Window {
                 }
 
 
-                remember-box := CheckBox {
-                    text: "记住我的选择，不再询问";
-                }
-
                 HorizontalLayout {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "取消"; clicked => { root.classify-canceled(); } }
-                    Button { text: "放入待分类"; clicked => { root.classify-confirmed(UiEnums.classify-confirm-inbox, remember-box.checked); } }
-                    Button { text: "导入"; primary: true; clicked => { root.classify-confirmed(UiEnums.classify-confirm-resolve, remember-box.checked); } }
+                    Button { text: "放入待分类"; clicked => { root.classify-confirmed(UiEnums.classify-confirm-inbox); } }
+                    Button { text: "导入"; primary: true; clicked => { root.classify-confirmed(UiEnums.classify-confirm-resolve); } }
                 }
             }
         }
