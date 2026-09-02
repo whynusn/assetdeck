@@ -126,7 +126,10 @@ pub fn parse_release_json(text: &str) -> Result<ReleaseInfo, String> {
                     if name.is_empty() || asset_url.is_empty() {
                         return None;
                     }
-                    Some(ReleaseAsset { name, url: asset_url })
+                    Some(ReleaseAsset {
+                        name,
+                        url: asset_url,
+                    })
                 })
                 .collect()
         })

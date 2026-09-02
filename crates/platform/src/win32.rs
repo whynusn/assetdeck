@@ -3765,7 +3765,9 @@ pub mod crypto {
             std::fs::write(&big, &big_bytes).unwrap();
             let hex = sha256_file_hex(&big).unwrap();
             assert_eq!(hex.len(), 64);
-            assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            assert!(hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         }
 
         #[test]

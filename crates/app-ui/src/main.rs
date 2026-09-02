@@ -1357,8 +1357,8 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
         }
         return;
     };
-    let Some(sums_asset) = ui_viewmodels::pick_asset(&release.assets, ui_viewmodels::SUMS_ASSET_NAME)
-        .cloned()
+    let Some(sums_asset) =
+        ui_viewmodels::pick_asset(&release.assets, ui_viewmodels::SUMS_ASSET_NAME).cloned()
     else {
         let message = "发布清单缺少校验和清单（SHA256SUMS.txt）".to_string();
         logging::warn!("{message}");
@@ -1393,7 +1393,11 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
         "应用内更新开始 version={} installer={} mode={}",
         release.version,
         installer_asset.url,
-        if installer_mode { "installer" } else { "portable" }
+        if installer_mode {
+            "installer"
+        } else {
+            "portable"
+        }
     );
 
     let ui_weak = ui.clone();
@@ -1402,22 +1406,24 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
     std::thread::spawn(move || {
         // 进度节流：100ms 一跳；首块与收尾块（received==total）必发。
         // 格式化留在 VM（可测），线程只回传原始字节数。
-        const PROGRESS_MIN_INTERVAL: std::time::Duration =
-            std::time::Duration::from_millis(100);
+        const PROGRESS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
         // D71 镜像测速参数：64 KiB 取样、8s 上限——超 8s 拿不到 64KiB 的源
         // 不配当「最快」，落选但不淘汰（全灭时仍有兜底资格）。
         const PROBE_TIMEOUT_MS: u64 = 8_000;
         const PROBE_SAMPLE_BYTES: u32 = 64 * 1024;
         // SUMS 锚定原始源的专用上限：清单只有几百字节，10s 足够礼貌。
         const SUMS_ANCHOR_TIMEOUT_MS: u64 = 10_000;
-        let last_tick = std::cell::Cell::new(
-            std::time::Instant::now() - std::time::Duration::from_secs(1),
-        );
+        let last_tick =
+            std::cell::Cell::new(std::time::Instant::now() - std::time::Duration::from_secs(1));
 
         let report_failure = |weak: slint::Weak<AppWindow>, message: String| {
             let _ = slint::invoke_from_event_loop(move || {
                 let apply_vm = UPDATE_WIRING.with(|slot| {
-                    slot.borrow().as_ref().expect("更新装配未初始化").apply_vm.clone()
+                    slot.borrow()
+                        .as_ref()
+                        .expect("更新装配未初始化")
+                        .apply_vm
+                        .clone()
                 });
                 apply_vm.borrow_mut().mark_failed(message.clone());
                 if let Some(ui) = weak.upgrade() {
@@ -1468,9 +1474,8 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
                     // ② SHA256SUMS 锚定原始源（信任锚不跟着镜像走）；
                     // 失败才降级为「经镜像取得」并留告警，签名（批 C）前
                     // 这是镜像内容可信度的根。
-                    let origin = scope.spawn(|| {
-                        fetcher.fetch_text(&sums_url, SUMS_ANCHOR_TIMEOUT_MS).ok()
-                    });
+                    let origin =
+                        scope.spawn(|| fetcher.fetch_text(&sums_url, SUMS_ANCHOR_TIMEOUT_MS).ok());
                     for probe in probes {
                         probe_ms.push(probe.join().unwrap_or(None));
                     }
@@ -1571,9 +1576,7 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
                     .map_err(|error| format!("计算安装包摘要失败: {error}"))?;
                 let expected_hash = expected.as_deref().expect("校验和已在下载前就绪");
                 if !ui_viewmodels::hash_matches(expected_hash, &actual) {
-                    attempts.push(format!(
-                        "{label}: SHA-256 不符（内容疑似滞后或被篡改）"
-                    ));
+                    attempts.push(format!("{label}: SHA-256 不符（内容疑似滞后或被篡改）"));
                     continue;
                 }
                 logging::info!("安装包校验通过 source={label}");
@@ -1611,7 +1614,11 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
                 logging::info!("安装器已启动，移交更新（wait-pid={pid}）");
                 let _ = slint::invoke_from_event_loop(move || {
                     let apply_vm = UPDATE_WIRING.with(|slot| {
-                        slot.borrow().as_ref().expect("更新装配未初始化").apply_vm.clone()
+                        slot.borrow()
+                            .as_ref()
+                            .expect("更新装配未初始化")
+                            .apply_vm
+                            .clone()
                     });
                     apply_vm.borrow_mut().mark_launching();
                     if let Some(ui) = ui_weak.upgrade() {

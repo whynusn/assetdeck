@@ -135,8 +135,7 @@ pub fn parse_sha256_sums(text: &str) -> Vec<(String, String)> {
             let (hash, name) = line.split_once(char::is_whitespace)?;
             let name = name.trim_start_matches([' ', '*']).trim();
             let hash = hash.trim();
-            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || name.is_empty()
-            {
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || name.is_empty() {
                 return None;
             }
             Some((hash.to_ascii_lowercase(), name.to_string()))
@@ -165,24 +164,36 @@ pub struct UpdateApplyVm {
 enum ApplyState {
     #[default]
     Idle,
-    Downloading { received: u64, total: u64 },
+    Downloading {
+        received: u64,
+        total: u64,
+    },
     Launching,
     Failed(String),
 }
 
 impl UpdateApplyVm {
     pub fn new() -> Self {
-        UpdateApplyVm { state: ApplyState::Idle }
+        UpdateApplyVm {
+            state: ApplyState::Idle,
+        }
     }
 
     /// 进入下载态。从任何状态（失败重试、取消后重下）都允许。
     pub fn begin_download(&mut self) {
-        self.state = ApplyState::Downloading { received: 0, total: 0 };
+        self.state = ApplyState::Downloading {
+            received: 0,
+            total: 0,
+        };
     }
 
     /// 下载进度回填。仅在下载态生效——取消后迟到的进度不得把状态拉回下载。
     pub fn set_progress(&mut self, received: u64, total: u64) {
-        if let ApplyState::Downloading { received: r, total: t } = &mut self.state {
+        if let ApplyState::Downloading {
+            received: r,
+            total: t,
+        } = &mut self.state
+        {
             *r = received;
             *t = total;
         }
@@ -213,7 +224,10 @@ impl UpdateApplyVm {
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(self.state, ApplyState::Downloading { .. } | ApplyState::Launching)
+        matches!(
+            self.state,
+            ApplyState::Downloading { .. } | ApplyState::Launching
+        )
     }
 
     pub fn is_downloading(&self) -> bool {
@@ -280,7 +294,10 @@ mod tests {
             installer_asset_name("v0.2.0"),
             "assetdeck-installer-0.2.0.exe"
         );
-        assert_eq!(installer_asset_name("0.2.0"), "assetdeck-installer-0.2.0.exe");
+        assert_eq!(
+            installer_asset_name("0.2.0"),
+            "assetdeck-installer-0.2.0.exe"
+        );
         assert_eq!(installer_asset_name("V1.0"), "assetdeck-installer-1.0.exe");
     }
 
@@ -427,12 +444,18 @@ mod tests {
         // 键缺失 = 用内置（feeds 键在同一文件里不该影响本键）。
         let path = dir.join("feeds-only.toml");
         std::fs::write(&path, "feeds = [\"https://a/api\"]").unwrap();
-        assert_eq!(load_download_mirrors(&path).len(), DEFAULT_DOWNLOAD_MIRRORS.len());
+        assert_eq!(
+            load_download_mirrors(&path).len(),
+            DEFAULT_DOWNLOAD_MIRRORS.len()
+        );
 
         // 键存在（非空）= 全量覆盖。
         let path = dir.join("custom.toml");
         std::fs::write(&path, "download_mirrors = [\"https://m1/\"]").unwrap();
-        assert_eq!(load_download_mirrors(&path), vec!["https://m1/".to_string()]);
+        assert_eq!(
+            load_download_mirrors(&path),
+            vec!["https://m1/".to_string()]
+        );
 
         // 文件写坏 = 回落内置（坏配置不弄哑更新链路）。
         let path = dir.join("broken.toml");
@@ -459,7 +482,10 @@ mod tests {
 
     #[test]
     fn mirror_label_extracts_host() {
-        assert_eq!(mirror_label("https://ghfast.top/https://github.com/a/b"), "ghfast.top");
+        assert_eq!(
+            mirror_label("https://ghfast.top/https://github.com/a/b"),
+            "ghfast.top"
+        );
         assert_eq!(mirror_label("https://github.com/a/b"), "github.com");
         assert_eq!(mirror_label("http://m1.example:8080/x"), "m1.example");
         // 解析不出退回整串（标签只进文案，不参与决策）。
