@@ -116,10 +116,13 @@ impl Focuser {
 }
 
 impl InputFocuser for Focuser {
-    fn focus_input(&self, _: WindowHandle, plan: &FocusPlan) -> FocusOutcome {
+    fn focus_input(&self, _: WindowHandle, plan: &FocusPlan) -> platform::FocusReport {
         self.log.push(Op::Focus);
         *self.seen_plan.lock().unwrap() = Some(plan.clone());
-        self.outcome
+        platform::FocusReport {
+            outcome: self.outcome,
+            attempts: Vec::new(),
+        }
     }
 }
 
@@ -144,6 +147,7 @@ fn profile() -> Profile {
             FocusStrategyStep::Anchor,
         ],
         input_anchor: None,
+        input_anchor_bottom: None,
     }
 }
 

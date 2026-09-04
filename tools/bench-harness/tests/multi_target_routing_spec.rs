@@ -106,11 +106,14 @@ impl ReadinessProbe for Probe {
 struct Focuser(Log);
 
 impl InputFocuser for Focuser {
-    fn focus_input(&self, window: WindowHandle, _plan: &FocusPlan) -> FocusOutcome {
+    fn focus_input(&self, window: WindowHandle, _plan: &FocusPlan) -> platform::FocusReport {
         self.0.push(Op::Focus(window));
         // Telegram 是常规控件应用，UIA 能真的把焦点送进输入框（不同于微信/千牛，见 D15）。
         // 替身照此表态，于是非严格就绪档下 verified 由聚焦结论给出 true。
-        FocusOutcome::FocusedByUia
+        platform::FocusReport {
+            outcome: FocusOutcome::FocusedByUia,
+            attempts: Vec::new(),
+        }
     }
 }
 

@@ -37,6 +37,7 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, IsWindowEnabled, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
@@ -54,11 +55,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{
-    ClipboardPayload, ClipboardSink, EventWait, FileDialogs, FocusAnchor, FocusOutcome, FocusPlan,
-    FocusStep, FocusWatcher, ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector,
-    PlatformError, ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome,
-    WindowActivator, WindowEnumerator, WindowEventSource, WindowHandle, WindowRect, WindowSnapshot,
-    KEY_UP,
+    AnchorGeometry, ClickEvidence, ClipboardPayload, ClipboardSink, EventWait, FileDialogs,
+    FocusAttempt, FocusOutcome, FocusPlan, FocusReport, FocusStep, FocusWatcher,
+    ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector, PlatformError,
+    ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome, WindowActivator,
+    WindowEnumerator, WindowEventSource, WindowHandle, WindowRect, WindowSnapshot, KEY_UP,
 };
 
 /// 原生文件对话框（IFileDialog）：ComCtl 版免 PowerShell 冷启动（消除数秒延迟）。
@@ -1907,44 +1908,128 @@ const ANCHOR_CLICK_SETTLE_CAP_MS: u64 = 60;
 pub struct Win32InputFocuser;
 
 impl InputFocuser for Win32InputFocuser {
-    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusOutcome {
-        let outcome = focus_input_by_plan(window, plan);
-        // 低配机延迟归因（D41）：三级降级里实际走了哪一级、结果如何，
-        // 配合 pipeline 的 focus 段耗时判断锚点单击后的等待是否是大头。
-        log::debug!("focus_input outcome={outcome:?} steps={:?}", plan.steps);
-        outcome
+    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusReport {
+        let report = focus_input_by_plan(window, plan);
+        // 低配机延迟归因（D41）与「报成功但没落框」现场（D74）：实际走了哪一级、
+        // 点击点与客户区几何、settle 证据，配合 pipeline 的 focus 段耗时判读。
+        log::debug!(
+            "focus_input outcome={:?} steps={:?} attempts={}",
+            report.outcome,
+            plan.steps,
+            format_attempts(&report.attempts)
+        );
+        report
     }
 }
 
-fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusOutcome {
+/// 尝试记录的紧凑串（供 debug 日志与 pipeline 现场行共用）。
+fn format_attempts(attempts: &[FocusAttempt]) -> String {
+    attempts
+        .iter()
+        .map(|attempt| {
+            let click = attempt
+                .click
+                .map(|evidence| {
+                    format!(
+                        " click={:?} point=({},{}) client={}x{} dpi={}",
+                        evidence.geometry,
+                        evidence.point_screen.0,
+                        evidence.point_screen.1,
+                        evidence.client_size.0,
+                        evidence.client_size.1,
+                        evidence.dpi
+                    )
+                })
+                .unwrap_or_default();
+            let settle = attempt
+                .settle
+                .map(|outcome| format!(" settle={outcome:?}"))
+                .unwrap_or_default();
+            format!("{:?}->{:?}{click}{settle}", attempt.step, attempt.outcome)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
     let hwnd = window.0 as HWND;
+    let mut attempts = Vec::new();
     if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
-        return FocusOutcome::Unavailable;
+        return FocusReport {
+            outcome: FocusOutcome::Unavailable,
+            attempts,
+        };
     }
     // 空计划由 targets 层拦下（ProfileError::EmptyFocusStrategy）；平台层遇空
     // 保持纯函数性，什么都不做并如实返回「没能证明」。
     for step in &plan.steps {
         match step {
             FocusStep::AlreadyEditable => {
-                if uia_focused_is_editable(window) {
-                    return FocusOutcome::AlreadyEditable;
+                let editable = uia_focused_is_editable(window);
+                attempts.push(FocusAttempt {
+                    step: *step,
+                    outcome: if editable {
+                        FocusOutcome::AlreadyEditable
+                    } else {
+                        FocusOutcome::Unavailable
+                    },
+                    click: None,
+                    settle: None,
+                });
+                if editable {
+                    return FocusReport {
+                        outcome: FocusOutcome::AlreadyEditable,
+                        attempts,
+                    };
                 }
             }
             FocusStep::UiaSetFocus => {
-                if uia_set_focus_on_editable(window) {
-                    return FocusOutcome::FocusedByUia;
+                let (focused, settle) = uia_set_focus_on_editable(window);
+                attempts.push(FocusAttempt {
+                    step: *step,
+                    outcome: if focused {
+                        FocusOutcome::FocusedByUia
+                    } else {
+                        FocusOutcome::Unavailable
+                    },
+                    click: None,
+                    settle,
+                });
+                if focused {
+                    return FocusReport {
+                        outcome: FocusOutcome::FocusedByUia,
+                        attempts,
+                    };
                 }
             }
             FocusStep::AnchorClick => {
-                if let Some(anchor) = plan.anchor {
-                    if let FocusOutcome::FocusedByAnchor = click_anchor(hwnd, anchor) {
-                        return FocusOutcome::FocusedByAnchor;
+                // bottom-up 锚点（D74）存在即优先：旧比例锚点只作兼容兜底。
+                let geometry = plan
+                    .anchor_bottom
+                    .map(AnchorGeometry::BottomUp)
+                    .or(plan.anchor.map(AnchorGeometry::Ratio));
+                if let Some(geometry) = geometry {
+                    let (outcome, click, settle) = click_anchor(hwnd, geometry);
+                    attempts.push(FocusAttempt {
+                        step: *step,
+                        outcome,
+                        click,
+                        settle,
+                    });
+                    if outcome == FocusOutcome::FocusedByAnchor {
+                        return FocusReport {
+                            outcome: FocusOutcome::FocusedByAnchor,
+                            attempts,
+                        };
                     }
                 }
             }
         }
     }
-    FocusOutcome::Unavailable
+    FocusReport {
+        outcome: FocusOutcome::Unavailable,
+        attempts,
+    }
 }
 
 /// 当前系统焦点是否已落在目标窗口所属进程的可写 Edit/Document 上。
@@ -1974,24 +2059,26 @@ fn target_process_id(window: WindowHandle) -> Option<i32> {
 /// 只有随后能复核「焦点确实落在目标进程的可写控件上」才返回 true——
 /// 千牛聊天区是 CEF Document（渲染进程与窗口进程不同），复核必然不过，
 /// 于是自动降级到锚点单击，而不是谎报成功。
-fn uia_set_focus_on_editable(window: WindowHandle) -> bool {
+/// 返回值附带最后一次 SetFocus 后的事件等待结局（D74 现场记录）。
+fn uia_set_focus_on_editable(window: WindowHandle) -> (bool, Option<WaitOutcome>) {
     let Ok(automation) = uia_automation() else {
-        return false;
+        return (false, None);
     };
     let Ok(root) =
         (unsafe { automation.ElementFromHandle(WinHWND(window.0 as *mut core::ffi::c_void)) })
     else {
-        return false;
+        return (false, None);
     };
     let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
-        return false;
+        return (false, None);
     };
     let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
-        return false;
+        return (false, None);
     };
     let Ok(length) = (unsafe { all.Length() }) else {
-        return false;
+        return (false, None);
     };
+    let mut last_settle = None;
     for index in 0..length.min(200) {
         let Ok(element) = (unsafe { all.GetElement(index) }) else {
             continue;
@@ -2025,24 +2112,51 @@ fn uia_set_focus_on_editable(window: WindowHandle) -> bool {
             continue;
         }
         let outcome = surface.wait(UIA_FOCUS_SETTLE_CAP_MS);
-        log::debug!("uia-setfocus settle outcome={outcome:?} cap_ms={UIA_FOCUS_SETTLE_CAP_MS}");
+        last_settle = Some(outcome);
         if uia_focused_is_editable(window) {
-            return true;
+            return (true, last_settle);
         }
     }
-    false
+    (false, last_settle)
 }
 
 /// 客户区比例锚点 → 客户区内像素偏移。比例先夹紧到安全区间再换算。
-fn anchor_offset_in_client(
+/// 锚点几何 → 客户区内点击点（物理像素）。
+///
+/// bottom-up（D74）：y = 客户区高 − y_from_bottom × (dpi/96)——用目标窗口的
+/// 实时 DPI 把 96-DPI 逻辑像素换算成物理像素，锚定的是「距底边」而不是
+/// 「距顶边比例」，窗口变高时不再从输入区漂进消息列表。y 夹进客户区内，
+/// 画像写了离谱值也点不出窗口。
+fn click_point_in_client(
     client_width: i32,
     client_height: i32,
-    anchor: FocusAnchor,
+    dpi: u32,
+    geometry: AnchorGeometry,
 ) -> (i32, i32) {
     let clamp = |ratio: f32| ratio.clamp(ANCHOR_RATIO_MIN, ANCHOR_RATIO_MAX);
-    let x = (client_width as f32 * clamp(anchor.x_ratio)).round() as i32;
-    let y = (client_height as f32 * clamp(anchor.y_ratio)).round() as i32;
-    (x, y)
+    match geometry {
+        AnchorGeometry::Ratio(anchor) => (
+            (client_width as f32 * clamp(anchor.x_ratio)).round() as i32,
+            (client_height as f32 * clamp(anchor.y_ratio)).round() as i32,
+        ),
+        AnchorGeometry::BottomUp(anchor) => {
+            let scale = dpi.max(1) as f32 / 96.0;
+            let x = (client_width as f32 * clamp(anchor.x_ratio)).round() as i32;
+            let offset = (anchor.y_from_bottom * scale).round() as i32;
+            let y = (client_height - offset).clamp(8, (client_height - 8).max(8));
+            (x, y)
+        }
+    }
+}
+
+/// 目标窗口的实时 DPI；API 失败（老系统/无效句柄）回落 96（=不缩放）。
+fn window_dpi(hwnd: HWND) -> u32 {
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 {
+        96
+    } else {
+        dpi
+    }
 }
 
 /// 屏幕坐标 → `SendInput` 的虚拟桌面归一化坐标（0..=65535）。
@@ -2069,9 +2183,16 @@ fn normalize_to_virtual_desktop(
 ///
 /// 红线：只合成鼠标移动与左键按下/释放，绝不合成任何键盘事件；
 /// 点击前必须确认目标仍是前台、且锚点处的顶层窗口就是目标窗口（防止点到遮挡物）。
-fn click_anchor(hwnd: HWND, anchor: FocusAnchor) -> FocusOutcome {
+///
+/// 返回三元组（D74）：聚焦结论 + 单击现场（几何/落点/客户区/DPI，守卫拦截时也
+/// 尽量给）+ 点击后输入迹象的等待结局。旧实现把后两者丢弃，「点没点中输入框」
+/// 在上层无从判读。
+fn click_anchor(
+    hwnd: HWND,
+    geometry: AnchorGeometry,
+) -> (FocusOutcome, Option<ClickEvidence>, Option<WaitOutcome>) {
     if unsafe { GetForegroundWindow() } != hwnd {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, None, None);
     }
     let mut client = RECT {
         left: 0,
@@ -2080,25 +2201,29 @@ fn click_anchor(hwnd: HWND, anchor: FocusAnchor) -> FocusOutcome {
         bottom: 0,
     };
     if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, None, None);
     }
-    let (offset_x, offset_y) = anchor_offset_in_client(
-        client.right - client.left,
-        client.bottom - client.top,
-        anchor,
-    );
+    let dpi = window_dpi(hwnd);
+    let client_size = (client.right - client.left, client.bottom - client.top);
+    let (offset_x, offset_y) = click_point_in_client(client_size.0, client_size.1, dpi, geometry);
     let mut point = POINT {
         x: client.left + offset_x,
         y: client.top + offset_y,
     };
     if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, None, None);
     }
+    let evidence = ClickEvidence {
+        geometry,
+        point_screen: (point.x, point.y),
+        client_size,
+        dpi,
+    };
 
     // 锚点必须真的落在目标窗口上：命中的顶层窗口不是目标就说明被遮挡，放弃点击。
     let hit = unsafe { WindowFromPoint(point) };
     if hit.is_null() || unsafe { GetAncestor(hit, GA_ROOT) } != hwnd {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, Some(evidence), None);
     }
 
     let virtual_origin = unsafe {
@@ -2116,7 +2241,7 @@ fn click_anchor(hwnd: HWND, anchor: FocusAnchor) -> FocusOutcome {
     let Some((nx, ny)) =
         normalize_to_virtual_desktop(point.x, point.y, virtual_origin, virtual_size)
     else {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, Some(evidence), None);
     };
 
     let mut restore = POINT { x: 0, y: 0 };
@@ -2141,15 +2266,14 @@ fn click_anchor(hwnd: HWND, anchor: FocusAnchor) -> FocusOutcome {
         unsafe { SetCursorPos(restore.x, restore.y) };
     }
     if sent != events.len() as u32 {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, Some(evidence), None);
     }
     let outcome = surface.wait(ANCHOR_CLICK_SETTLE_CAP_MS);
-    log::debug!("anchor-click settle outcome={outcome:?} cap_ms={ANCHOR_CLICK_SETTLE_CAP_MS}");
     // 单击可能唤起了别的窗口（例如目标弹出模态框）；前台漂移即视为没拿到焦点。
     if unsafe { GetForegroundWindow() } != hwnd {
-        return FocusOutcome::Unavailable;
+        return (FocusOutcome::Unavailable, Some(evidence), Some(outcome));
     }
-    FocusOutcome::FocusedByAnchor
+    (FocusOutcome::FocusedByAnchor, Some(evidence), Some(outcome))
 }
 
 fn mouse_event(nx: i32, ny: i32, flags: u32) -> INPUT {
@@ -2253,6 +2377,7 @@ impl KeyInjector for Win32Injector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BottomUpAnchor, FocusAnchor};
 
     /// 从 UTF-16 列表还原出路径字符串序列（去掉分隔 NUL 与末尾终止 NUL）。
     fn decode(list: &[u16]) -> Vec<String> {
@@ -2261,6 +2386,67 @@ mod tests {
             .filter(|segment| !segment.is_empty())
             .map(String::from_utf16_lossy)
             .collect()
+    }
+
+    #[test]
+    fn bottom_up_anchor_scales_with_dpi_and_ignores_window_height() {
+        // 千牛接待中心实测值：1230x800 逻辑客户区、144 DPI（150%）。
+        // 偏移先取整：round(127×1.5)=191，y = 800−191 = 609，即物理底边向上
+        // 190.5px，落在实测文本带（物理 80~295）内；窗口变高时此距离不变。
+        let point = click_point_in_client(
+            1230,
+            800,
+            144,
+            AnchorGeometry::BottomUp(BottomUpAnchor {
+                x_ratio: 0.394,
+                y_from_bottom: 127.0,
+            }),
+        );
+        assert_eq!(point, (485, 609));
+
+        // 同一锚点、同 DPI、窗口高 1000 逻辑：y 只随客户区底边平移，
+        // 不像比例锚那样把点击漂进消息列表（D74 失效机理）。
+        let tall = click_point_in_client(
+            1230,
+            1000,
+            144,
+            AnchorGeometry::BottomUp(BottomUpAnchor {
+                x_ratio: 0.394,
+                y_from_bottom: 127.0,
+            }),
+        );
+        assert_eq!(tall, (485, 809));
+    }
+
+    #[test]
+    fn bottom_up_anchor_clamps_inside_client_at_low_dpi() {
+        // 96 DPI 不缩放；离谱的 y_from_bottom 被夹进客户区内（8px 边距），
+        // 画像写错值也点不出窗口。
+        let point = click_point_in_client(
+            1000,
+            300,
+            96,
+            AnchorGeometry::BottomUp(BottomUpAnchor {
+                x_ratio: 0.5,
+                y_from_bottom: 900.0,
+            }),
+        );
+        assert_eq!(point, (500, 8));
+    }
+
+    #[test]
+    fn ratio_anchor_unchanged_for_legacy_profiles() {
+        // 旧比例锚路径保持原行为：未声明 anchor_bottom 的画像走这里。
+        let point = click_point_in_client(
+            1000,
+            800,
+            144,
+            AnchorGeometry::Ratio(FocusAnchor {
+                x_ratio: 0.5,
+                y_ratio: 0.5,
+            }),
+        );
+        assert_eq!(point, (500, 400));
     }
 
     #[test]

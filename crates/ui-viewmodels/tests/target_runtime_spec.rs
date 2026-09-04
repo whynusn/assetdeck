@@ -136,11 +136,20 @@ impl ForegroundObserver for NoObserver {
 }
 
 /// 千牛 CEF / 微信 Qt 都不暴露可 SetFocus 的输入框，替身照实走「锚点单击」这一级。
+/// settle 恒为 Observed：替身模拟「单击后等到输入迹象」的正证据路径。
 struct Focuser(Shared);
 impl InputFocuser for Focuser {
-    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusOutcome {
+    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> platform::FocusReport {
         self.0.lock().unwrap().focuses.push((window, plan.clone()));
-        FocusOutcome::FocusedByAnchor
+        platform::FocusReport {
+            outcome: FocusOutcome::FocusedByAnchor,
+            attempts: vec![platform::FocusAttempt {
+                step: platform::FocusStep::AnchorClick,
+                outcome: FocusOutcome::FocusedByAnchor,
+                click: None,
+                settle: Some(platform::WaitOutcome::Observed { elapsed_ms: 10 }),
+            }],
+        }
     }
 }
 
@@ -474,8 +483,9 @@ fn runtime_pastes_video_by_file_path_without_enter() {
 
     assert_eq!(
         notice.tone,
-        TargetNoticeTone::Warning,
-        "探测不确定时照常注入但标 unverified，文案提示用户确认：{}",
+        TargetNoticeTone::Success,
+        "锚点单击后观测到输入迹象（settle=Observed）是正证据，verified 升 true，\
+         文案不再提示用户确认（D74）：{}",
         notice.text
     );
 
@@ -492,6 +502,7 @@ fn runtime_pastes_video_by_file_path_without_enter() {
                     FocusStep::AnchorClick,
                 ],
                 anchor: None,
+                anchor_bottom: None,
             }
         )],
         "激活后必须对同一目标做一次聚焦；该画像未声明策略故取三级缺省、未声明锚点故 anchor 为 None"

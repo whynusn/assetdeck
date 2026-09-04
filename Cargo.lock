@@ -4983,6 +4983,7 @@ dependencies = [
 name = "targets"
 version = "0.1.4"
 dependencies = [
+ "log",
  "platform",
  "proptest",
  "regex",

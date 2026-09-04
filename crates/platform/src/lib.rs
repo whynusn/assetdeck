@@ -282,10 +282,36 @@ pub trait ReadinessProbe {
 ///
 /// 为什么是比例而不是绝对坐标：IM 窗口尺寸随用户拖拽变化，但输入框在版式中的
 /// 相对位置稳定。比例锚点由目标画像声明，平台层只负责换算与安全校验。
+///
+/// 注意（D74）：top-down 比例有一个结构性失效模式——底部固定像素高度的
+/// 工具条/提示条会把「比例」和「输入框」解耦，窗口越高，同一比例落点离
+/// 输入框越远（2026-09-03 真机实测：客户区高 1185 时 y=0.92 命中输入区，
+/// 高 ~1400+ 时同一比例落进上方消息列表）。新目标/新测量请用
+/// [`BottomUpAnchor`]，本类型仅为兼容既有画像保留。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FocusAnchor {
     pub x_ratio: f32,
     pub y_ratio: f32,
+}
+
+/// 底部锚点（D74）：x 仍为比例，y 是**距客户区底边**的 96-DPI 逻辑像素。
+///
+/// 为什么 bottom-up 稳定：输入框总是贴着底部固定高度的工具条/提示条排布，
+/// 底边到输入框中心的像素距离随窗口高度几乎不变（实测拼多多 1185 高客户区
+/// 输入区底距 55~150px，千牛 80~295px），而 top-down 比例随高度漂移。
+/// 平台层按目标窗口的实时 DPI 把逻辑像素换算成物理像素。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BottomUpAnchor {
+    pub x_ratio: f32,
+    /// 距客户区底边的 96-DPI 逻辑像素。
+    pub y_from_bottom: f32,
+}
+
+/// 锚点几何形态：声明使用的是哪一种定位模型（现场记录的判读键）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnchorGeometry {
+    Ratio(FocusAnchor),
+    BottomUp(BottomUpAnchor),
 }
 
 /// 一次「把键盘焦点送进聊天输入框」的结果。
@@ -302,6 +328,53 @@ pub enum FocusOutcome {
     FocusedByAnchor,
     /// 两条路都不可用（无锚点、UIA 不暴露输入框、或锚点被其它窗口遮挡）。
     Unavailable,
+}
+
+/// 一次锚点单击的现场证据（D74）。「报成功但没落框」类故障的判读全在这里：
+/// 同一目标在两台机器上各行一次上框，对 diff 这两条记录即可定位差异源。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClickEvidence {
+    pub geometry: AnchorGeometry,
+    /// 实际点击的屏幕物理像素坐标。
+    pub point_screen: (i32, i32),
+    /// 点击时的客户区尺寸（物理像素）。
+    pub client_size: (i32, i32),
+    /// 目标窗口的实时 DPI（96=100%）。
+    pub dpi: u32,
+}
+
+/// 一个聚焦级别的尝试记录。`settle` 为 `Observed` 是「目标出现输入迹象」的
+/// 正证据；`CappedOut`/`Unavailable` 都是「没能证明」，不是「证明没发生」。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusAttempt {
+    pub step: FocusStep,
+    pub outcome: FocusOutcome,
+    /// 锚点步的单击现场；非锚点步为 None。
+    pub click: Option<ClickEvidence>,
+    /// 该步的事件等待结局；未做等待的级别为 None。
+    pub settle: Option<WaitOutcome>,
+}
+
+/// 一次「把键盘焦点送进聊天输入框」的完整报告：最终结论 + 逐级尝试证据。
+///
+/// 为什么从裸 [`FocusOutcome`] 升级为报告：旧实现里锚点步的 settle 证据被
+/// 丢弃（只进 debug 日志），「点击顶满 60ms 上限」与「点击立刻确认」在上层
+/// 无法区分——这正是 2026-09-03 拼多多「报成功但没落框」远程排障的盲区。
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusReport {
+    pub outcome: FocusOutcome,
+    pub attempts: Vec<FocusAttempt>,
+}
+
+impl FocusReport {
+    /// 是否存在「锚点单击且观测到输入迹象」的正证据。
+    pub fn anchor_click_observed(&self) -> bool {
+        self.attempts.iter().any(|attempt| {
+            attempt.step == FocusStep::AnchorClick
+                && attempt.outcome == FocusOutcome::FocusedByAnchor
+                && matches!(attempt.settle, Some(WaitOutcome::Observed { .. }))
+        })
+    }
 }
 
 /// 一个聚焦级别。顺序由目标画像声明（[`FocusPlan::steps`]），平台层只按序执行。
@@ -325,6 +398,8 @@ pub enum FocusStep {
 pub struct FocusPlan {
     pub steps: Vec<FocusStep>,
     pub anchor: Option<FocusAnchor>,
+    /// bottom-up 锚点（D74）：存在即**优先于** `anchor` 被使用。
+    pub anchor_bottom: Option<BottomUpAnchor>,
 }
 
 /// 聊天输入框焦点获取端。
@@ -332,7 +407,7 @@ pub struct FocusPlan {
 /// 红线：实现只允许做「移动焦点」这一类动作——UIA `SetFocus` 或对画像声明锚点的
 /// **单次左键单击**。禁止合成任何键盘事件（尤其 Enter），禁止点击未声明的位置。
 pub trait InputFocuser {
-    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusOutcome;
+    fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusReport;
 }
 
 /// 一次事件等待的结局。

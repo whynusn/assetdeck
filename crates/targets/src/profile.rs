@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use platform::{FocusAnchor, FocusPlan, FocusStep};
+use platform::{BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -138,6 +138,30 @@ impl From<InputAnchor> for FocusAnchor {
     }
 }
 
+/// 底部锚点（D74）：y 是距客户区**底边**的 96-DPI 逻辑像素，由平台层按目标
+/// 窗口实时 DPI 换算。
+///
+/// 为什么需要它：top-down 比例锚点（[`InputAnchor`]）对窗口高度敏感——底部
+/// 工具条/提示条是固定像素高度，窗口越高同一比例落点越偏上，最终漂出输入区
+/// （2026-09-03 拼多多「我这台能用、测试用户不行」的根因）。bottom-up 锚定
+/// 底边，随窗口高度变化保持命中。实测取值（客户区物理像素，150% DPI 环境）：
+/// 拼多多输入区底距 55~150（中心 ~100）；千牛接待中心 80~295（中心 ~190）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InputAnchorBottom {
+    pub x_ratio: f32,
+    /// 距客户区底边的 96-DPI 逻辑像素（物理像素 = 该值 × dpi/96）。
+    pub y_from_bottom: f32,
+}
+
+impl From<InputAnchorBottom> for BottomUpAnchor {
+    fn from(value: InputAnchorBottom) -> Self {
+        BottomUpAnchor {
+            x_ratio: value.x_ratio,
+            y_from_bottom: value.y_from_bottom,
+        }
+    }
+}
+
 /// 聚焦级别的可反序列化镜像（`platform::FocusStep` 在 trait 层零依赖，不能引入 serde）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -203,6 +227,9 @@ pub struct Profile {
     /// 输入框锚点：激活窗口后若拿不到键盘焦点，平台层允许在此处做一次左键单击。
     /// 未声明时不做任何点击（宁可不落框，也不点未声明的位置）。
     pub input_anchor: Option<InputAnchor>,
+    /// 底部锚点（D74）：声明后**优先于** `input_anchor` 使用；`input_anchor`
+    /// 保留作兼容兜底（旧用户画像仍可解析、行为不变）。
+    pub input_anchor_bottom: Option<InputAnchorBottom>,
 }
 
 impl Profile {
@@ -221,6 +248,7 @@ impl Profile {
             settle_ms: 80,
             focus_strategy: default_focus_strategy(),
             input_anchor: None,
+            input_anchor_bottom: None,
         }
     }
 
@@ -244,6 +272,7 @@ impl Profile {
                 .map(FocusStep::from)
                 .collect(),
             anchor: self.focus_anchor(),
+            anchor_bottom: self.input_anchor_bottom.map(BottomUpAnchor::from),
         }
     }
 }
@@ -286,6 +315,12 @@ pub enum ProfileError {
     },
     #[error("目标画像 {profile} 的输入框锚点比例越界: x={x} y={y}(须在 0.0..=1.0)")]
     InvalidAnchor { profile: String, x: f32, y: f32 },
+    #[error("目标画像 {profile} 的底部锚点越界: x_ratio={x}(须在 0.0..=1.0) y_from_bottom={y_from_bottom}(须在 1..=500 物理像素)")]
+    InvalidAnchorBottom {
+        profile: String,
+        x: f32,
+        y_from_bottom: f32,
+    },
     /// 空数组不能静默退化成「不聚焦」：那样 Ctrl+V 会落空且不留任何线索。
     #[error("目标画像 {0} 的 focus_strategy 为空数组(至少声明一个聚焦级别，或整体省略以取缺省)")]
     EmptyFocusStrategy(String),
@@ -312,6 +347,7 @@ struct ProfilePatch {
     settle_ms: Option<u64>,
     focus_strategy: Option<Vec<FocusStrategyStep>>,
     input_anchor: Option<InputAnchor>,
+    input_anchor_bottom: Option<InputAnchorBottom>,
 }
 
 /// 合并随版本发布的内置画像与用户画像。用户画像按 id 做字段级覆盖。
@@ -410,6 +446,9 @@ fn merge_patch(base: &mut ProfilePatch, overlay: ProfilePatch) {
     if overlay.input_anchor.is_some() {
         base.input_anchor = overlay.input_anchor;
     }
+    if overlay.input_anchor_bottom.is_some() {
+        base.input_anchor_bottom = overlay.input_anchor_bottom;
+    }
 }
 
 fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileError> {
@@ -429,6 +468,25 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
                 profile: id,
                 x: anchor.x_ratio,
                 y: anchor.y_ratio,
+            });
+        }
+    }
+    if let Some(anchor) = patch.input_anchor_bottom {
+        if !(0.0..=1.0).contains(&anchor.x_ratio) {
+            return Err(ProfileError::InvalidAnchorBottom {
+                profile: id,
+                x: anchor.x_ratio,
+                y_from_bottom: anchor.y_from_bottom,
+            });
+        }
+        // y_from_bottom 是「客户区底边往上的物理像素距离」，按 96 DPI 基准声明。
+        // 上界取 500：底部固定高度 chrome（工具栏/提示条）实测 128~295 物理像素，
+        // 500 已远超任何合理的输入框纵深；超过只会把点击送进消息列表。
+        if !(1.0..=500.0).contains(&anchor.y_from_bottom) {
+            return Err(ProfileError::InvalidAnchorBottom {
+                profile: id,
+                x: anchor.x_ratio,
+                y_from_bottom: anchor.y_from_bottom,
             });
         }
     }
@@ -452,6 +510,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         settle_ms: patch.settle_ms.unwrap_or(80),
         focus_strategy: patch.focus_strategy.unwrap_or_else(default_focus_strategy),
         input_anchor: patch.input_anchor,
+        input_anchor_bottom: patch.input_anchor_bottom,
     })
 }
 
@@ -604,6 +663,108 @@ y_ratio = 0.5
             load_profiles(doc, None),
             Err(ProfileError::InvalidAnchor { profile, .. }) if profile == "broken"
         ));
+    }
+
+    #[test]
+    fn input_anchor_bottom_is_parsed_into_focus_plan() {
+        let doc = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.394
+y_from_bottom = 127
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let plan = set.get(&TargetId::new("qianniu")).unwrap().focus_plan();
+        let bottom = plan.anchor_bottom.expect("声明了底部锚就必须进 focus_plan");
+        assert!((bottom.x_ratio - 0.394).abs() < f32::EPSILON);
+        assert!((bottom.y_from_bottom - 127.0).abs() < f32::EPSILON);
+        assert!(plan.anchor.is_none(), "只声明底部锚的画像不带比例锚");
+    }
+
+    #[test]
+    fn input_anchor_bottom_takes_precedence_over_ratio_anchor_in_plan() {
+        // 两个都声明时 focus_plan 同时携带，由平台层按 anchor_bottom 优先取用；
+        // 这里守卫的是「两个都进了 plan」——丢了任一都会让降级语义失真。
+        let doc = r#"
+[[profiles]]
+id = "dual"
+label = "双锚点"
+
+[profiles.input_anchor]
+x_ratio = 0.5
+y_ratio = 0.8
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.5
+y_from_bottom = 100
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let plan = set.get(&TargetId::new("dual")).unwrap().focus_plan();
+        assert!(plan.anchor.is_some());
+        assert!(plan.anchor_bottom.is_some());
+    }
+
+    #[test]
+    fn out_of_range_anchor_bottom_is_rejected_instead_of_clamped() {
+        let over = r#"
+[[profiles]]
+id = "broken"
+label = "坏底部锚"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.5
+y_from_bottom = 900
+"#;
+        assert!(matches!(
+            load_profiles(over, None),
+            Err(ProfileError::InvalidAnchorBottom { profile, .. }) if profile == "broken"
+        ));
+        let bad_x = r#"
+[[profiles]]
+id = "broken"
+label = "坏底部锚"
+
+[profiles.input_anchor_bottom]
+x_ratio = 1.5
+y_from_bottom = 100
+"#;
+        assert!(matches!(
+            load_profiles(bad_x, None),
+            Err(ProfileError::InvalidAnchorBottom { profile, .. }) if profile == "broken"
+        ));
+    }
+
+    #[test]
+    fn user_profile_can_override_input_anchor_bottom() {
+        let builtin = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.394
+y_from_bottom = 127
+"#;
+        let user = r#"
+[[profiles]]
+id = "qianniu"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.4
+y_from_bottom = 150
+"#;
+        let set = load_profiles(builtin, Some(user)).unwrap();
+        let bottom = set
+            .get(&TargetId::new("qianniu"))
+            .unwrap()
+            .focus_plan()
+            .anchor_bottom
+            .unwrap();
+        assert!((bottom.x_ratio - 0.4).abs() < f32::EPSILON);
+        assert!((bottom.y_from_bottom - 150.0).abs() < f32::EPSILON);
     }
 
     #[test]

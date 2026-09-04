@@ -184,12 +184,27 @@ fn match_score(profile: &Profile, snapshot: &WindowSnapshot) -> Option<(u16, boo
         && !class_hit
         && !title_hit
     {
+        log::debug!(
+            "画像拒绝 exe={} class={:?} title={:?} 理由=特征全不中(类名{:?} 标题{:?})",
+            snapshot.exe_name,
+            snapshot.class_name,
+            snapshot.title,
+            profile.class_names,
+            profile.title_regexes
+        );
         return None;
     }
     // 严格档（require_title）：标题命中是会话窗口的身份门槛。Qt 应用所有普通
     // 窗口共享同一个类名，只看类名会把优惠弹窗、活动窗一并放进候选——真机
     // 实证（2026-08-29）它们抢到前台后会静默顶替热目标，下次上框拉起的就是弹窗。
     if profile.require_title && !title_hit {
+        log::debug!(
+            "画像拒绝 exe={} class={:?} title={:?} 理由=严格档类名命中但标题不中({:?})",
+            snapshot.exe_name,
+            snapshot.class_name,
+            snapshot.title,
+            profile.title_regexes
+        );
         return None;
     }
     if class_hit {

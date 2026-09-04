@@ -1649,7 +1649,13 @@ fn main() {
         level: logging::Level::Info,
         mirror_stderr: false,
     });
-    logging::info!("app 启动 args={:?}", std::env::args().collect::<Vec<_>>());
+    // 启动行带版本号：远程排障第一件事是对版本——安装版滞后于仓库提交是
+    // 有前科的误报源，没有这行就无法从日志直接识破。
+    logging::info!(
+        "app 启动 version={} args={:?}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::args().collect::<Vec<_>>()
+    );
 
     // panic 进日志（D39 精神）：默认 panic 只打 stderr，真机 GUI 无控制台时
     // 就是黑洞——挂钩后 panic 现场连同 backtrace 进文件日志，低配机/CI 崩溃

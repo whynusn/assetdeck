@@ -13,10 +13,14 @@
 //!   唤醒（CEF 类目标的关键实验）前后对比 UIA/MSAA 可见度
 //! - `--click` 可选：复用产品 Win32InputFocuser 的锚点单击（全部防呆守卫保留），
 //!   点击后复测 caret/焦点信号——验证「点完再复核」的可行性
+//! - `--a11y` 激活后深探（D74）：先在 Chrome_RenderWidgetHostHWND（无则顶层）发
+//!   WM_GETOBJECT 激活无障碍树，事件驱动等建树后做 UIA 深枚举 + MSAA 递归走树，
+//!   并用画像锚点做命中判定。既有电池的盲区正是「UIA 枚举全部跑在激活之前」。
 //!
 //! 用法：
 //!   focus_probe --list
 //!   focus_probe --hwnd <N> [--runs 3] [--click "0.66,0.85"]
+//!   focus_probe --a11y <N> [--anchor "0.49,0.92"] [--a11y-click <候选序号>]
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -696,8 +700,394 @@ fn variant_role_is_text(
 }
 
 // ---------------------------------------------------------------------------
-// 驱动
+// --a11y：无障碍激活后的元素级输入框巡检（D74 探针）
+//
+// 与既有电池的分工差异：既有 wake/msaa 只在最后做一层浅探，且所有 UIA 枚举
+// 都跑在激活**之前**——「editable=0」可能是未激活的假阴性。本模式把顺序倒过来：
+// 先激活、事件驱动等建树、再深枚举，并用画像锚点对找到的候选做命中判定。
 // ---------------------------------------------------------------------------
+
+/// 一个「可能是输入框」的候选元素：UIA 与 MSAA 两个视角共用。
+#[derive(Debug)]
+struct A11yCandidate {
+    source: &'static str,
+    detail: String,
+    /// 屏幕物理像素 (left, top, right, bottom)。
+    rect: (i32, i32, i32, i32),
+}
+
+/// MSAA 角色常量（oleacc 头文件值）。
+const ROLE_SYSTEM_TEXT: i32 = 0x2A;
+const ROLE_SYSTEM_COMBOBOX: i32 = 0x2E;
+
+fn msaa_role_i4(variant: &windows::Win32::System::Variant::VARIANT) -> Option<i32> {
+    use windows::Win32::System::Variant::VT_I4;
+    (unsafe { variant.Anonymous.Anonymous.vt } == VT_I4)
+        .then(|| unsafe { variant.Anonymous.Anonymous.Anonymous.lVal })
+}
+
+/// 角色是文本/组合框且带有效屏幕位置 → 收为候选。
+fn msaa_maybe_candidate(
+    acc: &windows::Win32::UI::Accessibility::IAccessible,
+    child: &windows::Win32::System::Variant::VARIANT,
+    depth: usize,
+    out: &mut Vec<A11yCandidate>,
+) {
+    let Ok(role) = (unsafe { acc.get_accRole(child) }) else {
+        return;
+    };
+    let Some(role) = msaa_role_i4(&role) else {
+        return;
+    };
+    if role != ROLE_SYSTEM_TEXT && role != ROLE_SYSTEM_COMBOBOX {
+        return;
+    }
+    let (mut x, mut y, mut w, mut h) = (0, 0, 0, 0);
+    if unsafe { acc.accLocation(&mut x, &mut y, &mut w, &mut h, child) }.is_err()
+        || w <= 0
+        || h <= 0
+    {
+        return;
+    }
+    let name = unsafe { acc.get_accName(child) }
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let state = unsafe { acc.get_accState(child) }
+        .ok()
+        .and_then(|v| msaa_role_i4(&v))
+        .unwrap_or(-1);
+    let name_brief: String = name.chars().take(40).collect();
+    out.push(A11yCandidate {
+        source: "msaa",
+        detail: format!("depth={depth} role=0x{role:X} state=0x{state:X} name={name_brief:?}"),
+        rect: (x, y, x + w, y + h),
+    });
+}
+
+/// MSAA 递归走树：dispatch 子节点递归 + 简单子元素按 child id 取角色/位置。
+fn msaa_collect(
+    acc: &windows::Win32::UI::Accessibility::IAccessible,
+    depth: usize,
+    out: &mut Vec<A11yCandidate>,
+    budget: &mut usize,
+) {
+    use windows::Win32::System::Variant::{VARIANT, VT_DISPATCH, VT_I4};
+    use windows::Win32::UI::Accessibility::AccessibleChildren;
+    if depth > 10 || *budget == 0 {
+        return;
+    }
+    let count = unsafe { acc.accChildCount() }.unwrap_or(0);
+    if count <= 0 {
+        return;
+    }
+    let mut variants: Vec<VARIANT> = (0..count.clamp(1, 96))
+        .map(|_| unsafe { std::mem::zeroed() })
+        .collect();
+    let mut obtained: i32 = 0;
+    if unsafe { AccessibleChildren(acc, 0, &mut variants, &mut obtained) }.is_err() {
+        return;
+    }
+    for variant in variants.iter().take(obtained.max(0) as usize) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        match unsafe { variant.Anonymous.Anonymous.vt } {
+            VT_DISPATCH => {
+                let disp = unsafe { variant.Anonymous.Anonymous.Anonymous.pdispVal.clone() };
+                let Some(ref disp) = *disp else { continue };
+                let Ok(child_acc) = disp.cast::<windows::Win32::UI::Accessibility::IAccessible>()
+                else {
+                    continue;
+                };
+                let self_child = VARIANT::from(0i32);
+                msaa_maybe_candidate(&child_acc, &self_child, depth, out);
+                msaa_collect(&child_acc, depth + 1, out, budget);
+            }
+            VT_I4 => msaa_maybe_candidate(acc, variant, depth, out),
+            _ => {}
+        }
+    }
+}
+
+/// 绝对屏幕坐标单击（探针用；与平台层锚点单击同一套 SendInput 虚拟桌面归一化）。
+fn click_screen_point(x: i32, y: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    let (vx, vy) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+        )
+    };
+    let (vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if vw <= 1 || vh <= 1 {
+        println!("click abort: virtual desktop degenerate");
+        return;
+    }
+    let norm = |value: i32, origin: i32, size: i32| {
+        (((value - origin) as i64 * 65_535 / (size - 1) as i64) as i32).clamp(0, 65_535)
+    };
+    let (nx, ny) = (norm(x, vx, vw), norm(y, vy, vh));
+    let absolute = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    let make = |flags| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: nx,
+                dy: ny,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let events = [
+        make(absolute | MOUSEEVENTF_MOVE),
+        make(absolute | MOUSEEVENTF_LEFTDOWN),
+        make(absolute | MOUSEEVENTF_LEFTUP),
+    ];
+    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+    println!("click sendinput sent={sent}/{} at=({x},{y})", events.len());
+}
+
+/// UIA 子树里的可编辑候选采集。返回子树元素总数（激活是否生效的直接证据）。
+fn uia_collect_editables(
+    automation: &IUIAutomation,
+    hwnd: HWND,
+    out: &mut Vec<A11yCandidate>,
+) -> i32 {
+    use windows::Win32::UI::Accessibility::TreeScope_Descendants;
+    let Ok(root) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
+        println!("uia root error");
+        return -1;
+    };
+    let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
+        println!("uia create-condition error");
+        return -1;
+    };
+    let Ok(all) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
+        println!("uia findall error");
+        return -1;
+    };
+    let total = unsafe { all.Length() }.unwrap_or(0);
+    for index in 0..total.min(1500) {
+        let Ok(element) = (unsafe { all.GetElement(index) }) else {
+            continue;
+        };
+        let Ok(control) = (unsafe { element.CurrentControlType() }) else {
+            continue;
+        };
+        if control != UIA_EditControlTypeId && control != UIA_DocumentControlTypeId {
+            continue;
+        }
+        let name = unsafe { element.CurrentName() }
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let aid = unsafe { element.CurrentAutomationId() }
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let class = unsafe { element.CurrentClassName() }
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let rect = unsafe { element.CurrentBoundingRectangle() }
+            .map(|r| (r.left, r.top, r.right, r.bottom))
+            .unwrap_or_default();
+        let readonly = unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .ok()
+                .and_then(|p| p.CurrentIsReadOnly().ok())
+                .map(|v| v.as_bool())
+        };
+        let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
+            .map(|v| v.as_bool())
+            .unwrap_or(false);
+        let has_focus = unsafe { element.CurrentHasKeyboardFocus() }
+            .map(|v| v.as_bool())
+            .unwrap_or(false);
+        let el_pid = unsafe { element.CurrentProcessId() }.unwrap_or(-1);
+        let name_brief: String = name.chars().take(30).collect();
+        out.push(A11yCandidate {
+            source: "uia",
+            detail: format!(
+                "control={control:?} focusable={focusable} readonly={readonly:?} \
+                 has_focus={has_focus} pid={el_pid} aid={aid:?} class={class:?} name={name_brief:?}"
+            ),
+            rect,
+        });
+    }
+    total
+}
+
+fn run_a11y_probe(
+    hwnd: HWND,
+    automation: &IUIAutomation,
+    anchor: (f32, f32),
+    click_index: Option<usize>,
+) {
+    use platform::win32::{Win32WindowActivator, Win32WindowEvents};
+    use platform::{WindowActivator, WindowEventSource, WindowHandle};
+
+    let pid = window_pid(hwnd);
+    println!("=== a11y probe hwnd={} pid={pid} ===", hwnd.0 as isize);
+
+    // 0) 先激活：最小化/后台窗口的客户区坐标没有意义（最小化态被挪到 -32000 附近），
+    //    CEF 对不可见窗口也可能不建树。与产品顺序一致：激活 → 定位。
+    let started = Instant::now();
+    let activated = Win32WindowActivator
+        .activate(WindowHandle(hwnd.0 as isize), 200, 120)
+        .unwrap_or(false);
+    println!(
+        "activate ms={} ok={activated} foreground_now={}",
+        started.elapsed().as_millis(),
+        unsafe { GetForegroundWindow() } == hwnd
+    );
+
+    let mut rc = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    let client_w = rc.right - rc.left;
+    let client_h = rc.bottom - rc.top;
+    let mut origin = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin);
+    }
+    println!(
+        "client={client_w}x{client_h} origin=({},{})",
+        origin.x, origin.y
+    );
+
+    // 1) 激活：CEF 渲染子窗口优先（web 内容的 a11y 树挂在渲染表面进程上），
+    //    无渲染子窗口（Qt/自绘）则发顶层窗口。
+    let mut children = Vec::new();
+    collect_children(hwnd, &mut children);
+    let render = children
+        .iter()
+        .copied()
+        .find(|child| hwnd_class(*child) == "Chrome_RenderWidgetHostHWND");
+    let wake_target = render.unwrap_or(hwnd);
+    let mut wake_result: usize = 0;
+    unsafe {
+        SendMessageTimeoutW(
+            wake_target,
+            WM_GETOBJECT,
+            WPARAM(0),
+            LPARAM(0xFFFFFFFCu32 as i32 as isize), // OBJID_CLIENT，与 oleacc 同参
+            SMTO_ABORTIFHUNG,
+            800,
+            Some(&mut wake_result),
+        )
+    };
+    println!(
+        "wake hwnd={} class={:?} is_render_child={} lresult_nonzero={}",
+        wake_target.0 as isize,
+        hwnd_class(wake_target),
+        render.is_some(),
+        wake_result != 0
+    );
+
+    // 2) 事件驱动等建树：渲染进程（或顶层进程）的任何已钩事件都会提前返回。
+    //    泵只钩 FOREGROUND/FOCUS/LOCATIONCHANGE——建树可能一个都不发，
+    //    CappedOut 不代表没建成，只代表「没等到证据」，枚举结果才是判决。
+    let mut activity =
+        Win32WindowEvents.await_process_activity(WindowHandle(wake_target.0 as isize));
+    println!("build_wait outcome={:?}", activity.wait(900));
+
+    // 3) UIA 深枚举（激活后）：总数是「激活是否生效」的直接证据。
+    let mut candidates: Vec<A11yCandidate> = Vec::new();
+    let total = uia_collect_editables(automation, hwnd, &mut candidates);
+    println!(
+        "uia total_descendants={total} editables={}",
+        candidates.len()
+    );
+    if candidates.is_empty() {
+        // 树可能还没建好：再给一个事件窗口重试一次（仍是事件驱动，非轮询）。
+        let mut again =
+            Win32WindowEvents.await_process_activity(WindowHandle(wake_target.0 as isize));
+        println!("build_wait_retry outcome={:?}", again.wait(900));
+        let total = uia_collect_editables(automation, hwnd, &mut candidates);
+        println!(
+            "uia retry total_descendants={total} editables={}",
+            candidates.len()
+        );
+    }
+
+    // 4) MSAA 递归走树（UIA 贫瘠时的后备视角；accLocation 同样是屏幕像素）。
+    match access_client_accessible(wake_target, 0xFFFFFFFC) {
+        Ok(acc) => {
+            let mut budget = 400usize;
+            msaa_collect(&acc, 0, &mut candidates, &mut budget);
+            println!("msaa walk done, candidates_so_far={}", candidates.len());
+        }
+        Err(error) => println!("msaa root error={error}"),
+    }
+
+    // 5) 画像锚点命中判定：当前锚点落在哪个候选里（或谁都没打中）。
+    let point = (
+        origin.x + (client_w as f32 * anchor.0).round() as i32,
+        origin.y + (client_h as f32 * anchor.1).round() as i32,
+    );
+    println!(
+        "anchor=({},{}) point=({},{}) y_from_bottom={}",
+        anchor.0,
+        anchor.1,
+        point.0,
+        point.1,
+        client_h - (point.1 - origin.y)
+    );
+    for (index, candidate) in candidates.iter().enumerate() {
+        let (l, t, r, b) = candidate.rect;
+        let hit = point.0 >= l && point.0 < r && point.1 >= t && point.1 < b;
+        println!(
+            "  cand[{index}] {} rect=({l},{t})-({r},{b}) anchor_hit={hit} {}",
+            candidate.source, candidate.detail
+        );
+    }
+
+    // 6) 可选：点击候选中心做端到端验证（订阅先行，点击后等插入符事件）。
+    if let Some(index) = click_index {
+        let Some(candidate) = candidates.get(index) else {
+            println!(
+                "a11y-click index={index} 越界（共 {} 个候选）",
+                candidates.len()
+            );
+            return;
+        };
+        let (l, t, r, b) = candidate.rect;
+        let (cx, cy) = ((l + r) / 2, (t + b) / 2);
+        let started = Instant::now();
+        let activated = Win32WindowActivator
+            .activate(WindowHandle(hwnd.0 as isize), 200, 120)
+            .unwrap_or(false);
+        println!(
+            "a11y-click activate ms={} ok={activated}",
+            started.elapsed().as_millis()
+        );
+        let mut surface = Win32WindowEvents.await_input_surface(WindowHandle(hwnd.0 as isize));
+        click_screen_point(cx, cy);
+        println!(
+            "a11y-click cand[{index}] center=({cx},{cy}) caret_wait={:?}",
+            surface.wait(500)
+        );
+        let (verified, info) = focused_element_info(automation, pid);
+        println!("a11y-click after verified={verified} {info}");
+        probe_guithreadinfo(hwnd, "_a11y_click");
+    }
+}
 
 static TOP_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -725,16 +1115,19 @@ unsafe extern "system" fn list_top_window(window: HWND, _lparam: LPARAM) -> BOOL
 
 /// 只做「激活 → 锚点点击 → 信号复测」，跳过探测电池（避免 UIA 误聚焦污染现场）。
 /// 打印客户区尺寸与锚点的屏幕坐标，供截图比对定位是否准确。
+/// `--anchor-bottom x_ratio,y_from_bottom` 走产品 anchor_bottom 代码路径。
 fn run_click_only(
     hwnd: HWND,
     hwnd_value: isize,
     pid: u32,
     automation: &IUIAutomation,
     click: Option<(f32, f32)>,
+    bottom: Option<(f32, f32)>,
 ) {
     use platform::win32::{Win32InputFocuser, Win32WindowActivator};
     use platform::{
-        FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowActivator, WindowHandle,
+        BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowActivator,
+        WindowHandle,
     };
 
     let (x_ratio, y_ratio) = click.unwrap_or((0.5, 0.5));
@@ -780,26 +1173,55 @@ fn run_click_only(
     let client_w = rc.right - rc.left;
     let client_h = rc.bottom - rc.top;
     let clamp = |ratio: f32| ratio.clamp(0.02, 0.98);
-    let mut point = windows::Win32::Foundation::POINT {
-        x: rc.left + (client_w as f32 * clamp(x_ratio)).round() as i32,
-        y: rc.top + (client_h as f32 * clamp(y_ratio)).round() as i32,
-    };
-    unsafe {
-        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut point);
-    }
-    println!(
-        "click_point ratio=({x_ratio},{y_ratio}) client={client_w}x{client_h} screen=({},{})",
-        point.x, point.y
-    );
-
-    let plan = FocusPlan {
-        steps: vec![FocusStep::AnchorClick],
-        anchor: Some(FocusAnchor { x_ratio, y_ratio }),
+    let plan = if let Some((bx, y_from_bottom)) = bottom {
+        // 底部锚预览与产品 click_point_in_client 同式（物理像素 → 屏幕点）。
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+        let scale = dpi.max(1) as f32 / 96.0;
+        // 与产品 click_point_in_client 逐式对齐（偏移先取整），预览即落点。
+        let offset = (y_from_bottom * scale).round() as i32;
+        let mut point = windows::Win32::Foundation::POINT {
+            x: rc.left + (client_w as f32 * clamp(bx)).round() as i32,
+            y: rc.top + (client_h as f32 - offset as f32).round() as i32,
+        };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut point);
+        }
+        println!(
+            "click_point bottom_up=({bx},{y_from_bottom}) dpi={dpi} client={client_w}x{client_h} screen=({},{})",
+            point.x, point.y
+        );
+        FocusPlan {
+            steps: vec![FocusStep::AnchorClick],
+            anchor: None,
+            anchor_bottom: Some(BottomUpAnchor {
+                x_ratio: bx,
+                y_from_bottom,
+            }),
+        }
+    } else {
+        let mut point = windows::Win32::Foundation::POINT {
+            x: rc.left + (client_w as f32 * clamp(x_ratio)).round() as i32,
+            y: rc.top + (client_h as f32 * clamp(y_ratio)).round() as i32,
+        };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut point);
+        }
+        println!(
+            "click_point ratio=({x_ratio},{y_ratio}) client={client_w}x{client_h} screen=({},{})",
+            point.x, point.y
+        );
+        FocusPlan {
+            steps: vec![FocusStep::AnchorClick],
+            anchor: Some(FocusAnchor { x_ratio, y_ratio }),
+            anchor_bottom: None,
+        }
     };
     let started = Instant::now();
-    let outcome = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
+    let report = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
     println!(
-        "probe=anchor_click outcome={outcome:?} us={}",
+        "probe=anchor_click outcome={:?} attempts={:?} us={}",
+        report.outcome,
+        report.attempts,
         started.elapsed().as_micros()
     );
 
@@ -881,6 +1303,35 @@ fn main() {
         return;
     }
 
+    if let Some(index) = args.iter().position(|arg| arg == "--a11y") {
+        // 激活后深探：唤醒 → 建树等待 → UIA/MSAA 双视角候选 → 锚点命中判定。
+        let hwnd = args
+            .get(index + 1)
+            .and_then(|value| value.parse::<isize>().ok())
+            .expect("--a11y 需要窗口句柄数字（--list 先枚举）");
+        let anchor = args
+            .iter()
+            .position(|arg| arg == "--anchor")
+            .and_then(|i| args.get(i + 1))
+            .map(|value| {
+                let (x, y) = value.split_once(',').expect("--anchor 需要 \"x,y\" 比例");
+                (x.parse().expect("x 比例"), y.parse().expect("y 比例"))
+            })
+            .unwrap_or((0.49, 0.92));
+        let click_index = args
+            .iter()
+            .position(|arg| arg == "--a11y-click")
+            .and_then(|i| args.get(i + 1))
+            .map(|value| value.parse::<usize>().expect("--a11y-click 需要候选序号"));
+        run_a11y_probe(
+            HWND(hwnd as *mut core::ffi::c_void),
+            &automation,
+            anchor,
+            click_index,
+        );
+        return;
+    }
+
     let hwnd_value = match args.iter().position(|arg| arg == "--hwnd") {
         Some(index) => args
             .get(index + 1)
@@ -909,6 +1360,19 @@ fn main() {
             )
         });
     let click_only = args.iter().any(|arg| arg == "--click-only");
+    let anchor_bottom = args
+        .iter()
+        .position(|arg| arg == "--anchor-bottom")
+        .and_then(|i| args.get(i + 1))
+        .map(|value| {
+            let (x, y) = value
+                .split_once(',')
+                .expect("--anchor-bottom 需要 \"x_ratio,y_from_bottom\"");
+            (
+                x.parse::<f32>().expect("x 比例"),
+                y.parse::<f32>().expect("y_from_bottom 逻辑像素"),
+            )
+        });
 
     let pid = window_pid(hwnd);
     let foreground = unsafe { GetForegroundWindow() };
@@ -922,7 +1386,7 @@ fn main() {
     );
 
     if click_only {
-        run_click_only(hwnd, hwnd_value, pid, &automation, click);
+        run_click_only(hwnd, hwnd_value, pid, &automation, click, anchor_bottom);
         return;
     }
 
@@ -974,11 +1438,14 @@ fn main() {
                 x_ratio: x,
                 y_ratio: y,
             }),
+            anchor_bottom: None,
         };
         let started = Instant::now();
-        let outcome = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
+        let report = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
         println!(
-            "probe=anchor_click outcome={outcome:?} us={}",
+            "probe=anchor_click outcome={:?} attempts={:?} us={}",
+            report.outcome,
+            report.attempts,
             started.elapsed().as_micros()
         );
         let (verified, info) = focused_element_info(&automation, pid);

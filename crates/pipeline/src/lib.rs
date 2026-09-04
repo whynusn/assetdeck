@@ -263,9 +263,9 @@ impl PasteSession {
         // 必须在探测与注入之前显式把焦点送进输入框，否则 Ctrl+V 会落空：
         // 素材进了剪贴板，却没有进任何输入框。聚焦动作只允许 UIA SetFocus 或
         // 画像锚点单击，绝不含键盘事件——「只上框不发送」的红线在此仍然成立。
-        let focus_outcome = deps.focuser.focus_input(hwnd, &profile.focus_plan());
+        let focus_report = deps.focuser.focus_input(hwnd, &profile.focus_plan());
         let after_focus = Instant::now();
-        if focus_outcome == FocusOutcome::Unavailable
+        if focus_report.outcome == FocusOutcome::Unavailable
             && profile.readiness == ReadinessMode::UiaStrict
         {
             return copied_only(
@@ -274,12 +274,23 @@ impl PasteSession {
                 "未能把键盘焦点送进输入框，按严格就绪模式中止注入",
             );
         }
+        // 聚焦现场进 Info：锚点几何形态、实际点击点、客户区尺寸、DPI、事件等待
+        // 结局一次记全。「报成功但没落框」的远程排障只需 diff 两台机器的这两行。
+        log::info!(
+            "上框聚焦现场 target={} outcome={:?} attempts={:?}",
+            target_label,
+            focus_report.outcome,
+            focus_report.attempts
+        );
         // 聚焦成功会让随后的 UIA 探测更可能给出 Ready；聚焦不确定则沿用
         // 「否证阻塞才不注入」的既有语义，注入并标 verified=false。
+        // 锚点路径的正证据升级：单击后等到「输入迹象」事件（焦点/插入符）才把
+        // verified 升为 true——旧实现 FocusedByAnchor 恒为 false，把唯一的
+        // 事后可证路径埋进了 debug 日志。
         let focus_verified = matches!(
-            focus_outcome,
+            focus_report.outcome,
             FocusOutcome::AlreadyEditable | FocusOutcome::FocusedByUia
-        );
+        ) || focus_report.anchor_click_observed();
 
         // 只有严格档才值得为 UIA 往返付 3~30ms：按 D15，浅探测在微信/千牛上
         // 从未返回 Ready，其结论恒为 Inconclusive，`verified` 实际由 FocusOutcome 决定。
@@ -317,7 +328,9 @@ impl PasteSession {
         log::debug!(
             target: "paste_trace::pipeline",
             "preinject alive={alive} fg={:?} target_hwnd={:?} focus_outcome={:?} signal_verified={verified}",
-            fg.0, hwnd.0, focus_outcome
+            fg.0,
+            hwnd.0,
+            focus_report.outcome
         );
         if !alive {
             return copied_only(
@@ -344,7 +357,8 @@ impl PasteSession {
                 );
             }
             log::info!(
-                "注入前前台漂移 relation={relation:?} focus_outcome={focus_outcome:?}，尝试再断言"
+                "注入前前台漂移 relation={relation:?} focus_outcome={:?}，尝试再断言",
+                focus_report.outcome
             );
             let reasserted = matches!(
                 deps.activator

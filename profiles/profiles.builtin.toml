@@ -27,6 +27,14 @@
 # SetFocus 的输入框），Ctrl+V 会落空。平台层先试 UIA SetFocus，失败才对锚点做一次
 # 左键单击。比例值由 2026-08-24 真机截图量取，随窗口缩放仍成立。
 #
+# input_anchor_bottom（D74，2026-09-04）是升级版锚点：客户区底边向上的物理像素
+# 距离（96 DPI 基准声明，运行时按 GetDpiForWindow 缩放），声明后优先于 input_anchor。
+# 为什么换模型：2026-09-03 测试用户「报成功但没落框」实锤了比例锚的失效机理——
+# 聊天应用的底栏（工具栏/合规提示条）是**定高**的，比例 y 随窗高线性上漂，窗口
+# 高过 ~1300 物理像素后比例点就越过输入框落进消息列表，Ctrl+V 落空但全程报成功。
+# 锚定底边则与窗高完全解耦。已量取的画像逐一回填；未量取的（微信，登录窗口未能
+# 自动进入）保留比例锚，量取前不动。
+#
 # focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "anchor"]。
 # 微信 / 千牛显式去掉 "uia"：实测这两个目标的 UIA 子树里可写 Edit/Document 候选数为 0
 # （微信 descendant count=2、千牛 91 个全不可写），该级别必然失败，白付 22~83ms。
@@ -102,6 +110,13 @@ focus_strategy = ["already", "anchor"]
 x_ratio = 0.394
 y_ratio = 0.787
 
+# D74 底部锚（2026-09-04 真机量取）：文本区在客户区底边向上 80~295 物理像素
+# 之间（工具栏图标行之上），取带中心 ≈127 逻辑像素；
+# x 沿用比例锚的 0.394（中栏中部，避开右侧工单面板）。
+[profiles.input_anchor_bottom]
+x_ratio = 0.394
+y_from_bottom = 127
+
 [profiles.formats]
 image = ["files", "png"]
 video = ["files"]
@@ -143,6 +158,14 @@ focus_strategy = ["already", "anchor"]
 [profiles.input_anchor]
 x_ratio = 0.49
 y_ratio = 0.92
+
+# D74 底部锚（2026-09-03 借号真机量取）：文本区在底边向上 55~150 物理像素
+# 之间（工具栏行之上、合规提示条之下），取带中心 ≈66 逻辑像素；x 沿用 0.49。
+# 注意：此值只在真机上做过几何量取，端到端实贴 E2E 因账号收回未跑（2026-09-04），
+# 用户侧拿到账号后需补一次受控实贴复核。
+[profiles.input_anchor_bottom]
+x_ratio = 0.49
+y_from_bottom = 66
 
 [profiles.formats]
 image = ["files"]

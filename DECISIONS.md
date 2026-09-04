@@ -881,6 +881,22 @@ if (click_count % 2) == 1 {
 
 **守卫**：update_check 域 24 测例全绿（新增边界 1 例）+ workspace test 全绿 + clippy 归零 + fmt。
 
+### D74 上框锚点换底部锚定模型 + 聚焦现场留痕（2026-09-04）
+
+**背景**：测试用户（张越机）拼多多上框「报成功但没落框」——日志 5 次全链路走完、verified=false、focus 69~81ms，本地同版本不复现。定点复盘得出根因：**比例锚 × 定高底栏**。聊天应用底栏（工具栏/合规提示条）是固定物理高度（PDD 实测 55~150 物理px、千牛 80~295），比例 y 随窗高线性上漂；测试用户窗口更高，0.92×H 越过输入框落进消息列表，Ctrl+V 落空但全程报成功。本地无法复现只因窗口高度恰好不同——同版本同环境不可复现的承诺在几何层就已破产。
+
+**决策一（锚点模型）**：新增 `input_anchor_bottom = { x_ratio, y_from_bottom }`——客户区底边向上的物理像素距离，按 96 DPI 基准声明、运行时按 `GetDpiForWindow` 实时缩放；声明后优先于 `input_anchor`。锚定底边与窗高完全解耦，这是对「定高底栏」这一根因的直接对击。越界值报错不夹紧（沿用 InvalidAnchor 哲学），y_from_bottom 合法域 1..=500（远超任何合理底栏纵深）。实测回填：千牛 `0.394/127`、pdd `0.49/66`（见 profiles.builtin.toml 注释）；**微信未量取**（登录页需手机侧确认，自动点击进不去）保留比例锚，量取前不动；pdd/千牛端到端实贴 E2E 因账号收回/锁屏未能跑，待补。
+
+**决策二（聚焦现场留痕）**：`focus_input` 从裸 `FocusOutcome` 升级为 `FocusReport`（逐级 attempts：step/outcome/click 现场几何/settle 结局）。锚点步的 ClickEvidence（几何形态、屏幕落点、客户区、DPI）与 settle 证据进 Info 日志「上框聚焦现场」——远程排障只需 diff 两台机器的各两行，不再有盲区。**verified 语义升级**：锚点路径从恒 false 改为「单击后 settle=Observed（焦点/插入符事件到达）即 true」——这是锚点路径唯一的事后可证证据，旧实现把它埋在 debug 日志里丢弃。同时补三处盲区：启动行带版本号（安装版滞后误报的识破点）、matcher 拒绝留痕（debug 级，弹窗顶替类故障可回溯）、探针 `--anchor-bottom` 走产品代码路径。
+
+**实测否决记录（P1/P2 元素级定位，不采用）**：曾设想的「a11y 激活后元素级定位」被数据否决——WM_GETOBJECT(OBJID_CLIENT) 打在 Chrome_RenderWidgetHostHWND 上不会让 CEF 物化 web 内容 DOM 树（PDD/千牛激活后 UIA 后代仅 10~11 个浏览器级表面，无 Edit 元素；MSAA 递归同样颗粒无收）。微信 Qt 同样不暴露。三目标可写候选数均为 0，元素级定位在这批目标上**结构性不可用**，bottom-up 锚点是当前技术栈下最准的可达定位。
+
+**DPI 双空间教训**：同一窗口探针读到逻辑 1230×800、PrintWindow(PMv2) 读到物理 1845×1200，1.5× 整除无冲突但也无提示——后续任何坐标取证先问「这是哪个空间」，GetDpiForWindow 是换算桥。
+
+**落点**：platform lib.rs/win32.rs（BottomUpAnchor/AnchorGeometry/ClickEvidence/FocusAttempt/FocusReport、click_point_in_client、window_dpi）、targets profile.rs/matcher.rs、pipeline lib.rs、profiles.builtin.toml（千牛/pdd 底部锚 + 头注释）、app-ui main.rs（版本行）、ui-viewmodels target_bar_vm（经 targets matcher 留痕）、focus_probe（--anchor-bottom + --a11y 深探）、tests（锚点数学 3 例、画像解析 4 例、verified 升级 1 例改写）。
+
+**守卫**：platform/targets/pipeline/ui-viewmodels 全测绿（含 real_im_profiles 真实 TOML 集成校验）；fmt/clippy 待收尾提交前过门。锁屏期间实测到正信号：激活失败时前台守卫正确拒点（click=None → Unavailable），产品降级仅复制、绝不盲注。
+
 
 
 
