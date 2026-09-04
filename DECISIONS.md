@@ -917,6 +917,14 @@ if (click_count % 2) == 1 {
 
 **产品启示（待实施评估，本轮不动产品代码）**：千牛目标可升级为「a11y 元素级 SetFocus 主路径 + 锚点点击后备」双层；微软雅黑暗线——verified 语义可再升级（ValuePattern 读回内容比对，粘贴后自证）。
 
+**⚠ 2026-09-04 收尾实验修正（用户要求演示「粘贴进聊天输入框」后，台账 research/element-targeting-log.md B1~B8）**：
+- **「买家账号 SUCCESS」与「composer 可贴」是两回事**：元素级链路 SUCCESS ×3 的落点全是工单面板的`买家账号` Edit（当时唯一物化的可写 Edit）。聊天 composer 的物化问题在会话打开后复测，结论反转——
+- **composer 结构性不可见（决定性事实）**：会话开着、输入框在屏幕上时，dump 全树 99~100 元素，消息聊天 Document 下只有消息历史媒体节点，composer 无任何形态存在；设焦四路全灭（UIA 可写 Edit=选中买家账号；win32 RWH SetFocus=停 Document/50026 容器；Tab 键盘导航×25=被 Qt 焦点链吞掉；UIA SetFocus Document=同停容器）；**点击获焦+粘贴成功后 composer 依然不进树**。即 recent.html 该输入框无论焦点状态都不暴露 UIA 节点——「UIA 选中/设焦/ValuePattern 读回」对 composer 三路皆不可用，无解。
+- **B8 产品时刻复现成功**：点击输入框获焦 → 不激活不设焦直接 Ctrl+V → marker 落框（截图证实）。焦点自恢复链路在 composer 上成立，这才是产品主路径；「UIA 元素级 SetFocus 主路径」提案据此否决——composer 不可达，锚点点击后备继续保留。
+- verified 语义修正：千牛 composer 的 ValuePattern 读回**不可用**（永不在树），verified 升级只能靠 settle=Observed/视觉证据；ValuePattern 读回仅对工单类表单 Edit 有效。
+- 环境事实补记：后台进程 SetForegroundWindow 被前台锁拒（AttachThreadInput 技巧解，置前后必须复核前台再点击）；2560×1600 全屏截图在读图工具中缩放显示（2000 宽），量取坐标须 ×1.28 换算物理（本轮最贵教训，对策=用已知物理坐标的裁剪放大图反推）。
+
+
 
 
 
