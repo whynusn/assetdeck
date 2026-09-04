@@ -792,6 +792,9 @@ enum PasteFocusMode {
     Uia,
     /// AttachThreadInput + SetFocus(RWH legacy hwnd)（键盘消息转发链）
     Rwh,
+    /// UIA SetFocus 到「消息聊天」Document 本体（accSelect TAKEFOCUS 路径，
+    /// 验证 Blink 是否把焦点恢复到文档内最后聚焦的 DOM 节点/composer）
+    Doc,
     /// 完全不设焦点——验证「激活后焦点自恢复进 composer」假设
     None,
 }
@@ -809,6 +812,7 @@ fn run_paste_element(
     mode: PasteFocusMode,
     marker: &str,
     nav: Option<&str>,
+    tabs: u32,
 ) {
     use platform::win32::Win32WindowActivator;
     use platform::{WindowActivator, WindowHandle};
@@ -904,9 +908,12 @@ fn run_paste_element(
                 .copied()
                 .max_by_key(|i| area(candidates[*i].rect))
         });
-    let Some(chosen_index) = chosen else {
-        println!("PASTE_ELEMENT: FAIL no-writable-edit (readonly all true)");
-        return;
+    let chosen_index = match chosen {
+        Some(index) => index,
+        None => {
+            println!("PASTE_ELEMENT: FAIL no-writable-edit (readonly all true)");
+            return;
+        }
     };
     println!(
         "paste-element: chosen cand[{chosen_index}] {}",
@@ -935,6 +942,23 @@ fn run_paste_element(
                 let _ = AttachThreadInput(own_thread, target_thread, false);
             }
         }
+        PasteFocusMode::Doc => {
+            // 「消息聊天」Document 元素本体走 UIA SetFocus（accSelect TAKEFOCUS），
+            // 验证 Blink 是否把焦点恢复到文档内最后聚焦的 DOM 节点（composer）。
+            let doc = candidates.iter().position(|c| {
+                c.detail.contains("Chrome_RenderWidgetHostHWND") && c.detail.contains("消息聊天")
+            });
+            match doc.map(|index| (index, &elements[index])) {
+                Some((index, element)) => {
+                    let focus_result = unsafe { element.SetFocus() };
+                    println!(
+                        "paste-element: UIA SetFocus(doc cand[{index}]) err={:?}",
+                        focus_result.err()
+                    );
+                }
+                None => println!("paste-element: doc candidate not found (no 消息聊天 Document)"),
+            }
+        }
         PasteFocusMode::None => {
             println!(
                 "paste-element: mode=None, skipping explicit focus (focus-restore hypothesis)"
@@ -944,6 +968,63 @@ fn run_paste_element(
     std::thread::sleep(std::time::Duration::from_millis(300));
     let (already, info) = focused_element_info(automation, pid);
     println!("paste-element: focus_after_set already_editable={already} {info}");
+
+    // 4.5) Tab 键盘导航（--tabs N）：焦点在消息文档内逐个遍历 focusable，
+    //      每按一次枚举一次——composer 首次获焦即物化为可写 Edit，枚举能看见。
+    //      途中一旦出现带提示词的可写 Edit 就提前收工（无需按满 N 次）。
+    if tabs > 0 {
+        for step in 1..=tabs {
+            let sent = send_tab();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let mut tab_cands: Vec<A11yCandidate> = Vec::new();
+            let mut tab_elems: Vec<windows::Win32::UI::Accessibility::IUIAutomationElement> =
+                Vec::new();
+            let _ = uia_collect_editables(automation, root, &mut tab_cands, Some(&mut tab_elems));
+            let writable: Vec<usize> = tab_cands
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.detail.contains("readonly=Some(false)"))
+                .map(|(i, _)| i)
+                .collect();
+            let focus_now = tab_elems
+                .get(writable.first().copied().unwrap_or(0))
+                .map(|e| {
+                    let f = unsafe { e.CurrentHasKeyboardFocus() };
+                    f.map(|v| v.as_bool()).unwrap_or(false)
+                })
+                .unwrap_or(false);
+            println!(
+                "paste-element: tab[{step}] sent={sent} edit_candidates={} focus_now={}",
+                tab_cands.len(),
+                focus_now,
+            );
+            for (index, cand) in tab_cands.iter().enumerate() {
+                let (l, t, r, b) = cand.rect;
+                println!(
+                    "    tabcand[{index}] rect=({l},{t})-({r},{b}) {}",
+                    cand.detail
+                );
+            }
+            if let Some(index) = writable.iter().copied().find(|i| {
+                let d = &tab_cands[*i].detail;
+                !d.contains("买家")
+                    && (d.contains("chat")
+                        || d.contains("input")
+                        || d.contains("message")
+                        || d.contains("聊天")
+                        || d.contains("输入"))
+            }) {
+                println!(
+                    "paste-element: tab[{step}] composer materialized as cand[{index}], taking it"
+                );
+                elements.clear();
+                elements.extend(tab_elems);
+                candidates.clear();
+                candidates.extend(tab_cands);
+                break;
+            }
+        }
+    }
 
     // 5) SendInput Ctrl+V（scancode 路径；0x0D 红线不动：本探针从不合成回车）。
     send_ctrl_v();
@@ -1132,6 +1213,34 @@ fn run_wx_uia(automation: &IUIAutomation, root: HWND) {
 }
 
 /// SendInput Ctrl+V（scancode 路径，仅此四事件，绝无回车）。
+/// 合成单个 Tab 键（scancode 0x0F，非 0x0D，红线不动）。
+/// --tabs 模式用：RWH 设焦后用键盘导航遍历 focusable 元素，促使 CEF
+/// 为新获焦子树物化 a11y 节点（composer 首次获焦才会进树）。
+fn send_tab() -> u32 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+        VIRTUAL_KEY,
+    };
+    const VK_TAB: VIRTUAL_KEY = VIRTUAL_KEY(0x09);
+    const SC_TAB: u16 = 0x0F;
+    let make = |flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_TAB,
+                wScan: SC_TAB,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let down = KEYEVENTF_SCANCODE;
+    let up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    let events = [make(down), make(up)];
+    unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) }
+}
+
 fn send_ctrl_v() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
@@ -1881,6 +1990,8 @@ fn main() {
             PasteFocusMode::None
         } else if args.iter().any(|arg| arg == "--focus-rwh") {
             PasteFocusMode::Rwh
+        } else if args.iter().any(|arg| arg == "--focus-doc") {
+            PasteFocusMode::Doc
         } else {
             PasteFocusMode::Uia
         };
@@ -1895,6 +2006,12 @@ fn main() {
             .position(|arg| arg == "--nav")
             .and_then(|i| args.get(i + 1))
             .cloned();
+        let tabs = args
+            .iter()
+            .position(|arg| arg == "--tabs")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
         run_paste_element(
             HWND(hwnd as *mut core::ffi::c_void),
             hwnd,
@@ -1902,6 +2019,7 @@ fn main() {
             mode,
             &marker,
             nav.as_deref(),
+            tabs,
         );
         return;
     }
