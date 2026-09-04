@@ -676,6 +676,104 @@ fn describe_variant(variant: &windows::Win32::System::Variant::VARIANT) -> Strin
     format!("accFocus=vt({vt:?})")
 }
 
+/// --a11y-activate：Chromium 渐进式无障碍的「强制升级」探针（调研验证用）。
+///
+/// 依据（2026-09-04 源码调研，Chromium main + M87~M139 对照）：
+/// - OBJID_CLIENT 只触发 kNativeAPIs（返回根 IAccessible，不建 DOM 树）——此前
+///   「CEF 树不物化」的结论止步于此档。
+/// - 升级钩子在 ax_platform_node_win.cc 的属性 getter 内部：真实调用
+///   get_accName（置 is_name_used_）→ get_accDefaultAction（直接升
+///   kAXModeBasic+kExtendedProperties）→ WM_GETOBJECT(objid=1) 蜜罐
+///   （幂等兜底）。必须先 Name 后蜜罐，顺序不能反。
+/// - renderer 建树是异步的，等待后重枚举 UIA 判定（Edit/Document 是否出现）。
+fn run_a11y_activation(root: HWND) {
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    const OBJID_CLIENT: u32 = 0xFFFF_FFFC;
+    const WM_GETOBJECT: u32 = 0x003D;
+    let child_list = {
+        let mut children: Vec<HWND> = Vec::new();
+        collect_children(root, &mut children);
+        children
+            .into_iter()
+            .filter(|child| hwnd_class(*child) == "Chrome_RenderWidgetHostHWND")
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "a11y-activate: render widget hwnds = {:?}",
+        child_list.iter().map(|h| h.0 as isize).collect::<Vec<_>>()
+    );
+    if child_list.is_empty() {
+        println!("a11y-activate: no Chrome_RenderWidgetHostHWND under root");
+        return;
+    }
+
+    let child_self = VARIANT::from(0i32);
+    for hwnd in &child_list {
+        let acc = match access_client_accessible(*hwnd, OBJID_CLIENT) {
+            Ok(acc) => acc,
+            Err(error) => {
+                println!(
+                    "a11y-activate hwnd=0x{:X}: ObjectFromLresult err={error}",
+                    hwnd.0 as isize
+                );
+                continue;
+            }
+        };
+        let count = unsafe { acc.accChildCount() }.unwrap_or(-1);
+        let name = unsafe { acc.get_accName(&child_self) }
+            .map(|v| {
+                let s: String = v.to_string().chars().take(40).collect();
+                s
+            })
+            .unwrap_or_else(|e| format!("err={e}"));
+        let default_action = unsafe { acc.get_accDefaultAction(&child_self) }
+            .map(|v| v.to_string())
+            .unwrap_or_else(|e| format!("err={e}"));
+        let role = unsafe { acc.get_accRole(&child_self) }
+            .ok()
+            .and_then(|v| msaa_role_i4(&v))
+            .map(|r| format!("0x{r:X}"))
+            .unwrap_or_else(|| "none".into());
+        println!(
+            "a11y-activate hwnd={:p}: root accChildCount={count} accName={name:?} accDefaultAction={default_action:?} accRole={role}",
+            hwnd.0
+        );
+        // 蜜罐：必须在真实读 Name 之后（is_name_used_ 前置）。
+        let honey = unsafe {
+            SendMessageW(
+                *hwnd,
+                WM_GETOBJECT,
+                Some(windows::Win32::Foundation::WPARAM(0)),
+                Some(windows::Win32::Foundation::LPARAM(1)),
+            )
+        };
+        println!(
+            "a11y-activate: honey pot WM_GETOBJECT(objid=1) -> 0x{:X}",
+            honey.0
+        );
+    }
+
+    println!("a11y-activate: waiting 4s for renderer tree build...");
+    std::thread::sleep(std::time::Duration::from_millis(4000));
+
+    let automation = uia();
+    let mut candidates: Vec<A11yCandidate> = Vec::new();
+    let total = uia_collect_editables(&automation, root, &mut candidates);
+    println!(
+        "a11y-activate: AFTER descendants={total} edit_candidates={}",
+        candidates.len()
+    );
+    for (index, cand) in candidates.iter().enumerate() {
+        let (l, t, r, b) = cand.rect;
+        println!(
+            "  cand[{index}] {} rect=({l},{t})-({r},{b}) {}",
+            cand.source, cand.detail
+        );
+    }
+}
+
 fn variant_role_is_text(
     variant: &windows::Win32::System::Variant::VARIANT,
     role_system_text: i32,
@@ -1300,6 +1398,16 @@ fn main() {
             .expect("--dump 需要窗口句柄数字");
         let hwnd = HWND(hwnd as *mut core::ffi::c_void);
         dump_tree(&automation, hwnd);
+        return;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--a11y-activate") {
+        // Chromium 渐进式 a11y 强制升级探针：真实 COM 属性调用 + 蜜罐 → 重枚举。
+        let hwnd = args
+            .get(index + 1)
+            .and_then(|value| value.parse::<isize>().ok())
+            .expect("--a11y-activate 需要窗口句柄数字（--list 先枚举）");
+        run_a11y_activation(HWND(hwnd as *mut core::ffi::c_void));
         return;
     }
 

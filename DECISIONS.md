@@ -891,6 +891,8 @@ if (click_count % 2) == 1 {
 
 **实测否决记录（P1/P2 元素级定位，不采用）**：曾设想的「a11y 激活后元素级定位」被数据否决——WM_GETOBJECT(OBJID_CLIENT) 打在 Chrome_RenderWidgetHostHWND 上不会让 CEF 物化 web 内容 DOM 树（PDD/千牛激活后 UIA 后代仅 10~11 个浏览器级表面，无 Edit 元素；MSAA 递归同样颗粒无收）。微信 Qt 同样不暴露。三目标可写候选数均为 0，元素级定位在这批目标上**结构性不可用**，bottom-up 锚点是当前技术栈下最准的可达定位。
 
+**⚠ 2026-09-04 修正（D75 调研推翻本段结论）**：上述「结构性不可用」只对了一半——OBJID_CLIENT 消息探针只触发 Chromium 渐进式无障碍的**最低档**（kNativeAPIs）。升级钩子在 `ax_platform_node_win.cc` 的属性 getter 内部：对拿到的 IAccessible **真实跨进程 COM 调用** `get_accName` + `get_accDefaultAction`（+ 可选蜜罐 WM_GETOBJECT objid=1，须在 Name 之后）即触发 AXMode 升到 kAXModeBasic，renderer 开始建 DOM 树。**千牛实机验证成功且可复现**：UIA 后代 8 → 97，`买家账号` 等 web Edit 元素物化（`focus_probe --a11y-activate`）；同序列在拼多多未生效（分目标差异）；树随窗口失前台 ~10s 内塌回，须即用即触发。详见 D75 调研报告。
+
 **DPI 双空间教训**：同一窗口探针读到逻辑 1230×800、PrintWindow(PMv2) 读到物理 1845×1200，1.5× 整除无冲突但也无提示——后续任何坐标取证先问「这是哪个空间」，GetDpiForWindow 是换算桥。
 
 **落点**：platform lib.rs/win32.rs（BottomUpAnchor/AnchorGeometry/ClickEvidence/FocusAttempt/FocusReport、click_point_in_client、window_dpi）、targets profile.rs/matcher.rs、pipeline lib.rs、profiles.builtin.toml（千牛/pdd 底部锚 + 头注释）、app-ui main.rs（版本行）、ui-viewmodels target_bar_vm（经 targets matcher 留痕）、focus_probe（--anchor-bottom + --a11y 深探）、tests（锚点数学 3 例、画像解析 4 例、verified 升级 1 例改写）。
