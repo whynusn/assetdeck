@@ -899,6 +899,24 @@ if (click_count % 2) == 1 {
 
 **守卫**：platform/targets/pipeline/ui-viewmodels 全测绿（含 real_im_profiles 真实 TOML 集成校验）；fmt/clippy 待收尾提交前过门。锁屏期间实测到正信号：激活失败时前台守卫正确拒点（click=None → Unavailable），产品降级仅复制、绝不盲注。
 
+### D75 去坐标化定位·解锁后真机实验（2026-09-04，调研落地日）
+
+**承接 D75 调研**：解锁桌面后对候选机制逐项真机验证（探针 `focus_probe` 新增 `--paste-element` / `--nav` / `--activate-dump` / `--wx-uia`，提交 67fdd2a 后续提交）。
+
+**千牛（接待中心 525668）——元素级全链路打通（SUCCESS ×2 可复现）**：
+- 流程：产品激活器拉前台 → a11y 激活协议（COM Name→DefaultAction→蜜罐）→ UIA 枚举 99 元素 → 锁定可写 Edit「买家账号」（aid=buyer）→ `UIA SetFocus` → SendInput Ctrl+V → 重枚举 ValuePattern 读回验证。剪贴板标记连续落框（value 三连拼接逐轮可见），**全程零坐标零点击**。
+- **焦点自恢复实锤**（实验②）：跳过显式 SetFocus，仅激活后 Ctrl+V 精准落进上次焦点元素——Qt/CEF 的 web 内部焦点跨失活保持（Blink document focused element），`has_focus=true` 可读复核。产品化时「激活→读焦点→只在已可写时注入」比盲 SetFocus 更稳。
+- RWH SetFocus（实验③）：AttachThreadInput+SetFocus(RWH) 成功把焦点切到消息聊天 Document 级，但因未打开会话无 composer 可落——**composer/会话列表在 kAXModeBasic 下不物化**（懒物化，仅焦点区域子树可见），需开会话后复测。
+- 解锁后产品锚点点击恢复有效（`settle=Observed` 11ms），合成鼠标/键盘在千牛正常。
+
+**微信 4.1.13（Qt51514 mmui）——全部通道未通，需用户协作复测**：
+- UIA 树默认不存在（仅 2 元素：窗壳+MMUIRenderSubWindowHW）；SPI_SETSCREENREADER 置位被系统静默回落（二次确认死亡）；WM_GETOBJECT（顶层+mmui 子窗）返回 0x0 无 provider；GetFocusedElement 不触发构建。
+- WM_APPCOMMAND(APPCOMMAND_PASTE, device nibble=0) Send/Post 均无效果（源码验证的 Qt Key_Paste 通道在此版本不生效——焦点未进 composer 是混杂变量）。
+- 合成键盘（Ctrl+V/Ctrl+F/Tab/字符 unicode+scancode）4/4 系统层送达但对 mmui 无效；合成鼠标移动被真实输入流覆盖（用户在机操作）。**根因无法二分**（A=微信过滤 injected 输入 vs B=焦点从未进 composer）——继续抢前台会干扰用户真实接待，实验中止。
+- 待办（用户协作）：微信置前+手点 composer 后，跑 `focus_probe --paste-element` 键盘路径，即可二分 A/B；同时补 D74 遗留的微信 composer 锚点测量。
+
+**产品启示（待实施评估，本轮不动产品代码）**：千牛目标可升级为「a11y 元素级 SetFocus 主路径 + 锚点点击后备」双层；微软雅黑暗线——verified 语义可再升级（ValuePattern 读回内容比对，粘贴后自证）。
+
 
 
 

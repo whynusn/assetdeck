@@ -2,6 +2,8 @@
 //!
 //! 红线守恒：本工具**绝不合成任何键盘事件**（尤其 0x0D），不写剪贴板；
 //! 只做只读探测（枚举/caret/焦点查询）与 UIA SetFocus / 锚点单击两类落焦动作。
+//! 例外：`--paste-element`（D75 实验）额外合成**且仅合成** Ctrl+V——
+//! 验证「元素级设焦 → 系统级粘贴」全链路，0x0D 红线不变。
 //!
 //! 覆盖的角度（每个都实测耗时并验证「焦点真的落进目标进程的可写控件」）：
 //! - `p0`      产品现状的 AlreadyEditable 判定：UIA GetFocusedElement + 进程/可写复核
@@ -21,6 +23,7 @@
 //!   focus_probe --list
 //!   focus_probe --hwnd <N> [--runs 3] [--click "0.66,0.85"]
 //!   focus_probe --a11y <N> [--anchor "0.49,0.92"] [--a11y-click <候选序号>]
+//!   focus_probe --paste-element <N> [--marker <串>] [--no-setfocus|--focus-rwh]
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -686,7 +689,10 @@ fn describe_variant(variant: &windows::Win32::System::Variant::VARIANT) -> Strin
 ///   kAXModeBasic+kExtendedProperties）→ WM_GETOBJECT(objid=1) 蜜罐
 ///   （幂等兜底）。必须先 Name 后蜜罐，顺序不能反。
 /// - renderer 建树是异步的，等待后重枚举 UIA 判定（Edit/Document 是否出现）。
-fn run_a11y_activation(root: HWND) {
+///
+/// 激活协议本体：RWH 发现 → 真实 COM 属性调用（Name→DefaultAction→Role）→ 蜜罐。
+/// 返回触达的 RWH hwnd 列表（空 = 该目标无 CEF 渲染面或未触达）。
+fn a11y_activate_protocol(root: HWND) -> Vec<HWND> {
     use windows::Win32::System::Variant::VARIANT;
     use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -706,7 +712,7 @@ fn run_a11y_activation(root: HWND) {
     );
     if child_list.is_empty() {
         println!("a11y-activate: no Chrome_RenderWidgetHostHWND under root");
-        return;
+        return child_list;
     }
 
     let child_self = VARIANT::from(0i32);
@@ -754,13 +760,18 @@ fn run_a11y_activation(root: HWND) {
             honey.0
         );
     }
+    child_list
+}
+
+fn run_a11y_activation(root: HWND) {
+    let _ = a11y_activate_protocol(root);
 
     println!("a11y-activate: waiting 4s for renderer tree build...");
     std::thread::sleep(std::time::Duration::from_millis(4000));
 
     let automation = uia();
     let mut candidates: Vec<A11yCandidate> = Vec::new();
-    let total = uia_collect_editables(&automation, root, &mut candidates);
+    let total = uia_collect_editables(&automation, root, &mut candidates, None);
     println!(
         "a11y-activate: AFTER descendants={total} edit_candidates={}",
         candidates.len()
@@ -772,6 +783,392 @@ fn run_a11y_activation(root: HWND) {
             cand.source, cand.detail
         );
     }
+}
+
+/// --paste-element 的落焦模式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasteFocusMode {
+    /// UIA element.SetFocus()（对 CEF 走 UIA↔MSAA 桥的 accSelect TAKEFOCUS）
+    Uia,
+    /// AttachThreadInput + SetFocus(RWH legacy hwnd)（键盘消息转发链）
+    Rwh,
+    /// 完全不设焦点——验证「激活后焦点自恢复进 composer」假设
+    None,
+}
+
+/// --paste-element：D75 元素级粘贴全链路实验（零坐标）。
+///
+/// 前置：剪贴板里已放验证标记（外部 Set-Clipboard）。
+/// 流程：产品激活器拉前台 → a11y 激活协议 → UIA 枚举 Edit 候选 → 选 composer
+/// （非只读 + 名称提示，面积兜底——选择靠元素属性不靠坐标）→ 按模式设焦点 →
+/// SendInput Ctrl+V → 重枚举读候选 Value 验证标记落框。全程不点击。
+fn run_paste_element(
+    root: HWND,
+    root_value: isize,
+    automation: &IUIAutomation,
+    mode: PasteFocusMode,
+    marker: &str,
+    nav: Option<&str>,
+) {
+    use platform::win32::Win32WindowActivator;
+    use platform::{WindowActivator, WindowHandle};
+
+    let pid = window_pid(root);
+    println!("=== paste-element hwnd={root_value} pid={pid} mode={mode:?} marker={marker:?} ===");
+
+    // 0) 前台：产品激活器（带确认循环与线程附加）。
+    let started = Instant::now();
+    let activated = Win32WindowActivator
+        .activate(WindowHandle(root_value), 200, 120)
+        .unwrap_or(false);
+    println!(
+        "activate(product) ms={} ok={activated} foreground_now={}",
+        started.elapsed().as_millis(),
+        unsafe { GetForegroundWindow() } == root
+    );
+
+    // 1) a11y 激活协议 + 等建树。
+    let touched = a11y_activate_protocol(root);
+    println!("paste-element: waiting 4s for renderer tree build...");
+    std::thread::sleep(std::time::Duration::from_millis(4000));
+
+    // 2) 枚举 Edit 候选（保留元素本体）。
+    let mut candidates: Vec<A11yCandidate> = Vec::new();
+    let mut elements = Vec::new();
+    let total = uia_collect_editables(automation, root, &mut candidates, Some(&mut elements));
+    println!(
+        "paste-element: descendants={total} edit_candidates={}",
+        candidates.len()
+    );
+    for (index, cand) in candidates.iter().enumerate() {
+        let (l, t, r, b) = cand.rect;
+        println!("  cand[{index}] rect=({l},{t})-({r},{b}) {}", cand.detail);
+    }
+
+    // 2.5) 可选元素级导航：在已物化树里按名称找导航项触发（无坐标），
+    //      等新面板建树后重跑激活协议 + 重枚举 Edit。
+    if let Some(nav) = nav {
+        if candidates.is_empty() {
+            println!("paste-element: nav {nav:?} skipped (no tree to search)");
+        } else {
+            let ok = invoke_by_name(automation, root, nav);
+            println!("paste-element: nav {nav:?} invoked={ok}");
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = a11y_activate_protocol(root);
+            println!("paste-element: waiting 4s after nav...");
+            std::thread::sleep(std::time::Duration::from_millis(4000));
+            candidates.clear();
+            elements.clear();
+            let total =
+                uia_collect_editables(automation, root, &mut candidates, Some(&mut elements));
+            println!(
+                "paste-element: after-nav descendants={total} edit_candidates={}",
+                candidates.len()
+            );
+            for (index, cand) in candidates.iter().enumerate() {
+                let (l, t, r, b) = cand.rect;
+                println!("  cand[{index}] rect=({l},{t})-({r},{b}) {}", cand.detail);
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        println!("PASTE_ELEMENT: FAIL no-edit-candidates (activation did not materialize tree)");
+        return;
+    }
+
+    // 3) composer 选择：非只读优先，名称/aid 提示（chat/input/message/聊天/输入），
+    //    都不中则取面积最大的可写 Edit。选择依据全是元素属性，不碰屏幕坐标。
+    let hint = |detail: &str| {
+        let lower = detail.to_lowercase();
+        lower.contains("chat")
+            || lower.contains("input")
+            || lower.contains("message")
+            || detail.contains("聊天")
+            || detail.contains("输入")
+    };
+    let area = |rect: (i32, i32, i32, i32)| (rect.2 - rect.0).max(0) * (rect.3 - rect.1).max(0);
+    let writable: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.detail.contains("readonly=Some(false)"))
+        .map(|(i, _)| i)
+        .collect();
+    let chosen = writable
+        .iter()
+        .copied()
+        .find(|i| hint(&candidates[*i].detail))
+        .or_else(|| {
+            writable
+                .iter()
+                .copied()
+                .max_by_key(|i| area(candidates[*i].rect))
+        });
+    let Some(chosen_index) = chosen else {
+        println!("PASTE_ELEMENT: FAIL no-writable-edit (readonly all true)");
+        return;
+    };
+    println!(
+        "paste-element: chosen cand[{chosen_index}] {}",
+        candidates[chosen_index].detail
+    );
+
+    // 4) 按模式设焦点。
+    match mode {
+        PasteFocusMode::Uia => {
+            let focus_result = unsafe { elements[chosen_index].SetFocus() };
+            println!("paste-element: UIA SetFocus err={:?}", focus_result.err());
+        }
+        PasteFocusMode::Rwh => {
+            let target_thread = window_thread(root);
+            let own_thread = unsafe { GetCurrentThreadId() };
+            let attached = unsafe { AttachThreadInput(own_thread, target_thread, true) }.as_bool();
+            let focus_result = unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(
+                    touched.last().copied().or(Some(root)),
+                )
+            };
+            println!(
+                "paste-element: AttachThreadInput ok={attached} SetFocus(RWH) prev={focus_result:?}"
+            );
+            unsafe {
+                let _ = AttachThreadInput(own_thread, target_thread, false);
+            }
+        }
+        PasteFocusMode::None => {
+            println!(
+                "paste-element: mode=None, skipping explicit focus (focus-restore hypothesis)"
+            );
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (already, info) = focused_element_info(automation, pid);
+    println!("paste-element: focus_after_set already_editable={already} {info}");
+
+    // 5) SendInput Ctrl+V（scancode 路径；0x0D 红线不动：本探针从不合成回车）。
+    send_ctrl_v();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    // 6) 重枚举读 Value 验证标记落框。
+    let mut after: Vec<A11yCandidate> = Vec::new();
+    let mut after_elements = Vec::new();
+    let _ = uia_collect_editables(automation, root, &mut after, Some(&mut after_elements));
+    let mut hit = false;
+    for (index, (element, cand)) in after_elements.iter().zip(after.iter()).enumerate() {
+        let value = unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .ok()
+                .and_then(|p| p.CurrentValue().ok())
+                .map(|v| v.to_string())
+        };
+        let Some(value) = value else {
+            println!("  after[{index}] no-value-pattern {}", cand.detail);
+            continue;
+        };
+        let contains = value.contains(marker);
+        hit |= contains;
+        let brief: String = value.chars().take(60).collect();
+        println!("  after[{index}] value={brief:?} hit={contains}");
+    }
+    if hit {
+        println!("PASTE_ELEMENT: SUCCESS marker landed via element focus (zero coordinates)");
+    } else {
+        println!("PASTE_ELEMENT: MISS marker not found in any edit value");
+    }
+}
+
+/// 元素级导航：在已物化树里按名称找元素并触发（Invoke → DoDefaultAction → Select）。
+/// 纯 UIA 元素动作，零坐标。返回是否成功触发。
+fn invoke_by_name(automation: &IUIAutomation, root: HWND, text: &str) -> bool {
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomationInvokePattern, IUIAutomationLegacyIAccessiblePattern,
+        IUIAutomationSelectionItemPattern, TreeScope_Descendants, UIA_InvokePatternId,
+        UIA_LegacyIAccessiblePatternId, UIA_SelectionItemPatternId,
+    };
+    let Ok(root_el) = (unsafe { automation.ElementFromHandle(root) }) else {
+        return false;
+    };
+    let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
+        return false;
+    };
+    let Ok(all) = (unsafe { root_el.FindAll(TreeScope_Descendants, &condition) }) else {
+        return false;
+    };
+    let length = unsafe { all.Length() }.unwrap_or(0);
+    for index in 0..length.min(1500) {
+        let Ok(element) = (unsafe { all.GetElement(index) }) else {
+            continue;
+        };
+        let name = unsafe { element.CurrentName() }
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        if !name.contains(text) {
+            continue;
+        }
+        let control = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID_ZERO);
+        let invoked = unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                .ok()
+                .and_then(|p| p.Invoke().ok())
+        }
+        .is_some();
+        if invoked {
+            println!("invoke_by_name: Invoke ok name={name:?} control={control:?}");
+            return true;
+        }
+        let legacy = unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationLegacyIAccessiblePattern>(
+                    UIA_LegacyIAccessiblePatternId,
+                )
+                .ok()
+                .and_then(|p| p.DoDefaultAction().ok())
+        }
+        .is_some();
+        if legacy {
+            println!("invoke_by_name: DoDefaultAction ok name={name:?} control={control:?}");
+            return true;
+        }
+        let selected = unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                    UIA_SelectionItemPatternId,
+                )
+                .ok()
+                .and_then(|p| p.Select().ok())
+        }
+        .is_some();
+        if selected {
+            println!("invoke_by_name: Select ok name={name:?} control={control:?}");
+            return true;
+        }
+    }
+    false
+}
+
+/// --wx-uia：微信 4.x（Qt mmui）条件式 UIA 触发实验。
+/// 基线枚举只有窗口壳（Weixin + MMUIRenderSubWindowHW）。逐个试触发器，
+/// 每步之间重新枚举计数，找出唤醒完整 mmui 树的最小动作：
+///   1) 顶层 WM_GETOBJECT(OBJID_CLIENT)（Qt QAccessible 安装钩子）
+///   2) MMUIRenderSubWindowHW 子窗 WM_GETOBJECT(OBJID_CLIENT)
+///   3) UIA GetFocusedElement（焦点查询是否触发 provider 构建）
+fn run_wx_uia(automation: &IUIAutomation, root: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_GETOBJECT};
+
+    const OBJID_CLIENT: u32 = 0xFFFF_FFFC;
+    let count = |automation: &IUIAutomation| -> i32 {
+        let mut candidates: Vec<A11yCandidate> = Vec::new();
+        uia_collect_editables(automation, root, &mut candidates, None)
+    };
+
+    println!("wx-uia: baseline descendants={}", count(automation));
+
+    // 1) 顶层 WM_GETOBJECT。
+    let honey_top = unsafe {
+        SendMessageW(
+            root,
+            WM_GETOBJECT,
+            Some(WPARAM(0)),
+            Some(LPARAM(OBJID_CLIENT as i32 as isize)),
+        )
+    };
+    println!(
+        "wx-uia: top WM_GETOBJECT -> 0x{:X}, descendants={}",
+        honey_top.0,
+        count(automation)
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // 2) MMUIRenderSubWindowHW 子窗。
+    let mut children = Vec::new();
+    collect_children(root, &mut children);
+    let sub: Vec<HWND> = children
+        .into_iter()
+        .filter(|child| hwnd_class(*child).contains("MMUI"))
+        .collect();
+    println!(
+        "wx-uia: mmui child hwnds = {:?}",
+        sub.iter().map(|h| h.0 as isize).collect::<Vec<_>>()
+    );
+    for child in &sub {
+        let honey = unsafe {
+            SendMessageW(
+                *child,
+                WM_GETOBJECT,
+                Some(WPARAM(0)),
+                Some(LPARAM(OBJID_CLIENT as i32 as isize)),
+            )
+        };
+        println!(
+            "wx-uia: mmui WM_GETOBJECT 0x{:X} -> 0x{:X}",
+            child.0 as isize, honey.0
+        );
+    }
+    println!("wx-uia: after mmui wake descendants={}", count(automation));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // 3) GetFocusedElement 焦点查询。
+    let focused = unsafe { automation.GetFocusedElement() };
+    match focused {
+        Ok(element) => {
+            let name = unsafe { element.CurrentName() }
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let class = unsafe { element.CurrentClassName() }
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            println!("wx-uia: focused name={name:?} class={class:?}");
+        }
+        Err(error) => println!("wx-uia: GetFocusedElement err={error}"),
+    }
+    let final_total = count(automation);
+    println!("wx-uia: final descendants={final_total}");
+    if final_total > 2 {
+        println!("wx-uia: materialized! dumping full tree...");
+        dump_tree(automation, root);
+    }
+}
+
+/// SendInput Ctrl+V（scancode 路径，仅此四事件，绝无回车）。
+fn send_ctrl_v() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+        VIRTUAL_KEY, VK_CONTROL,
+    };
+    const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
+    const SC_CTRL: u16 = 0x1D;
+    const SC_V: u16 = 0x2F;
+    let make = |flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+                vk: VIRTUAL_KEY,
+                sc: u16| {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: sc,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+    let down = KEYEVENTF_SCANCODE;
+    let up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    let events = [
+        make(down, VK_CONTROL, SC_CTRL),
+        make(down, VK_V, SC_V),
+        make(up, VK_V, SC_V),
+        make(up, VK_CONTROL, SC_CTRL),
+    ];
+    let sent = unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+    println!(
+        "paste-element: sendinput ctrl+v sent={sent}/{}",
+        events.len()
+    );
 }
 
 fn variant_role_is_text(
@@ -962,10 +1359,12 @@ fn click_screen_point(x: i32, y: i32) {
 }
 
 /// UIA 子树里的可编辑候选采集。返回子树元素总数（激活是否生效的直接证据）。
+/// `elements` 传 Some 时同步收集元素本体（--paste-element 的 SetFocus 需要）。
 fn uia_collect_editables(
     automation: &IUIAutomation,
     hwnd: HWND,
     out: &mut Vec<A11yCandidate>,
+    mut elements: Option<&mut Vec<windows::Win32::UI::Accessibility::IUIAutomationElement>>,
 ) -> i32 {
     use windows::Win32::UI::Accessibility::TreeScope_Descendants;
     let Ok(root) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
@@ -1018,6 +1417,9 @@ fn uia_collect_editables(
             .unwrap_or(false);
         let el_pid = unsafe { element.CurrentProcessId() }.unwrap_or(-1);
         let name_brief: String = name.chars().take(30).collect();
+        if let Some(slot) = elements.as_deref_mut() {
+            slot.push(element.clone());
+        }
         out.push(A11yCandidate {
             source: "uia",
             detail: format!(
@@ -1107,7 +1509,7 @@ fn run_a11y_probe(
 
     // 3) UIA 深枚举（激活后）：总数是「激活是否生效」的直接证据。
     let mut candidates: Vec<A11yCandidate> = Vec::new();
-    let total = uia_collect_editables(automation, hwnd, &mut candidates);
+    let total = uia_collect_editables(automation, hwnd, &mut candidates, None);
     println!(
         "uia total_descendants={total} editables={}",
         candidates.len()
@@ -1117,7 +1519,7 @@ fn run_a11y_probe(
         let mut again =
             Win32WindowEvents.await_process_activity(WindowHandle(wake_target.0 as isize));
         println!("build_wait_retry outcome={:?}", again.wait(900));
-        let total = uia_collect_editables(automation, hwnd, &mut candidates);
+        let total = uia_collect_editables(automation, hwnd, &mut candidates, None);
         println!(
             "uia retry total_descendants={total} editables={}",
             candidates.len()
@@ -1125,13 +1527,33 @@ fn run_a11y_probe(
     }
 
     // 4) MSAA 递归走树（UIA 贫瘠时的后备视角；accLocation 同样是屏幕像素）。
-    match access_client_accessible(wake_target, 0xFFFFFFFC) {
-        Ok(acc) => {
-            let mut budget = 400usize;
-            msaa_collect(&acc, 0, &mut candidates, &mut budget);
-            println!("msaa walk done, candidates_so_far={}", candidates.len());
+    //    遍历全部 RWH（多渲染面的目标只走 wake_target 会漏另一个渲染面）。
+    let mut rwh_walk: Vec<HWND> = {
+        let mut children = Vec::new();
+        collect_children(hwnd, &mut children);
+        let list: Vec<HWND> = children
+            .into_iter()
+            .filter(|child| hwnd_class(*child) == "Chrome_RenderWidgetHostHWND")
+            .collect();
+        if list.is_empty() {
+            vec![wake_target]
+        } else {
+            list
         }
-        Err(error) => println!("msaa root error={error}"),
+    };
+    for walk_root in rwh_walk.drain(..) {
+        match access_client_accessible(walk_root, 0xFFFFFFFC) {
+            Ok(acc) => {
+                let mut budget = 400usize;
+                msaa_collect(&acc, 0, &mut candidates, &mut budget);
+                println!(
+                    "msaa walk hwnd={:p} done, candidates_so_far={}",
+                    walk_root.0,
+                    candidates.len()
+                );
+            }
+            Err(error) => println!("msaa root error={error}"),
+        }
     }
 
     // 5) 画像锚点命中判定：当前锚点落在哪个候选里（或谁都没打中）。
@@ -1408,6 +1830,79 @@ fn main() {
             .and_then(|value| value.parse::<isize>().ok())
             .expect("--a11y-activate 需要窗口句柄数字（--list 先枚举）");
         run_a11y_activation(HWND(hwnd as *mut core::ffi::c_void));
+        return;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--wx-uia") {
+        // 微信 4.x（Qt mmui）条件式 UIA 触发实验：逐个发 WM_GETOBJECT（顶层 +
+        // MMUIRenderSubWindowHW 子窗）再枚举计数，找出能唤醒完整 mmui 树的触发器。
+        let hwnd = args
+            .get(index + 1)
+            .and_then(|value| value.parse::<isize>().ok())
+            .expect("--wx-uia 需要窗口句柄数字");
+        let root = HWND(hwnd as *mut core::ffi::c_void);
+        run_wx_uia(&automation, root);
+        return;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--activate-dump") {
+        // 先拉前台 + 跑 a11y 激活协议再转储全树（后台窗口 renderer 不建树，
+        // 且树失前台 ~10s 塌回，独立 --dump 看不到 web 树）。
+        let hwnd = args
+            .get(index + 1)
+            .and_then(|value| value.parse::<isize>().ok())
+            .expect("--activate-dump 需要窗口句柄数字");
+        let root = HWND(hwnd as *mut core::ffi::c_void);
+        {
+            use platform::win32::Win32WindowActivator;
+            use platform::{WindowActivator, WindowHandle};
+            let ok = Win32WindowActivator
+                .activate(WindowHandle(hwnd), 200, 120)
+                .unwrap_or(false);
+            println!(
+                "activate-dump: activate ok={ok} foreground_now={}",
+                unsafe { GetForegroundWindow() == root }
+            );
+        }
+        let _ = a11y_activate_protocol(root);
+        println!("activate-dump: waiting 4s for renderer tree build...");
+        std::thread::sleep(std::time::Duration::from_millis(4000));
+        dump_tree(&automation, root);
+        return;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--paste-element") {
+        // D75 元素级粘贴全链路（零坐标）：激活 → 选 composer → 设焦 → Ctrl+V → 读回验证。
+        let hwnd = args
+            .get(index + 1)
+            .and_then(|value| value.parse::<isize>().ok())
+            .expect("--paste-element 需要窗口句柄数字（--list 先枚举）");
+        let mode = if args.iter().any(|arg| arg == "--no-setfocus") {
+            PasteFocusMode::None
+        } else if args.iter().any(|arg| arg == "--focus-rwh") {
+            PasteFocusMode::Rwh
+        } else {
+            PasteFocusMode::Uia
+        };
+        let marker = args
+            .iter()
+            .position(|arg| arg == "--marker")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| "D75MARKER".into());
+        let nav = args
+            .iter()
+            .position(|arg| arg == "--nav")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        run_paste_element(
+            HWND(hwnd as *mut core::ffi::c_void),
+            hwnd,
+            &automation,
+            mode,
+            &marker,
+            nav.as_deref(),
+        );
         return;
     }
 
