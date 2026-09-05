@@ -966,6 +966,13 @@ if (click_count % 2) == 1 {
 - **拼多多 input_point 同构迁移**：`x="WINDOW_WIDTH * 49 / 100" y="WINDOW_HEIGHT - 66"`，与 D74 底部锚**逐像素等价**（生产实贴 3/4 verified 的同一点）；策略改 `already → input_point → anchor`（锚降为后备）。CEF 网页布局 x 随宽度等比缩放，故 x 用比例表达式（解析器整数运算可表达）。D74 遗留「E2E 未实贴复核」待办由生产日志关账。
 - **观察未实施项**：千牛 `verified=false` 为已知边界（composer 无 ValuePattern），候选升级方向=粘贴前后 caret 位置变化作弱证据（需真机验证）；进程内首次 UIA 查询 ~30ms 热身三份日志一致——UIA 实例线程本地缓存，后台线程预热无效、UI 线程预热仅省首次 15~30ms，判定不值得做。
 
+### D76.4 客户端暴露「上框点位」编辑面（2026-09-05，用户补充需求）
+
+- **双通道分工**：UI 编辑的覆盖值存 **settings.toml**（`input_point_overrides`，key=目标 id，程序唯一写入方、原子写）；`profiles.user.toml` 保持**手编专用、程序零触碰**（手写注释不丢）。装载时由设置合成 `[[profiles]]` 段拼接在手编文件之后——`load_profiles` 同 id 字段级后写胜出，优先级 = **设置面板 > 手编 user.toml > 内置**。手编文件坏→只丢手编层；拼接后坏→退手编层；再坏→内置（各步留痕）。
+- **热生效**：`TargetRoutingVm::replace_profiles` 干跑校验（含表达式试算）通过后**只换画像集**，热目标/钉住/别名/目标条状态原样穿越（测试锁定该语义）；Runtime 暴露 `reload_profiles`（失败原样不动，错误返回 UI 内联显示）。坏表达式在保存干跑阶段即被拒，不落 settings、不进运行时。
+- **UI**：设置面板新增「上框点位（高级）」区——声明了 input_point 的目标逐个列出（qianniu/weixin/pdd），选中→x/y 表达式编辑→保存/恢复默认；行数据 `tuning_targets()` 是画像链合并后的当前生效值。保存成功顶部提示「已更新并生效」。
+- 恢复默认 = 删除该目标覆盖并回填画像链上的值。改动无需重启；对未声明 input_point 的目标（如 telegram）该区不出现。
+
 
 
 
