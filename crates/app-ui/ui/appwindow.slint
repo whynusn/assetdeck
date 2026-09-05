@@ -558,8 +558,9 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // 占位说明：TextInput 无内建 placeholder，空文本时补一行。
-                        if root.search-text == "": Text {
+                        // 占位说明：TextInput 无内建 placeholder，空文本时补一行；
+                        // IME 组合串（preedit）非空时也要隐藏，否则拼音叠在灰字上。
+                        if root.search-text == "" && search-input.preedit-text == "": Text {
                             x: search-input.x + 1px;
                             width: search-input.width;
                             y: (parent.height - self.height) / 2;
