@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use platform::{BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep};
+use platform::{eval_point_expr, BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep, InputPointExpr};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -162,6 +162,24 @@ impl From<InputAnchorBottom> for BottomUpAnchor {
     }
 }
 
+/// 表达式点击点（2026-09-05，失焦恢复输入面真机通路的用户可配定位模型）。
+///
+/// 坐标系与变量语义见 [`platform` 的 `InputPointExpr`]：客户区逻辑像素，
+/// 原点=左上角，变量 `WINDOW_WIDTH`/`WINDOW_HEIGHT` 点击时实时求值。
+/// 设备/版式差异（微信右下角内缩 4~20 物理像素即中、千牛必须点进中栏
+/// 输入框内部）由此交给用户按实测自调，而不是猜一组普适常数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputPointConfig {
+    pub x: String,
+    pub y: String,
+}
+
+impl From<InputPointConfig> for InputPointExpr {
+    fn from(value: InputPointConfig) -> Self {
+        InputPointExpr { x: value.x, y: value.y }
+    }
+}
+
 /// 聚焦级别的可反序列化镜像（`platform::FocusStep` 在 trait 层零依赖，不能引入 serde）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +190,10 @@ pub enum FocusStrategyStep {
     Uia,
     /// 画像锚点单次左键单击。
     Anchor,
+    /// 表达式点击点单次左键单击（`input_point` 声明坐标表达式）。
+    InputPoint,
+    /// 原生 caret + MSAA 语义确认。
+    CaretSemantic,
 }
 
 impl From<FocusStrategyStep> for FocusStep {
@@ -180,6 +202,8 @@ impl From<FocusStrategyStep> for FocusStep {
             FocusStrategyStep::Already => FocusStep::AlreadyEditable,
             FocusStrategyStep::Uia => FocusStep::UiaSetFocus,
             FocusStrategyStep::Anchor => FocusStep::AnchorClick,
+            FocusStrategyStep::InputPoint => FocusStep::InputPointClick,
+            FocusStrategyStep::CaretSemantic => FocusStep::CaretSemantic,
         }
     }
 }
@@ -230,6 +254,9 @@ pub struct Profile {
     /// 底部锚点（D74）：声明后**优先于** `input_anchor` 使用；`input_anchor`
     /// 保留作兼容兜底（旧用户画像仍可解析、行为不变）。
     pub input_anchor_bottom: Option<InputAnchorBottom>,
+    /// 表达式点击点：`focus_strategy` 含 `input_point` 级时必填；坐标模型见
+    /// [`InputPointConfig`]。
+    pub input_point: Option<InputPointConfig>,
 }
 
 impl Profile {
@@ -249,6 +276,7 @@ impl Profile {
             focus_strategy: default_focus_strategy(),
             input_anchor: None,
             input_anchor_bottom: None,
+            input_point: None,
         }
     }
 
@@ -262,7 +290,7 @@ impl Profile {
         self.input_anchor.map(FocusAnchor::from)
     }
 
-    /// 传给平台聚焦端的完整计划：级别顺序 + 锚点。
+    /// 传给平台聚焦端的完整计划：级别顺序 + 锚点 + 表达式点击点。
     pub fn focus_plan(&self) -> FocusPlan {
         FocusPlan {
             steps: self
@@ -273,6 +301,7 @@ impl Profile {
                 .collect(),
             anchor: self.focus_anchor(),
             anchor_bottom: self.input_anchor_bottom.map(BottomUpAnchor::from),
+            input_point_expr: self.input_point.clone().map(InputPointExpr::from),
         }
     }
 }
@@ -324,6 +353,15 @@ pub enum ProfileError {
     /// 空数组不能静默退化成「不聚焦」：那样 Ctrl+V 会落空且不留任何线索。
     #[error("目标画像 {0} 的 focus_strategy 为空数组(至少声明一个聚焦级别，或整体省略以取缺省)")]
     EmptyFocusStrategy(String),
+    #[error("目标画像 {profile} 的 focus_strategy 声明了 input_point 级但未提供 [profiles.input_point]")]
+    InputPointMissing { profile: String },
+    #[error("目标画像 {profile} 的点击点表达式无效: {axis}={expr:?}: {reason}")]
+    InvalidInputPointExpr {
+        profile: String,
+        axis: String,
+        expr: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -348,6 +386,7 @@ struct ProfilePatch {
     focus_strategy: Option<Vec<FocusStrategyStep>>,
     input_anchor: Option<InputAnchor>,
     input_anchor_bottom: Option<InputAnchorBottom>,
+    input_point: Option<InputPointConfig>,
 }
 
 /// 合并随版本发布的内置画像与用户画像。用户画像按 id 做字段级覆盖。
@@ -449,6 +488,9 @@ fn merge_patch(base: &mut ProfilePatch, overlay: ProfilePatch) {
     if overlay.input_anchor_bottom.is_some() {
         base.input_anchor_bottom = overlay.input_anchor_bottom;
     }
+    if overlay.input_point.is_some() {
+        base.input_point = overlay.input_point;
+    }
 }
 
 fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileError> {
@@ -494,6 +536,24 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         if strategy.is_empty() {
             return Err(ProfileError::EmptyFocusStrategy(id));
         }
+        // input_point 级依赖表达式坐标：策略声明了它就必须给配置，且表达式必须
+        // 可求值（用参考尺寸 1920x1080 试算，坏表达式在加载期报错而不是点击期
+        // 静默降级——否则用户改了坐标却永远走不到，只会看到神秘的回退）。
+        if strategy.contains(&FocusStrategyStep::InputPoint) {
+            let Some(point) = patch.input_point.as_ref() else {
+                return Err(ProfileError::InputPointMissing { profile: id });
+            };
+            for (axis, expr) in [("x", &point.x), ("y", &point.y)] {
+                if let Err(reason) = eval_point_expr(expr, 1920, 1080) {
+                    return Err(ProfileError::InvalidInputPointExpr {
+                        profile: id,
+                        axis: axis.to_string(),
+                        expr: expr.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
     }
 
     Ok(Profile {
@@ -511,6 +571,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         focus_strategy: patch.focus_strategy.unwrap_or_else(default_focus_strategy),
         input_anchor: patch.input_anchor,
         input_anchor_bottom: patch.input_anchor_bottom,
+        input_point: patch.input_point,
     })
 }
 
@@ -853,6 +914,104 @@ focus_strategy = []
             load_profiles(doc, None),
             Err(ProfileError::EmptyFocusStrategy(id)) if id == "broken"
         ));
+    }
+
+    /// 表达式点击点（2026-09-05 失焦恢复输入面通路）：策略步与坐标必须成对生效。
+    #[test]
+    fn input_point_expr_is_parsed_into_focus_plan() {
+        let doc = r#"
+[[profiles]]
+id = "wechat"
+label = "微信"
+focus_strategy = ["already", "input_point", "anchor"]
+
+[profiles.input_point]
+x = "WINDOW_WIDTH - 8"
+y = "WINDOW_HEIGHT - 8"
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let plan = set
+            .get(&TargetId::new("wechat"))
+            .unwrap()
+            .focus_plan();
+        assert_eq!(
+            plan.steps,
+            vec![
+                FocusStep::AlreadyEditable,
+                FocusStep::InputPointClick,
+                FocusStep::AnchorClick
+            ],
+            "input_point 策略步必须映射为 InputPointClick 并保序"
+        );
+        let point = plan
+            .input_point_expr
+            .expect("声明 input_point 级就必须把表达式带进计划");
+        assert_eq!(point.x, "WINDOW_WIDTH - 8");
+        assert_eq!(point.y, "WINDOW_HEIGHT - 8");
+    }
+
+    #[test]
+    fn input_point_step_without_config_is_rejected() {
+        let doc = r#"
+[[profiles]]
+id = "broken"
+label = "缺配置"
+focus_strategy = ["already", "input_point"]
+"#;
+        assert!(matches!(
+            load_profiles(doc, None),
+            Err(ProfileError::InputPointMissing { profile }) if profile == "broken"
+        ));
+    }
+
+    #[test]
+    fn invalid_input_point_expr_is_rejected_at_load_time() {
+        let doc = r#"
+[[profiles]]
+id = "broken"
+label = "坏表达式"
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "WINDOW_DEPTH - 8"
+y = "8"
+"#;
+        assert!(matches!(
+            load_profiles(doc, None),
+            Err(ProfileError::InvalidInputPointExpr { profile, axis, .. })
+                if profile == "broken" && axis == "x"
+        ));
+    }
+
+    #[test]
+    fn user_profile_can_override_input_point() {
+        let builtin = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "413"
+y = "WINDOW_HEIGHT - 75"
+"#;
+        let user = r#"
+[[profiles]]
+id = "qianniu"
+
+[profiles.input_point]
+x = "300"
+y = "WINDOW_HEIGHT - 60"
+"#;
+        let set = load_profiles(builtin, Some(user)).unwrap();
+        let point = set
+            .get(&TargetId::new("qianniu"))
+            .unwrap()
+            .focus_plan()
+            .input_point_expr
+            .expect("用户覆写后表达式必须还在计划里");
+        assert_eq!(point.x, "300");
+        assert_eq!(point.y, "WINDOW_HEIGHT - 60");
     }
 
     #[test]

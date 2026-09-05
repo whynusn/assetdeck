@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use windows::core::BSTR;
 use windows::Win32::Foundation::HWND as WinHWND;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -46,20 +47,22 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::DROPFILES;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    PostThreadMessageW, SetCursorPos, SetForegroundWindow, ShowWindow, TranslateMessage,
-    WindowFromPoint, EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND,
-    GA_ROOT, MSG, OBJID_CARET, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
+    GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, PostThreadMessageW, SendMessageTimeoutW, SetCursorPos, SetForegroundWindow,
+    ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
+    WINEVENT_OUTOFCONTEXT, WM_QUIT,
 };
 
 use crate::{
-    AnchorGeometry, ClickEvidence, ClipboardPayload, ClipboardSink, EventWait, FileDialogs,
-    FocusAttempt, FocusOutcome, FocusPlan, FocusReport, FocusStep, FocusWatcher,
-    ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector, PlatformError,
-    ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome, WindowActivator,
-    WindowEnumerator, WindowEventSource, WindowHandle, WindowRect, WindowSnapshot, KEY_UP,
+    input_point_logical, AnchorGeometry, ClickEvidence, ClipboardPayload, ClipboardSink,
+    EventWait, FileDialogs, FocusAttempt, FocusOutcome, FocusPlan, FocusReport, FocusStep,
+    FocusWatcher, ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector,
+    PlatformError, ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome,
+    WindowActivator, WindowEnumerator, WindowEventSource, WindowHandle, WindowRect,
+    WindowSnapshot, KEY_UP,
 };
 
 /// 原生文件对话框（IFileDialog）：ComCtl 版免 PowerShell 冷启动（消除数秒延迟）。
@@ -1951,6 +1954,59 @@ fn format_attempts(attempts: &[FocusAttempt]) -> String {
         .join(" | ")
 }
 
+fn native_caret_semantic(hwnd: HWND) -> bool {
+    unsafe {
+        if GetForegroundWindow() != hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd {
+            return false;
+        }
+        let mut info = windows_sys::Win32::UI::WindowsAndMessaging::GUITHREADINFO {
+            cbSize: std::mem::size_of::<windows_sys::Win32::UI::WindowsAndMessaging::GUITHREADINFO>(
+            ) as u32,
+            ..std::mem::zeroed()
+        };
+        if GetGUIThreadInfo(
+            GetWindowThreadProcessId(hwnd, std::ptr::null_mut()),
+            &mut info,
+        ) == 0
+            || info.hwndCaret.is_null()
+        {
+            return false;
+        }
+        let mut p = POINT {
+            x: info.rcCaret.left,
+            y: info.rcCaret.top + (info.rcCaret.bottom - info.rcCaret.top) / 2,
+        };
+        if ClientToScreen(info.hwndCaret, &mut p) == 0 {
+            return false;
+        }
+        let owner = WindowFromPoint(p);
+        if owner.is_null() || GetAncestor(owner, GA_ROOT) != hwnd {
+            return false;
+        }
+        let mut acc = None;
+        let mut child = windows::Win32::System::Variant::VARIANT::default();
+        let wp = windows::Win32::Foundation::POINT { x: p.x, y: p.y };
+        if windows::Win32::UI::Accessibility::AccessibleObjectFromPoint(wp, &mut acc, &mut child)
+            .is_err()
+        {
+            return false;
+        }
+        let Some(accessible) = acc else {
+            return false;
+        };
+        let role = accessible.get_accRole(&child).ok();
+        let name = accessible.get_accName(&child).ok();
+        role.map(|v| {
+            v.Anonymous.Anonymous.vt == windows::Win32::System::Variant::VARENUM(3)
+                && v.Anonymous.Anonymous.Anonymous.lVal == 7
+        })
+        .unwrap_or(false)
+            && name
+                .map(|v: BSTR| "编辑".encode_utf16().eq(v.as_ref().iter().copied()))
+                .unwrap_or(false)
+    }
+}
+
 fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
     let hwnd = window.0 as HWND;
     let mut attempts = Vec::new();
@@ -1983,6 +2039,25 @@ fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
                     };
                 }
             }
+            FocusStep::CaretSemantic => {
+                let ok = native_caret_semantic(hwnd);
+                attempts.push(FocusAttempt {
+                    step: *step,
+                    outcome: if ok {
+                        FocusOutcome::FocusedByCaretSemantic
+                    } else {
+                        FocusOutcome::Unavailable
+                    },
+                    click: None,
+                    settle: None,
+                });
+                if ok {
+                    return FocusReport {
+                        outcome: FocusOutcome::FocusedByCaretSemantic,
+                        attempts,
+                    };
+                }
+            }
             FocusStep::UiaSetFocus => {
                 let (focused, settle) = uia_set_focus_on_editable(window);
                 attempts.push(FocusAttempt {
@@ -1998,6 +2073,62 @@ fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
                 if focused {
                     return FocusReport {
                         outcome: FocusOutcome::FocusedByUia,
+                        attempts,
+                    };
+                }
+            }
+            FocusStep::InputPointClick => {
+                // 表达式点击点（2026-09-05 真机通路）：先按实时 DPI 求值逻辑点，
+                // 再复用锚点单击的全套守卫与证据链。
+                let Some(expr) = plan.input_point_expr.as_ref() else {
+                    continue;
+                };
+                let dpi = window_dpi(hwnd);
+                let scale = f64::from(dpi.max(1)) / 96.0;
+                let mut client = RECT {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+                if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
+                    attempts.push(FocusAttempt {
+                        step: *step,
+                        outcome: FocusOutcome::Unavailable,
+                        click: None,
+                        settle: None,
+                    });
+                    continue;
+                }
+                let logical = (
+                    ((client.right - client.left) as f64 / scale).round() as i32,
+                    ((client.bottom - client.top) as f64 / scale).round() as i32,
+                );
+                let Ok(evaluated) = input_point_logical(expr, logical) else {
+                    // 求值失败（坏表达式）只在加载期校验过；此处按不可用降级，
+                    // 不 panic 不猜测——后续级别（如 anchor）仍可接管。
+                    attempts.push(FocusAttempt {
+                        step: *step,
+                        outcome: FocusOutcome::Unavailable,
+                        click: None,
+                        settle: None,
+                    });
+                    continue;
+                };
+                let geometry = AnchorGeometry::ExprPoint {
+                    x_logical: evaluated.0,
+                    y_logical: evaluated.1,
+                };
+                let (outcome, click, settle) = click_anchor(hwnd, geometry);
+                attempts.push(FocusAttempt {
+                    step: *step,
+                    outcome,
+                    click,
+                    settle,
+                });
+                if outcome == FocusOutcome::FocusedByAnchor {
+                    return FocusReport {
+                        outcome: FocusOutcome::FocusedByAnchor,
                         attempts,
                     };
                 }
@@ -2146,6 +2277,15 @@ fn click_point_in_client(
             let y = (client_height - offset).clamp(8, (client_height - 8).max(8));
             (x, y)
         }
+        AnchorGeometry::ExprPoint { x_logical, y_logical } => {
+            // 求值已在计划级完成（逻辑像素），这里只按实时 DPI 放大并夹进客户区。
+            // 允许贴边（角落内缩配方可能就是贴边点），只防越界点击到窗外。
+            let scale = dpi.max(1) as f32 / 96.0;
+            let x = ((x_logical as f32 * scale).round() as i32).clamp(0, (client_width - 1).max(0));
+            let y =
+                ((y_logical as f32 * scale).round() as i32).clamp(0, (client_height - 1).max(0));
+            (x, y)
+        }
     }
 }
 
@@ -2177,6 +2317,29 @@ fn normalize_to_virtual_desktop(
     let nx = ((x - origin_x) as i64 * 65_535 / (width - 1) as i64) as i32;
     let ny = ((y - origin_y) as i64 * 65_535 / (height - 1) as i64) as i32;
     Some((nx.clamp(0, 65_535), ny.clamp(0, 65_535)))
+}
+
+/// `WM_NCHITTEST` 命中码：客户区。
+const HTCLIENT: i32 = 1;
+
+/// 跨进程询问窗口「这个屏幕点会被命中测试归到哪」。返回 None = 查询失败
+/// （目标挂起/超时），调用方按「不点击」处理——宁可放弃也不猜。
+fn window_hit_test(hwnd: HWND, point: POINT) -> Option<i32> {
+    const WM_NCHITTEST: u32 = 0x0084;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    let packed = ((point.y as u16 as u32) << 16) | point.x as u16 as u32;
+    let result = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_NCHITTEST,
+            0,
+            packed as isize,
+            SMTO_ABORTIFHUNG,
+            300,
+            std::ptr::null_mut(),
+        )
+    };
+    (result != 0).then_some(result as i32)
 }
 
 /// 对画像声明的锚点做一次左键单击。
@@ -2213,6 +2376,41 @@ fn click_anchor(
     if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
         return (FocusOutcome::Unavailable, None, None);
     }
+
+    // 内缩点可能落在非客户区命中区：真机实证（2026-09-05，千牛窗口角落），
+    // WM_NCHITTEST 返回 HTBOTTOMLEFT 一类时点击被系统当尺寸调整吞掉、光标变
+    // resize，客户区点击从未发生——而 SendMessage 跨进程查询与真实光标命中
+    // 一致。命中非 HTCLIENT 时沿「指向窗口中心」方向内缩重试（8 物理像素/步，
+    // 至多 5 步）；全程失败则放弃本级别：宁可不落框，也不点未确认为客户区的位置。
+    let center = (
+        client.left + client_size.0 / 2,
+        client.top + client_size.1 / 2,
+    );
+    let mut hit_client = false;
+    for _ in 0..=5 {
+        match window_hit_test(hwnd, point) {
+            Some(HTCLIENT) => {
+                hit_client = true;
+                break;
+            }
+            _ => {
+                let step_x = (center.0 - point.x).signum() * 8;
+                let step_y = (center.1 - point.y).signum() * 8;
+                let (next_x, next_y) = (point.x + step_x, point.y + step_y);
+                if (next_x, next_y) == (point.x, point.y) {
+                    break;
+                }
+                point = POINT {
+                    x: next_x,
+                    y: next_y,
+                };
+            }
+        }
+    }
+    if !hit_client {
+        return (FocusOutcome::Unavailable, None, None);
+    }
+
     let evidence = ClickEvidence {
         geometry,
         point_screen: (point.x, point.y),
@@ -2487,6 +2685,56 @@ mod tests {
             hdrop_path_list(&[]),
             Err(PlatformError::Clipboard(_))
         ));
+    }
+
+    /// 表达式点击点的求值面：四则/变量/括号/一元负号可用，垃圾一律拒绝。
+    #[test]
+    fn point_expr_supports_arithmetic_variables_and_rejects_garbage() {
+        assert_eq!(crate::eval_point_expr("8", 1920, 1080), Ok(8));
+        assert_eq!(
+            crate::eval_point_expr("WINDOW_WIDTH - 8", 1920, 1080),
+            Ok(1912)
+        );
+        assert_eq!(
+            crate::eval_point_expr("WINDOW_HEIGHT - 8", 1920, 1080),
+            Ok(1072)
+        );
+        assert_eq!(crate::eval_point_expr("WINDOW_WIDTH / 2", 1920, 1080), Ok(960));
+        assert_eq!(
+            crate::eval_point_expr("(WINDOW_WIDTH - 16) / 2", 1920, 1080),
+            Ok(952)
+        );
+        assert_eq!(
+            crate::eval_point_expr("-8 + WINDOW_WIDTH", 1920, 1080),
+            Ok(1912)
+        );
+        assert!(crate::eval_point_expr("WINDOW_DEPTH", 1920, 1080).is_err());
+        assert!(crate::eval_point_expr("WINDOW_WIDTH / 0", 1920, 1080).is_err());
+        assert!(crate::eval_point_expr("1 +", 1920, 1080).is_err());
+        assert!(crate::eval_point_expr("(1", 1920, 1080).is_err());
+        assert!(crate::eval_point_expr("1 2", 1920, 1080).is_err());
+        assert!(crate::eval_point_expr("", 1920, 1080).is_err());
+    }
+
+    /// ExprPoint 几何：逻辑像素按实时 DPI 放大、越界夹进客户区（允许贴边）。
+    #[test]
+    fn expr_point_scales_logical_by_dpi_and_clamps_into_client() {
+        let geometry = AnchorGeometry::ExprPoint {
+            x_logical: 100,
+            y_logical: 50,
+        };
+        assert_eq!(click_point_in_client(1000, 800, 144, geometry), (150, 75));
+        assert_eq!(click_point_in_client(1000, 800, 96, geometry), (100, 50));
+        let corner = AnchorGeometry::ExprPoint {
+            x_logical: 0,
+            y_logical: 0,
+        };
+        assert_eq!(click_point_in_client(1000, 800, 288, corner), (0, 0));
+        let overflow = AnchorGeometry::ExprPoint {
+            x_logical: 99_999,
+            y_logical: 99_999,
+        };
+        assert_eq!(click_point_in_client(1000, 800, 96, overflow), (999, 799));
     }
 
     fn event(kind: u32, hwnd: isize, root: isize, pid: u32, object_id: i32) -> PumpEvent {

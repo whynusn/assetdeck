@@ -1,4 +1,4 @@
-//! 平台抽象层：剪贴板写入、前台窗口观测、按键注入。
+﻿//! 平台抽象层：剪贴板写入、前台窗口观测、按键注入。
 //!
 //! 分层纪律（spec/platform）：
 //! - 本文件为 trait 层，**零依赖、零条件编译门**——依赖方（pipeline/ui-viewmodels）
@@ -312,6 +312,9 @@ pub struct BottomUpAnchor {
 pub enum AnchorGeometry {
     Ratio(FocusAnchor),
     BottomUp(BottomUpAnchor),
+    /// 表达式点击点（已求值）：客户区逻辑坐标（原点=客户区左上角）。
+    /// 表达式与变量见 [`InputPointExpr`]；现场记录只留求值结果，表达式本身在计划里。
+    ExprPoint { x_logical: i32, y_logical: i32 },
 }
 
 /// 一次「把键盘焦点送进聊天输入框」的结果。
@@ -326,6 +329,8 @@ pub enum FocusOutcome {
     FocusedByUia,
     /// 通过点击画像声明的锚点拿到焦点。
     FocusedByAnchor,
+    /// 通过原生 caret 与 MSAA 语义确认编辑器。
+    FocusedByCaretSemantic,
     /// 两条路都不可用（无锚点、UIA 不暴露输入框、或锚点被其它窗口遮挡）。
     Unavailable,
 }
@@ -391,6 +396,202 @@ pub enum FocusStep {
     UiaSetFocus,
     /// 对画像声明的锚点做单次左键单击。无锚点时该级别自动跳过。
     AnchorClick,
+    /// 对画像声明的表达式点击点（[`InputPointExpr`]）做单次左键单击。
+    /// 无声明时该级别自动跳过。与 `AnchorClick` 的差别只在定位模型：
+    /// 这里是用户可配的「窗口内任意一点」（原点=客户区左上角，逻辑像素，
+    /// 变量 WINDOW_WIDTH/WINDOW_HEIGHT 实时求值），失焦恢复输入面的
+    /// 真机实测通路（2026-09-05 千牛/微信）即以此落地。
+    InputPointClick,
+    /// 读取原生 caret 并以 MSAA 语义确认编辑器，不执行任何动作。
+    CaretSemantic,
+}
+
+/// 用户可配置的点击点表达式（失焦恢复输入面的定位模型）。
+///
+/// 坐标系：客户区，原点=左上角，96-DPI 逻辑像素（点击时按目标窗口实时 DPI
+/// 换算物理像素）。表达式支持整数四则运算、括号与两个实时变量：
+/// `WINDOW_WIDTH`/`WINDOW_HEIGHT` = 客户区逻辑宽高。四个角的「内缩 N 像素」
+/// 与窗口内任意一点因此是同一配置面，例如：
+/// - 左下角内缩 8：`x="8"`, `y="WINDOW_HEIGHT - 8"`
+/// - 右下角内缩 8：`x="WINDOW_WIDTH - 8"`, `y="WINDOW_HEIGHT - 8"`
+/// - 底部居中偏上 100：`x="WINDOW_WIDTH / 2"`, `y="WINDOW_HEIGHT - 100"`
+///
+/// 为什么暴露表达式而不是 dx/dy：不同设备/版式下「输入面」相对窗口角的偏移
+/// 不同（微信右下角内缩 4~20 物理像素即中、千牛则须落在中栏输入框内部），
+/// 让用户按自己机器实测调一个点，比猜一组普适常数诚实。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputPointExpr {
+    pub x: String,
+    pub y: String,
+}
+
+/// 求值点击点表达式。支持 `+ - * /`（i32 整除）、括号、一元正负号、整数
+/// 字面量与变量 `WINDOW_WIDTH`/`WINDOW_HEIGHT`；除零、整数溢出、未知变量
+/// 与任何语法错误都返回 Err——画像加载期即拒绝，不把坏配置带进点击路径。
+pub fn eval_point_expr(expr: &str, window_width: i32, window_height: i32) -> std::result::Result<i32, String> {
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+        width: i32,
+        height: i32,
+    }
+
+    impl Parser<'_> {
+        fn skip_ws(&mut self) {
+            while self
+                .bytes
+                .get(self.pos)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.pos += 1;
+            }
+        }
+
+        fn peek(&mut self) -> Option<u8> {
+            self.skip_ws();
+            self.bytes.get(self.pos).copied()
+        }
+
+        fn expr(&mut self) -> std::result::Result<i32, String> {
+            let mut left = self.term()?;
+            loop {
+                match self.peek() {
+                    Some(b'+') => {
+                        self.pos += 1;
+                        let right = self.term()?;
+                        left = left
+                            .checked_add(right)
+                            .ok_or_else(|| "整数溢出".to_string())?;
+                    }
+                    Some(b'-') => {
+                        self.pos += 1;
+                        let right = self.term()?;
+                        left = left
+                            .checked_sub(right)
+                            .ok_or_else(|| "整数溢出".to_string())?;
+                    }
+                    _ => return Ok(left),
+                }
+            }
+        }
+
+        fn term(&mut self) -> std::result::Result<i32, String> {
+            let mut left = self.unary()?;
+            loop {
+                match self.peek() {
+                    Some(b'*') => {
+                        self.pos += 1;
+                        let right = self.unary()?;
+                        left = left
+                            .checked_mul(right)
+                            .ok_or_else(|| "整数溢出".to_string())?;
+                    }
+                    Some(b'/') => {
+                        self.pos += 1;
+                        let right = self.unary()?;
+                        if right == 0 {
+                            return Err("除零".to_string());
+                        }
+                        left /= right;
+                    }
+                    _ => return Ok(left),
+                }
+            }
+        }
+
+        fn unary(&mut self) -> std::result::Result<i32, String> {
+            match self.peek() {
+                Some(b'+') => {
+                    self.pos += 1;
+                    self.unary()
+                }
+                Some(b'-') => {
+                    self.pos += 1;
+                    let value = self.unary()?;
+                    value
+                        .checked_neg()
+                        .ok_or_else(|| "整数溢出".to_string())
+                }
+                _ => self.atom(),
+            }
+        }
+
+        fn atom(&mut self) -> std::result::Result<i32, String> {
+            match self.peek() {
+                Some(b'(') => {
+                    self.pos += 1;
+                    let value = self.expr()?;
+                    if self.peek() == Some(b')') {
+                        self.pos += 1;
+                        Ok(value)
+                    } else {
+                        Err("缺少右括号".to_string())
+                    }
+                }
+                Some(c) if c.is_ascii_digit() => {
+                    let start = self.pos;
+                    while self
+                        .bytes
+                        .get(self.pos)
+                        .is_some_and(u8::is_ascii_digit)
+                    {
+                        self.pos += 1;
+                    }
+                    std::str::from_utf8(&self.bytes[start..self.pos])
+                        .ok()
+                        .and_then(|text| text.parse::<i32>().ok())
+                        .ok_or_else(|| "整数过大".to_string())
+                }
+                Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
+                    let start = self.pos;
+                    while self
+                        .bytes
+                        .get(self.pos)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    {
+                        self.pos += 1;
+                    }
+                    match std::str::from_utf8(&self.bytes[start..self.pos]) {
+                        Ok("WINDOW_WIDTH") => Ok(self.width),
+                        Ok("WINDOW_HEIGHT") => Ok(self.height),
+                        Ok(other) => Err(format!(
+                            "未知变量 {other}(可用 WINDOW_WIDTH / WINDOW_HEIGHT)"
+                        )),
+                        Err(_) => Err("变量名含非法字节".to_string()),
+                    }
+                }
+                Some(c) => Err(format!("无效字符 '{}'(位置 {})", c as char, self.pos)),
+                None => Err("表达式意外结束".to_string()),
+            }
+        }
+    }
+
+    let mut parser = Parser {
+        bytes: expr.as_bytes(),
+        pos: 0,
+        width: window_width,
+        height: window_height,
+    };
+    let value = parser.expr()?;
+    parser.skip_ws();
+    if parser.pos != parser.bytes.len() {
+        return Err(format!("表达式末尾有多余内容(位置 {})", parser.pos));
+    }
+    Ok(value)
+}
+
+/// 表达式点击点求值并夹进客户区：返回 96-DPI 逻辑坐标（原点=客户区左上角）。
+/// 越界值夹到客户区内（允许贴边——角落内缩配方可能就是贴边点），不报错。
+pub fn input_point_logical(
+    point: &InputPointExpr,
+    client_logical: (i32, i32),
+) -> std::result::Result<(i32, i32), String> {
+    let x = eval_point_expr(&point.x, client_logical.0, client_logical.1)?;
+    let y = eval_point_expr(&point.y, client_logical.0, client_logical.1)?;
+    Ok((
+        x.clamp(0, (client_logical.0 - 1).max(0)),
+        y.clamp(0, (client_logical.1 - 1).max(0)),
+    ))
 }
 
 /// 一次聚焦尝试的完整计划：按 `steps` 顺序降级，直到某级别被验证成功。
@@ -400,6 +601,9 @@ pub struct FocusPlan {
     pub anchor: Option<FocusAnchor>,
     /// bottom-up 锚点（D74）：存在即**优先于** `anchor` 被使用。
     pub anchor_bottom: Option<BottomUpAnchor>,
+    /// 表达式点击点：`steps` 含 [`FocusStep::InputPointClick`] 且本字段存在时，
+    /// 该级对求值点做单次左键单击（定位模型见 [`InputPointExpr`]）。
+    pub input_point_expr: Option<InputPointExpr>,
 }
 
 /// 聊天输入框焦点获取端。

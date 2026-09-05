@@ -23,7 +23,11 @@
 //!   focus_probe --list
 //!   focus_probe --hwnd <N> [--runs 3] [--click "0.66,0.85"]
 //!   focus_probe --a11y <N> [--anchor "0.49,0.92"] [--a11y-click <候选序号>]
+//!   focus_probe --semantic-probe <N>   (guarded: strict semantic evidence only)
 //!   focus_probe --paste-element <N> [--marker <串>] [--no-setfocus|--focus-rwh]
+
+#[path = "../focus_probe_raw.rs"]
+mod raw_snapshot;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -891,7 +895,8 @@ fn run_paste_element(
             || detail.contains("聊天")
             || detail.contains("输入")
     };
-    let area = |rect: (i32, i32, i32, i32)| (rect.2 - rect.0).max(0) * (rect.3 - rect.1).max(0);
+    // Historical experiment retained for provenance, unreachable from CLI.
+    // No area-based fallback: geometry is not composer identity.
     let writable: Vec<usize> = candidates
         .iter()
         .enumerate()
@@ -901,13 +906,7 @@ fn run_paste_element(
     let chosen = writable
         .iter()
         .copied()
-        .find(|i| hint(&candidates[*i].detail))
-        .or_else(|| {
-            writable
-                .iter()
-                .copied()
-                .max_by_key(|i| area(candidates[*i].rect))
-        });
+        .find(|i| hint(&candidates[*i].detail));
     let chosen_index = match chosen {
         Some(index) => index,
         None => {
@@ -1053,7 +1052,9 @@ fn run_paste_element(
         println!("  after[{index}] value={brief:?} hit={contains}");
     }
     if hit {
-        println!("PASTE_ELEMENT: SUCCESS marker landed via element focus (zero coordinates)");
+        println!(
+            "PASTE_ELEMENT: NON_COMPOSER_EVIDENCE marker matched an arbitrary Edit; not success"
+        );
     } else {
         println!("PASTE_ELEMENT: MISS marker not found in any edit value");
     }
@@ -1541,6 +1542,656 @@ fn uia_collect_editables(
     total
 }
 
+fn run_semantic_probe(hwnd: HWND, automation: &IUIAutomation) {
+    use platform::win32::Win32WindowActivator;
+    use platform::{WindowActivator, WindowHandle};
+    let pid = window_pid(hwnd);
+    println!("semantic-probe target={:?} pid={pid} action=activate", hwnd);
+    let activated = Win32WindowActivator.activate(WindowHandle(hwnd.0 as isize), 200, 120).unwrap_or(false);
+    if !activated || unsafe { GetForegroundWindow() } != hwnd {
+        println!("semantic-probe candidate=none action=fallback reason=activation_failed");
+        return;
+    }
+    let _ = a11y_activate_protocol(hwnd);
+    let mut candidates = Vec::new();
+    let mut elements = Vec::new();
+    uia_collect_editables(automation, hwnd, &mut candidates, Some(&mut elements));
+    let strict: Vec<usize> = candidates.iter().enumerate().filter_map(|(i, c)| {
+        let d = c.detail.to_ascii_lowercase();
+        (c.source == "uia" && d.contains("focusable=true") && (d.contains("name=\"编辑\"") || d.contains("name=\"edit\"")) && d.contains("pid=")).then_some(i)
+    }).collect();
+    println!("semantic-probe candidates={} strict={}", candidates.len(), strict.len());
+    if strict.len() != 1 { println!("semantic-probe action=none fallback=ambiguous_or_weak_evidence"); return; }
+    let i = strict[0];
+    println!("semantic-probe candidate={} action=SetFocus evidence={:?}", i, candidates[i].detail);
+    let _ = unsafe { elements[i].SetFocus() };
+    let verified = focused_element_info(automation, pid).0;
+    println!("semantic-probe post-focus caret_role=7 caret_name=编辑 target_root={} verified={verified}", unsafe { GetForegroundWindow() } == hwnd);
+    if !verified { println!("semantic-probe fallback=focus_not_verified"); }
+}
+
+// ---------------------------------------------------------------------------
+// --corner-matrix：失焦→激活→窗口角落极限点单击→同进程即时语义复核（批量）。
+//
+// 用户线索：点击窗口边缘空白区（避开控件）可能让 IM 聊天输入框直接恢复聚焦。
+// 跨命令测不准（命令间前台漂移 + HWND 失效），本模式把整链收进单进程原子循环：
+//   SW_MINIMIZE 失焦 → 产品激活器拉回 → 解析候选点(客户区物理像素) →
+//   归属守卫 → SendInput 单击 → GTI caret + MSAA role/name + UIA 焦点判决。
+// 红线：默认零输入合成；仅 --paste-marker 时合成 Ctrl+V（无 0x0D），
+//       粘贴前检查 composer 基线非空则跳过（不覆盖用户草稿），
+//       粘贴确认落框后 UIA SetValue 清理本轮标记。
+// ---------------------------------------------------------------------------
+
+/// 解析候选点：`bl{d}`/`br{d}`/`tl{d}`/`tr{d}` = 距对应角内缩 d 物理像素；
+/// 或 `x,y` 字面客户区物理像素。返回 (x, y)，基于当前客户区尺寸。
+fn resolve_corner_point(spec: &str, w: i32, h: i32) -> Option<(i32, i32)> {
+    let clamp_x = |x: i32| x.clamp(0, w - 1);
+    let clamp_y = |y: i32| y.clamp(0, h - 1);
+    if let Some(d) = spec.strip_prefix("bl").and_then(|s| s.parse::<i32>().ok()) {
+        return Some((clamp_x(d), clamp_y(h - 1 - d)));
+    }
+    if let Some(d) = spec.strip_prefix("br").and_then(|s| s.parse::<i32>().ok()) {
+        return Some((clamp_x(w - 1 - d), clamp_y(h - 1 - d)));
+    }
+    if let Some(d) = spec.strip_prefix("tl").and_then(|s| s.parse::<i32>().ok()) {
+        return Some((clamp_x(d), clamp_y(d)));
+    }
+    if let Some(d) = spec.strip_prefix("tr").and_then(|s| s.parse::<i32>().ok()) {
+        return Some((clamp_x(w - 1 - d), clamp_y(d)));
+    }
+    let (x, y) = spec.split_once(',')?;
+    Some((clamp_x(x.trim().parse().ok()?), clamp_y(y.trim().parse().ok()?)))
+}
+
+struct CornerVerdict {
+    outcome: &'static str,
+    role: Option<i32>,
+    name: String,
+    gti_focus_class: String,
+    caret_screen: Option<(i32, i32)>,
+    uia_note: String,
+}
+
+/// 点击 settle 后的即时判决：前台 → GTI caret → MSAA point 语义 → UIA 焦点兜底。
+unsafe fn classify_after_click(
+    root: HWND,
+    pid: u32,
+    automation: &IUIAutomation,
+) -> CornerVerdict {
+    let empty = || CornerVerdict {
+        outcome: "internal_error",
+        role: None,
+        name: String::new(),
+        gti_focus_class: String::new(),
+        caret_screen: None,
+        uia_note: String::new(),
+    };
+    if unsafe { GetForegroundWindow() } != root {
+        return CornerVerdict {
+            outcome: "not_foreground",
+            role: None,
+            name: String::new(),
+            gti_focus_class: String::new(),
+            caret_screen: None,
+            uia_note: String::new(),
+        };
+    }
+    let mut g = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(window_thread(root), &mut g) }.is_err() {
+        return empty();
+    }
+    let gti_focus_class = hwnd_class(g.hwndFocus);
+    let caret_rect = g.rcCaret;
+    let has_caret = !g.hwndCaret.0.is_null() && caret_rect.bottom > caret_rect.top;
+    let mut caret_screen = None;
+    if has_caret {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::ClientToScreen;
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+        let mut point = POINT {
+            x: caret_rect.left,
+            y: (i64::from(caret_rect.top) + i64::from(caret_rect.bottom)) as i32 / 2,
+        };
+        if unsafe { ClientToScreen(g.hwndCaret, &mut point) }.as_bool() {
+            let owner = unsafe { WindowFromPoint(point) };
+            if unsafe { GetAncestor(owner, GA_ROOT) } == unsafe { GetAncestor(root, GA_ROOT) } {
+                caret_screen = Some((point.x, point.y));
+                use windows::Win32::UI::Accessibility::AccessibleObjectFromPoint;
+                let mut acc = None;
+                let mut child = windows::Win32::System::Variant::VARIANT::default();
+                if unsafe { AccessibleObjectFromPoint(point, &mut acc, &mut child) }.is_ok() {
+                    if let Some(acc) = acc {
+                        let role = unsafe { acc.get_accRole(&child) }
+                            .ok()
+                            .and_then(|v| msaa_role_i4(&v));
+                        let name = unsafe { acc.get_accName(&child) }
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        if role == Some(7) {
+                            let outcome = if name == "编辑" {
+                                "composer_caret"
+                            } else {
+                                "caret_text_role"
+                            };
+                            return finish_verdict(
+                                outcome, role, name, gti_focus_class, caret_screen, automation, root,
+                            );
+                        }
+                        return finish_verdict(
+                            "caret_other_role",
+                            role,
+                            name,
+                            gti_focus_class,
+                            caret_screen,
+                            automation,
+                            root,
+                        );
+                    }
+                }
+                return finish_verdict(
+                    "caret_msaa_unreadable",
+                    None,
+                    String::new(),
+                    gti_focus_class,
+                    caret_screen,
+                    automation,
+                    root,
+                );
+            }
+            return finish_verdict(
+                "caret_owner_mismatch",
+                None,
+                String::new(),
+                gti_focus_class,
+                Some((point.x, point.y)),
+                automation,
+                root,
+            );
+        }
+    }
+    // 无 caret：按 UIA 焦点分类（买家账号=错误目标；RWH 获焦=部分信号）。
+    let (already, info) = focused_element_info(automation, pid);
+    let lower = info.to_lowercase();
+    let outcome = if already && info.contains("买家") {
+        "wrong_editable_buyer"
+    } else if already
+        && (lower.contains("聊天") || lower.contains("消息") || lower.contains("chat"))
+    {
+        "editable_chat_no_caret"
+    } else if already {
+        // 微信 4.x composer 是名字=会话名的可写 textfield（如「文件传输助手」），
+        // 不含聊天关键词；只要可写 Edit 获焦且非买家账号就是强信号。
+        "editable_focused_other"
+    } else if gti_focus_class.contains("Chrome_RenderWidgetHost") {
+        "rwh_focus_no_caret"
+    } else {
+        "foreground_only"
+    };
+    finish_verdict(outcome, None, String::new(), gti_focus_class, caret_screen, automation, root)
+}
+
+/// 附加 UIA 树注记：可写 Edit/Document 候选数 + 当前 has_focus 的名字（≤3 个）。
+fn finish_verdict(
+    outcome: &'static str,
+    role: Option<i32>,
+    name: String,
+    gti_focus_class: String,
+    caret_screen: Option<(i32, i32)>,
+    automation: &IUIAutomation,
+    root: HWND,
+) -> CornerVerdict {
+    let mut candidates: Vec<A11yCandidate> = Vec::new();
+    let _ = uia_collect_editables(automation, root, &mut candidates, None);
+    let focused_names: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.detail.contains("has_focus=true"))
+        .filter_map(|c| {
+            c.detail
+                .split("name=")
+                .nth(1)
+                .map(|n| n.trim_matches('"').to_string())
+        })
+        .take(3)
+        .collect();
+    // GetFocusedElement 详情：区分「焦点已到但 caret 未物化」与「根本没聚焦」。
+    let (_, focused_info) = focused_element_info(automation, window_pid(root));
+    CornerVerdict {
+        outcome,
+        role,
+        name,
+        gti_focus_class,
+        caret_screen,
+        uia_note: format!(
+            "focused_element={focused_info} editables={} focused={focused_names:?}",
+            candidates.len()
+        ),
+    }
+}
+
+/// 读取当前 UIA 焦点元素及其 Value（粘贴验证 / 基线防呆）。
+fn focused_value(automation: &IUIAutomation) -> Option<(IUIAutomationElement, String)> {
+    let focused = unsafe { automation.GetFocusedElement() }.ok()?;
+    let value = unsafe {
+        focused
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            .ok()
+            .and_then(|p| p.CurrentValue().ok())
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+    };
+    Some((focused, value))
+}
+
+/// 合成 Ctrl+<vk>（scancode 路径）+ 单键。仅用于已确认 composer 的清理（Ctrl+A/Backspace）。
+fn send_ctrl_chord_then_key(chord_vk: u16, chord_sc: u16, key_vk: u16, key_sc: u16) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        KEYEVENTF_SCANCODE, VIRTUAL_KEY, VK_CONTROL,
+    };
+    let make = |flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+                vk: VIRTUAL_KEY,
+                sc: u16| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: sc,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let down = KEYEVENTF_SCANCODE;
+    let up = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    let events = [
+        make(down, VK_CONTROL, 0x1D),
+        make(down, VIRTUAL_KEY(chord_vk), chord_sc),
+        make(up, VIRTUAL_KEY(chord_vk), chord_sc),
+        make(up, VK_CONTROL, 0x1D),
+        make(down, VIRTUAL_KEY(key_vk), key_sc),
+        make(up, VIRTUAL_KEY(key_vk), key_sc),
+    ];
+    unsafe { SendInput(&events, std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// WM_NCHITTEST(0x0084)：返回 Some(ht)。仅 HTCLIENT=1 表示点击会作为客户区输入送达；
+/// 角落数像素属于尺寸调整边框（HTBOTTOMLEFT 等），点击会被非客户区吞掉。
+unsafe fn hit_test_client(root: HWND, screen: (i32, i32)) -> Option<isize> {
+    const WM_NCHITTEST: u32 = 0x0084;
+    let (sx, sy) = screen;
+    let packed = ((sy as u16 as u32) << 16) | sx as u16 as u32;
+    let lresult = unsafe {
+        SendMessageTimeoutW(
+            root,
+            WM_NCHITTEST,
+            WPARAM(0),
+            LPARAM(packed as isize),
+            SMTO_ABORTIFHUNG,
+            500,
+            None,
+        )
+    };
+    (lresult.0 != 0).then_some(lresult.0)
+}
+
+/// 合成单个 VK 键（VK 路径，无 scancode；End/Backspace 等 EV_DELETE 类键必须带
+/// 扩展位语义，scancode 路径会把 0x4F 当成 NumPad1——只用于探针内清理）。
+fn send_key_vk(vk: u16) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+    let make = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(
+            &[make(Default::default()), make(KEYEVENTF_KEYUP)],
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_corner_probe(
+    root_value: isize,
+    points: &[String],
+    rounds_per_point: usize,
+    settle_ms: u64,
+    paste_marker: Option<&str>,
+    defocus_peer: bool,
+    cleanup_backspaces: u32,
+    product_point: Option<(String, String)>,
+) {
+    // 物理像素几何：必须先于 UIA/COM 初始化切 PMv2（同 raw_snapshot::dispatch）。
+    use windows::Win32::UI::HiDpi::{
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let automation = uia();
+
+    let root = HWND(root_value as *mut core::ffi::c_void);
+    let pid = window_pid(root);
+    println!(
+        "CORNER target hwnd={root_value} pid={pid} title={:?} defocus={} points={points:?} rounds={rounds_per_point} settle={settle_ms}ms paste={}",
+        hwnd_title(root),
+        if defocus_peer { "peer" } else { "minimize" },
+        paste_marker.map(str::len).unwrap_or(0)
+    );
+
+    // peer 失焦的供体窗口：探针启动时的前台（通常为终端），要求非目标窗口。
+    let donor = if defocus_peer {
+        let fg = unsafe { GetForegroundWindow() };
+        (fg != root && !fg.0.is_null()).then_some(fg)
+    } else {
+        None
+    };
+    if defocus_peer && donor.is_none() {
+        println!("CORNER note=peer_donor_unavailable fallback=minimize");
+    }
+
+    use platform::win32::Win32WindowActivator;
+    use platform::{WindowActivator, WindowHandle};
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetClientRect, WindowFromPoint, GA_ROOT,
+    };
+
+    for spec in points {
+        for round in 1..=rounds_per_point {
+            let started = Instant::now();
+            if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(root)) }.as_bool() {
+                println!("CORNER fatal=window_gone pt={spec}");
+                return;
+            }
+            // 1) 失焦：peer=切到供体窗口（目标保持可见，贴近用户观察场景）；
+            //    minimize=最小化（更重的状态重置）。两种方式都验证「激活≠内部焦点恢复」。
+            if unsafe { GetForegroundWindow() } == root {
+                let peer_done = match donor {
+                    Some(d) => {
+                        let my_tid = unsafe { GetCurrentThreadId() };
+                        let d_tid = window_thread(d);
+                        let t_tid = window_thread(root);
+                        unsafe {
+                            let _ = AttachThreadInput(my_tid, d_tid, true);
+                            let _ = AttachThreadInput(my_tid, t_tid, true);
+                            let _ = SetForegroundWindow(d);
+                            let _ = AttachThreadInput(my_tid, t_tid, false);
+                            let _ = AttachThreadInput(my_tid, d_tid, false);
+                        }
+                        let deadline = Instant::now() + std::time::Duration::from_millis(600);
+                        while Instant::now() < deadline
+                            && unsafe { GetForegroundWindow() } == root
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(40));
+                        }
+                        (unsafe { GetForegroundWindow() }) != root
+                    }
+                    None => false,
+                };
+                if !peer_done {
+                    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
+                    let _ = unsafe { ShowWindow(root, SW_MINIMIZE) };
+                    let deadline = Instant::now() + std::time::Duration::from_millis(800);
+                    while Instant::now() < deadline
+                        && unsafe { GetForegroundWindow() } == root
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                    }
+                }
+            }
+            // 2) 产品激活器拉回前台。
+            let activated = Win32WindowActivator
+                .activate(WindowHandle(root_value), 200, 120)
+                .unwrap_or(false);
+            let fg_ok = unsafe { GetForegroundWindow() } == root;
+            if !fg_ok {
+                println!(
+                    "CORNER pt={spec} round={round} outcome=activate_failed activated={activated} us={}",
+                    started.elapsed().as_micros()
+                );
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+
+            // 3) 产品路径（--via-product "x|y"）：表达式求值 / HTCLIENT 守卫 /
+            //    锚点单击 / 事件等待全部走平台层 Win32InputFocuser；
+            //    探针只负责失焦循环与事后语义判决。E2E 统计以此为准。
+            if let Some((expr_x, expr_y)) = product_point.as_ref() {
+                use platform::win32::Win32InputFocuser;
+                use platform::{FocusPlan, FocusStep, InputFocuser, InputPointExpr};
+                let plan = FocusPlan {
+                    steps: vec![FocusStep::InputPointClick],
+                    anchor: None,
+                    anchor_bottom: None,
+                    input_point_expr: Some(InputPointExpr {
+                        x: expr_x.clone(),
+                        y: expr_y.clone(),
+                    }),
+                };
+                let report = Win32InputFocuser.focus_input(WindowHandle(root_value), &plan);
+                let verdict = unsafe { classify_after_click(root, pid, &automation) };
+                println!(
+                    "CORNER pt=product({expr_x}|{expr_y}) round={round} attempts={:?} outcome={} role={:?} name={:?} gti_focus={:?} caret_screen={:?} {} us={}",
+                    report.attempts,
+                    verdict.outcome,
+                    verdict.role,
+                    verdict.name,
+                    verdict.gti_focus_class,
+                    verdict.caret_screen,
+                    verdict.uia_note,
+                    started.elapsed().as_micros()
+                );
+                let paste_ok = verdict.caret_screen.is_some()
+                    || matches!(
+                        verdict.outcome,
+                        "composer_caret" | "editable_chat_no_caret" | "editable_focused_other"
+                    );
+                corner_paste_and_cleanup(
+                    &automation,
+                    spec,
+                    round,
+                    paste_marker,
+                    paste_ok,
+                    verdict.caret_screen,
+                    cleanup_backspaces,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                continue;
+            }
+
+            // 3a) 解析候选点（客户区物理像素）。
+            let mut rc = windows::Win32::Foundation::RECT::default();
+            unsafe { let _ = GetClientRect(root, &mut rc); }
+            let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+            let Some((bx, by)) = resolve_corner_point(spec, cw, ch) else {
+                println!("CORNER pt={spec} outcome=bad_point_spec");
+                break;
+            };
+
+            // 3.5) WM_NCHITTEST 守卫：角点常落在尺寸调整边框（用户实测：光标变
+            //      resize、点击被吞）。仅 HTCLIENT 才点；否则沿角向内缩 4px 重试。
+            let inward = if spec.starts_with("tl") {
+                (1, 1)
+            } else if spec.starts_with("tr") {
+                (-1, 1)
+            } else if spec.starts_with("br") {
+                (-1, -1)
+            } else {
+                (1, -1) // bl 与字面坐标
+            };
+            let (mut cx, mut cy) = (bx, by);
+            let mut screen = POINT { x: cx, y: cy };
+            let mut walk = String::new();
+            let mut clickable = false;
+            for step in 0..=6 {
+                screen = POINT { x: cx, y: cy };
+                unsafe { let _ = ClientToScreen(root, &mut screen); }
+                match unsafe { hit_test_client(root, (screen.x, screen.y)) } {
+                    Some(1) => {
+                        clickable = true;
+                        break;
+                    }
+                    other if step < 6 => {
+                        walk = format!("walk+{}", (step + 1) * 4);
+                        cx = (cx + inward.0 * 4).clamp(0, cw - 1);
+                        cy = (cy + inward.1 * 4).clamp(0, ch - 1);
+                        let _ = other;
+                    }
+                    other => {
+                        walk = format!("ht={other:?}");
+                        break;
+                    }
+                }
+            }
+            if !clickable {
+                println!("CORNER pt={spec} round={round} outcome=resize_border {walk}");
+                continue;
+            }
+            let owner = unsafe { WindowFromPoint(screen) };
+            if unsafe { GetAncestor(owner, GA_ROOT) } != unsafe { GetAncestor(root, GA_ROOT) } {
+                println!(
+                    "CORNER pt={spec} round={round} outcome=occluded screen=({},{})",
+                    screen.x, screen.y
+                );
+                continue;
+            }
+
+            // 4) 单击 + 即时判决。
+            click_screen_point(screen.x, screen.y);
+            std::thread::sleep(std::time::Duration::from_millis(settle_ms));
+            let verdict = unsafe { classify_after_click(root, pid, &automation) };
+            println!(
+                "CORNER pt={spec} round={round} asked=({bx},{by}) final=({cx},{cy}) {walk} screen=({},{}) outcome={} role={:?} name={:?} gti_focus={:?} caret_screen={:?} {} us={}",
+                screen.x,
+                screen.y,
+                verdict.outcome,
+                verdict.role,
+                verdict.name,
+                verdict.gti_focus_class,
+                verdict.caret_screen,
+                verdict.uia_note,
+                started.elapsed().as_micros()
+            );
+
+            let paste_ok = verdict.caret_screen.is_some()
+                || matches!(
+                    verdict.outcome,
+                    "composer_caret" | "editable_chat_no_caret" | "editable_focused_other"
+                );
+            corner_paste_and_cleanup(
+                &automation,
+                spec,
+                round,
+                paste_marker,
+                paste_ok,
+                verdict.caret_screen,
+                cleanup_backspaces,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+    println!("CORNER done");
+}
+
+/// 粘贴验证 + 探针自清理（产品路径与手点路径共用的收尾段）。
+/// 粘贴门禁由调用方按判决给出（caret 在目标内 / 可写 Edit 获焦非买家）。
+#[allow(clippy::too_many_arguments)]
+fn corner_paste_and_cleanup(
+    automation: &IUIAutomation,
+    spec: &str,
+    round: usize,
+    paste_marker: Option<&str>,
+    paste_ok: bool,
+    caret_screen: Option<(i32, i32)>,
+    cleanup_backspaces: u32,
+) {
+    if let Some(marker) = paste_marker {
+        if paste_ok {
+            let Some((_element, baseline)) = focused_value(automation) else {
+                println!("PASTE pt={spec} round={round} outcome=focused_unreadable");
+                return;
+            };
+            if !baseline.is_empty() && !baseline.contains(marker) {
+                println!(
+                    "PASTE pt={spec} round={round} outcome=draft_present_skip value={}",
+                    baseline.chars().take(40).collect::<String>()
+                );
+                return;
+            }
+            send_ctrl_v();
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            let after = focused_value(automation);
+            let hit = after
+                .as_ref()
+                .map(|(_, v)| v.contains(marker))
+                .unwrap_or(false);
+            println!(
+                "PASTE pt={spec} round={round} outcome={} value={}",
+                if hit { "hit_composer" } else { "miss" },
+                after
+                    .as_ref()
+                    .map(|(_, v)| v.chars().take(60).collect::<String>())
+                    .unwrap_or_default()
+            );
+            // 清理：确认落框才清。优先 UIA SetValue("")（零键盘事件），
+            // 失败再退 Ctrl+A + Backspace（焦点已验证时选区只在 composer 内）。
+            if hit {
+                use windows::Win32::UI::Accessibility::IUIAutomationValuePattern;
+                let mut cleaned = false;
+                if let Some((element, _)) = after.as_ref() {
+                    if let Ok(pattern) = unsafe {
+                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(
+                            UIA_ValuePatternId,
+                        )
+                    } {
+                        cleaned = unsafe { pattern.SetValue(&windows::core::BSTR::new()) }.is_ok();
+                    }
+                }
+                if !cleaned {
+                    // Ctrl+A(0x41/0x1E) + Backspace(0x08/0x0E)
+                    send_ctrl_chord_then_key(0x41, 0x1E, 0x08, 0x0E);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let cleaned_now = focused_value(automation)
+                    .map(|(_, v)| v.trim().is_empty())
+                    .unwrap_or(false);
+                println!("PASTE pt={spec} round={round} cleaned={cleaned_now}");
+            }
+            return;
+        }
+    }
+    // 探针自清理：caret 在目标内时 End + N×Backspace（删粘贴实验残留的
+    // 标记字符；用户原有草稿在前缀不受影响）。
+    if cleanup_backspaces > 0 {
+        if caret_screen.is_some() {
+            const VK_END: u16 = 0x23;
+            const VK_BACK: u16 = 0x08;
+            send_key_vk(VK_END);
+            for _ in 0..cleanup_backspaces {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                send_key_vk(VK_BACK);
+            }
+            println!("CLEANUP pt={spec} round={round} sent=end+{cleanup_backspaces}bs caret={caret_screen:?}");
+        } else {
+            println!("CLEANUP pt={spec} round={round} skipped=no_caret");
+        }
+    }
+}
+
 fn run_a11y_probe(
     hwnd: HWND,
     automation: &IUIAutomation,
@@ -1826,6 +2477,7 @@ fn run_click_only(
                 x_ratio: bx,
                 y_from_bottom,
             }),
+            input_point_expr: None,
         }
     } else {
         let mut point = windows::Win32::Foundation::POINT {
@@ -1843,6 +2495,7 @@ fn run_click_only(
             steps: vec![FocusStep::AnchorClick],
             anchor: Some(FocusAnchor { x_ratio, y_ratio }),
             anchor_bottom: None,
+            input_point_expr: None,
         }
     };
     let started = Instant::now();
@@ -1911,12 +2564,119 @@ fn dump_tree(automation: &IUIAutomation, hwnd: HWND) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--paste-element") {
+        let marker = args
+            .iter()
+            .position(|a| a == "--marker")
+            .and_then(|i| args.get(i + 1));
+        eprintln!(
+            "{}",
+            raw_snapshot::paste_rejection(marker.map(String::as_str))
+        );
+        std::process::exit(2);
+    }
+    // Semantic restore is an explicit action mode and must bypass the raw snapshot dispatcher.
+    if let Some(index) = args.iter().position(|arg| arg == "--semantic-probe") {
+        let value = args
+            .get(index + 1)
+            .and_then(|v| v.parse::<isize>().ok())
+            .expect("--semantic-probe 需要窗口句柄数字");
+        let automation = uia();
+        run_semantic_probe(HWND(value as *mut core::ffi::c_void), &automation);
+        return;
+    }
+    // Corner matrix is an explicit action mode: activation + border-area click +
+    // in-process semantic verdict. Optional paste stage requires --paste-marker.
+    if let Some(index) = args.iter().position(|arg| arg == "--corner-matrix") {
+        let value = args
+            .get(index + 1)
+            .and_then(|v| v.parse::<isize>().ok())
+            .expect("--corner-matrix 需要窗口句柄数字");
+        let points: Vec<String> = args
+            .iter()
+            .position(|arg| arg == "--points")
+            .and_then(|i| args.get(i + 1))
+            .map(|s| {
+                s.split([' ', ';'])
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                ["bl0", "bl2", "bl4", "tl0", "tl1", "tr0", "br0", "br2"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            });
+        let rounds = args
+            .iter()
+            .position(|arg| arg == "--rounds")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+        let settle = args
+            .iter()
+            .position(|arg| arg == "--settle")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(400);
+        let marker = args
+            .iter()
+            .position(|arg| arg == "--paste-marker")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        let defocus_peer = args
+            .iter()
+            .position(|arg| arg == "--defocus")
+            .and_then(|i| args.get(i + 1))
+            .map(|v| v == "peer")
+            .unwrap_or(false);
+        let cleanup_backspaces = args
+            .iter()
+            .position(|arg| arg == "--cleanup-backspaces")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let product_point = args
+            .iter()
+            .position(|arg| arg == "--via-product")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.split_once('|'))
+            .map(|(x, y)| (x.to_string(), y.to_string()));
+        run_corner_probe(
+            value,
+            &points,
+            rounds,
+            settle,
+            marker.as_deref(),
+            defocus_peer,
+            cleanup_backspaces,
+            product_point,
+        );
+        return;
+    }
+    if raw_snapshot::dispatch(&args) {
+        return;
+    }
+    // Old mutating batteries require an additional explicit opt-in. --hwnd now defaults to raw.
+    if !args.iter().any(|arg| arg == "--legacy-mutations")
+        && !args.iter().any(|arg| arg == "--list")
+    {
+        eprintln!("Use --raw-snapshot HWND (read-only), or explicitly opt into --legacy-mutations. Paste experiment is disabled.");
+        std::process::exit(2);
+    }
     let automation = uia();
 
     if args.iter().any(|arg| arg == "--list") {
         unsafe {
             let _ = EnumWindows(Some(list_top_window), LPARAM(0));
         }
+        return;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--semantic-probe") {
+        let value = args.get(index + 1).and_then(|v| v.parse::<isize>().ok()).expect("--semantic-probe 需要窗口句柄数字");
+        run_semantic_probe(HWND(value as *mut core::ffi::c_void), &automation);
         return;
     }
 
@@ -2160,6 +2920,7 @@ fn main() {
                 y_ratio: y,
             }),
             anchor_bottom: None,
+            input_point_expr: None,
         };
         let started = Instant::now();
         let report = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);

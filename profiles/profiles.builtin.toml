@@ -63,12 +63,22 @@ settle_ms = 150
 # 实测微信 4.0 对图片与视频的 CF_HDROP 都停在输入框，无需排除任何组合。
 paste_sends = { image = [], video = [], text = [], other = [] }
 # 实测：UIA 全子树扫描在微信 4.0 上耗 22~27ms 且候选数 0，跳过。
-focus_strategy = ["already", "anchor"]
+# 2026-09-05 实测新增 input_point 级（失焦恢复输入面）：点击窗口右下角内缩点，
+# composer（UIA class=mmui::ChatInputField）10/10 轮恢复键盘焦点；贴角 0px 会被
+# 尺寸调整边框吞掉（HTCLIENT 守卫已内建）。优先于旧比例锚点执行。
+focus_strategy = ["already", "input_point", "anchor"]
 
 # 微信 4.0 主窗口 1342x971 时输入框位于底部图标行之上、正文列中部偏右。
 [profiles.input_anchor]
 x_ratio = 0.66
 y_ratio = 0.85
+
+# 表达式点击点（2026-09-05 真机实测）：右下角内缩 8 逻辑像素（=12 物理像素@150%
+# DPI，在实测有效带 4~20 物理像素的中段）。用户设备版式不同可自行改写，
+# 变量 WINDOW_WIDTH/WINDOW_HEIGHT = 客户区逻辑宽高，实时求值。
+[profiles.input_point]
+x = "WINDOW_WIDTH - 8"
+y = "WINDOW_HEIGHT - 8"
 
 [profiles.formats]
 image = ["files", "png"]
@@ -102,7 +112,11 @@ settle_ms = 120
 # video × files 标为即发，图片得以走 files 的低成本路径。
 paste_sends = { image = [], video = ["files"], text = [], other = [] }
 # 实测：UIA 全子树扫描在千牛接待中心（CEF）上耗 83ms 且可写候选数 0，跳过。
-focus_strategy = ["already", "anchor"]
+# 2026-09-05 实测新增 input_point 级（失焦恢复输入面）：点击中栏输入框内部的
+# 表达式点后 caret 出现（9/10 轮），Ctrl+V 文本 marker 落框经截图复核成立；
+# 窗口四角/侧栏/面板 padding 的点击均不能恢复 composer（逐点证伪）。
+# caret_semantic 保留在前面：composer 已获焦时零动作直接确认，最快路径。
+focus_strategy = ["already", "caret_semantic", "input_point", "anchor"]
 
 # 千牛接待中心 1845x1200 时会话输入框在中栏下部；锚点必须落在中栏，
 # 右侧是「千牛工单」面板，点错会把焦点送进工单搜索框。
@@ -116,6 +130,14 @@ y_ratio = 0.787
 [profiles.input_anchor_bottom]
 x_ratio = 0.394
 y_from_bottom = 127
+
+# 表达式点击点（2026-09-05 真机实测）：中栏输入框内部、底边向上 75 逻辑像素
+# （=831 物理像素@150% DPI、实测 caret 复现带 780~860 的中部），x 取输入框
+# 中部（413 逻辑 = 620 物理实测点）。千牛的「输入面」不在窗口角落而在中栏，
+# x 必须给绝对值而非 WINDOW_WIDTH 比例——右侧是千牛工单面板，比例会漂进工单。
+[profiles.input_point]
+x = "413"
+y = "WINDOW_HEIGHT - 75"
 
 [profiles.formats]
 image = ["files", "png"]

@@ -924,6 +924,28 @@ if (click_count % 2) == 1 {
 - verified 语义修正：千牛 composer 的 ValuePattern 读回**不可用**（永不在树），verified 升级只能靠 settle=Observed/视觉证据；ValuePattern 读回仅对工单类表单 Edit 有效。
 - 环境事实补记：后台进程 SetForegroundWindow 被前台锁拒（AttachThreadInput 技巧解，置前后必须复核前台再点击）；2560×1600 全屏截图在读图工具中缩放显示（2000 宽），量取坐标须 ×1.28 换算物理（本轮最贵教训，对策=用已知物理坐标的裁剪放大图反推）。
 
+### D75 证据口径更正（2026-09-05，保留上述历史，不变更产品）
+
+- `525668` 是历史顶层 HWND，不是 composer 元素 ID。历史探针源码的候选枚举先于 SetFocus，但独立历史 dump 与手工点框/失活的严格时间顺序未被证明。
+- `--activate-dump` 本身没有 SetFocus，却调用窗口激活器；`--no-setfocus` 在该分支未读取，不能把它当无干扰快照。
+- 买家账号中的 marker 命中不是聊天 composer 成功。开发探针现已在任何 UIA 初始化/激活之前拒绝 `--paste-element`，空 marker 同样拒绝；禁用面积猜测落焦兜底。恢复注入须先有已识别 composer 与安全空草稿证明。
+- 当前千牛画像已经是 `already → anchor`，并无 UIA SetFocus 步。`already` 只核目标 pid 与可写 Edit/Document，不识别 composer；工单搜索框可满足这类谓词。
+- B8 只证明持续聚焦时直接粘贴可落框，没有跨失活/面板抢焦/再次激活实验，不能称完整产品链路证明。用户聊天时光标也不必然在 composer。
+- 产品 `verified` 是注入前就绪/焦点证据，不是粘贴后内容正确性的证明；settle=Observed 也不是 composer 身份证明。
+- 撤回“composer 永远不可见/结构性无解”的普遍断言：只在已测版本、provider、树视图、状态及采样预算内未识别。2026-09-05 只读 RawView 在后台接待中心枚举 164 节点（1255ms），前台保持不变；这也不支持“后台必塌到 8 节点”的无条件规律。进一步证据见 research/element-targeting-log.md 新增节。
+
+### D76 失焦恢复输入面：表达式点击点级 input_point（2026-09-05 真机落地）
+
+**实测结论**：
+- 「失焦→激活→composer 自恢复」不成立：SW_RESTORE+SetForegroundWindow、产品激活器、CEF WM_GETOBJECT a11y 唤醒，三种激活后 hwndCaret 均为空（激活只恢复顶层，不恢复内部输入面）。
+- 「点击恢复 composer」成立，但点必须落在**输入面内部**：千牛=中栏输入框内部（窗口四角/侧栏/面板 padding 逐点证伪；贴角点会被 Qt resize 边框按非客户区吞掉——WM_NCHITTEST 守卫必须）；微信=输入面板右下角内缩 4~20 物理像素（贴角 0px 失败）。
+- 身份证据：千牛点击后原生 caret 出现（CEF 树塌缩时 MSAA point 语义降级 role=10，caret 位置在输入框内仍是焦点证据）；微信无原生 caret，composer 以 UIA 可写 textfield（class=mmui::ChatInputField）证实——微信主窗口前台的 UIA 树是活的，推翻「微信全通道死」的旧概括（旧结论限独立聊天窗/聊天记录场景）。
+- 产品级 E2E（探针驱动产品 Win32InputFocuser：失焦→激活→InputPointClick→语义判决）：千牛 10/10 caret 恢复；微信 9/9 全闭环（焦点+Ctrl+V marker 读回+SetValue 清理；1 轮激活竞态安全跳过）。全程无 Enter、零发送、买家账号未动、每轮粘贴后即清理。
+
+**产品化**：画像新增 `[profiles.input_point]`（x/y 表达式）与聚焦级别 `input_point`；表达式支持 `WINDOW_WIDTH`/`WINDOW_HEIGHT` 变量与整数四则运算（客户区逻辑像素、原点=左上角、点击时按实时 DPI 换算、加载期校验）。「四角内缩」与「窗口内任意一点」是同一配置面，设备/版式差异由用户实测自调。内置：千牛 x=413 y=WINDOW_HEIGHT-75（输入框内部，x 不能用比例——右侧是工单面板）；微信 x=WINDOW_WIDTH-8 y=WINDOW_HEIGHT-8。click_anchor 增加 WM_NCHITTEST/HTCLIENT 守卫+向心内缩重试（全部几何共用）。顺序：千牛 already→caret_semantic→input_point→anchor；微信 already→input_point→anchor。
+- 已知边界：千牛 UIA 焦点元素是窗壳（无 ValuePattern），粘贴内容读回不可用，verified 仍只能靠 caret/settle/视觉证据；探针 paste 门禁=caret 在目标内或可写 Edit 获焦非买家账号。
+- 探针新增 --corner-matrix / --via-product / --paste-marker / --cleanup-backspaces（E2E 统计与自清理；清理只删本轮 marker，草稿保护=基线非空且不含 marker 时跳过）。
+
 
 
 

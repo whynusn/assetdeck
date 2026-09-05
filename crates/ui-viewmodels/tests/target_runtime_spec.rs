@@ -503,6 +503,7 @@ fn runtime_pastes_video_by_file_path_without_enter() {
                 ],
                 anchor: None,
                 anchor_bottom: None,
+                input_point_expr: None,
             }
         )],
         "激活后必须对同一目标做一次聚焦；该画像未声明策略故取三级缺省、未声明锚点故 anchor 为 None"
