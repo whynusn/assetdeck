@@ -66,9 +66,11 @@ settle_ms = 150
 # 实测微信 4.0 对图片与视频的 CF_HDROP 都停在输入框，无需排除任何组合。
 paste_sends = { image = [], video = [], text = [], other = [] }
 # 实测：UIA 全子树扫描在微信 4.0 上耗 22~27ms 且候选数 0，跳过。
-# 2026-09-05 实测：input_point 级（点击式聚焦机制）对本目标有效——点击窗口
-# 右下角内缩点，composer（UIA class=mmui::ChatInputField）10/10 轮恢复键盘
-# 焦点；贴角 0px 会被尺寸调整边框吞掉（HTCLIENT 守卫已内建）。优先于旧比例锚点。
+# 2026-09-05 生产日志（×5）：微信 4.x 激活时 mmui 会自动恢复输入框焦点，
+# already 级稳定命中（最快路径）；input_point/anchor 仅在焦点漂移（用户点过
+# 搜索框/气泡等）时接手，日常为不执行的兜底。input_point 见 2026-09-05 实测：
+# 右下角内缩点 10/10 轮恢复 composer（UIA class=mmui::ChatInputField）；
+# 贴角 0px 会被尺寸调整边框吞掉（HTCLIENT 守卫已内建）。
 focus_strategy = ["already", "input_point", "anchor"]
 
 # 微信 4.0 主窗口 1342x971 时输入框位于底部图标行之上、正文列中部偏右。
@@ -139,6 +141,10 @@ y_from_bottom = 127
 # caret 语义确认的身份声明（caret_semantic 级用）：点击输入框后原生 caret 所在点
 # 的 MSAA role/name。与缺省值相同，显式写出便于用户按自己的千牛变体改写
 # （其他 IM 的 caret 对象语义不同，在此声明，平台层不做 per-app 判断）。
+# 为什么这一级不可删：already 级看不到 composer（CEF 渲染进程 pid 与窗口进程
+# 不同，UIA 焦点元素永不是它），caret 语义是唯一能零动作证明「焦点已在输入框」
+# 的机制——客服手动回复后直接贴素材的高频场景全靠它，避免多余点击移动文字
+# 光标/扰动草稿；未命中时只是毫秒级只读探测。
 [profiles.caret_semantic]
 expected_role = 7
 expected_name = "编辑"
@@ -184,9 +190,10 @@ settle_ms = 120
 #   协商 Unsupported，管线报「无法承载」并连剪贴板都不写，不注入必落空的
 #   Ctrl+V。拼多多 v1 只适配图片素材。
 paste_sends = { image = [], video = [], text = [], other = [] }
-# 实测（focus_probe 三轮）：CEF 主窗口（Chrome_RenderWidgetHostHWND），激活后
-# 焦点停在根控件/浮动提示，UIA 全子树 editable=0；prop 条件变体 109~124ms。
-focus_strategy = ["already", "anchor"]
+# 实测（2026-09-05 生产日志 ×4）：CEF 主窗口，激活后焦点停在根控件/浮动提示，
+# already 级必然 Unavailable。点击式恢复用 input_point（与底部锚完全同点，
+# 生产实贴 3/4 verified），旧底部锚保留为后备。
+focus_strategy = ["already", "input_point", "anchor"]
 
 # 客服输入框锚点（1875x1185 客户区实测量取，2026-09-01）：文本区在会话列
 # 下部、工具栏图标行之下、黄色合规提示条之上，客户区比例 x 0.29~0.69 /
@@ -198,10 +205,19 @@ y_ratio = 0.92
 # D74 底部锚（2026-09-03 借号真机量取）：文本区在底边向上 55~150 物理像素
 # 之间（工具栏行之上、合规提示条之下），取带中心 ≈66 逻辑像素；x 沿用 0.49。
 # 注意：此值只在真机上做过几何量取，端到端实贴 E2E 因账号收回未跑（2026-09-04），
-# 用户侧拿到账号后需补一次受控实贴复核。
+# 用户侧拿到账号后需补一次受控实贴复核。——已补：2026-09-05 生产日志实贴
+# 4 次（3 次 verified=true），该点生产有效。
 [profiles.input_anchor_bottom]
 x_ratio = 0.49
 y_from_bottom = 66
+
+# 点击式聚焦机制（D76.3 同构迁移）：与底部锚完全同点（0.49×宽、底边向上
+# 66 逻辑像素），等价迁到统一表达式配置面，用户设备可自行微调。
+# 拼多多是 CEF 网页布局，x 随窗口宽度等比缩放（比例即实测行为），y 锚定底边。
+# 注意：拼多多实测无法以「边角点击」恢复焦点（D76.1），此点为输入框本体内部。
+[profiles.input_point]
+x = "WINDOW_WIDTH * 49 / 100"
+y = "WINDOW_HEIGHT - 66"
 
 [profiles.formats]
 image = ["files"]

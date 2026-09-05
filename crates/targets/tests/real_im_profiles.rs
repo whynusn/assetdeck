@@ -126,7 +126,8 @@ fn builtin_pdd_image_is_files_only_and_video_uncarriable() {
 }
 
 /// 拼多多聚焦实测与微信/千牛同构：UIA 可写候选 0（且 prop 变体 109~124ms），
-/// focus_strategy 裁掉 uia；锚点实测 (0.49, 0.92) 落在客服输入文本区中心。
+/// focus_strategy 裁掉 uia；D76.3 起点击式恢复走 input_point（与底部锚同点，
+/// 生产实贴 3/4 verified），旧锚保留为后备。
 #[test]
 fn builtin_pdd_focus_strategy_skips_uia_and_anchors_chat_input() {
     let set = load_profiles(BUILTIN, None).unwrap();
@@ -135,10 +136,15 @@ fn builtin_pdd_focus_strategy_skips_uia_and_anchors_chat_input() {
         pdd.focus_plan().steps,
         vec![
             platform::FocusStep::AlreadyEditable,
+            platform::FocusStep::InputPointClick,
             platform::FocusStep::AnchorClick
         ],
         "拼多多 UIA 候选为 0，uia 级别是纯损耗"
     );
+    let plan = pdd.focus_plan();
+    let point = plan.input_point_expr.expect("拼多多必须声明点击式聚焦坐标");
+    assert_eq!(point.x, "WINDOW_WIDTH * 49 / 100");
+    assert_eq!(point.y, "WINDOW_HEIGHT - 66");
     let anchor = pdd.focus_anchor().expect("拼多多必须声明输入框锚点");
     assert!((anchor.x_ratio - 0.49).abs() < f32::EPSILON);
     assert!((anchor.y_ratio - 0.92).abs() < f32::EPSILON);

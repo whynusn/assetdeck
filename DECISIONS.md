@@ -959,6 +959,13 @@ if (click_count % 2) == 1 {
 - **审计保持现状项（机制参数非目标差异）**：前台确认/聚焦 settle 上限、HTCLIENT 内缩步长、剪贴板重试间隔等 timing 常量；`VK_RETURN` 序列（D8 独立开关默认关）；「千牛包/.emo」是素材包格式语义而非目标路由。
 - **用户修改入口（默认值在哪改）**：用户画像 `profiles.user.toml`，与 settings.toml 同目录（库根优先、回退 exe 旁），按目标 id 字段级覆盖内置（含 input_point/caret_semantic/锚点/策略全字段）；坏画像自动退回内置不拖垮主程序。客户端 UI 现有目标选择/别名编辑（targets.json），画像表达式暂无 UI 编辑端点——如需再加。
 
+### D76.3 生产日志解读与同构收尾（2026-09-05，安装版 D76 构建 ×3 实例 ×9 次上框）
+
+- **链路画像**：微信 5/5 `already` 快路径（23~57ms，全 verified）——证实微信 4.x **激活时 mmui 自动恢复输入框焦点**，激活器 settle 等待使其稳定命中；`input_point`/`anchor` 降为焦点漂移兜底（用户点过搜索框/气泡时）。千牛 4/4 走 `already✗ → caret_semantic✗ → input_point✓`（settle Observed 9/12ms），失焦场景表达式点恢复生产有效。拼多多 4/4 走 `already✗ → anchor✓`（3 verified + 1 CappedOut 诚实降级）。
+- **caret_semantic 保留论证（回应「是否可删」）**：千牛的 `already` 看不到 composer——CEF 渲染进程 pid≠窗口进程 pid，UIA 焦点元素永不是它（日志 4 次 Unavailable 实证）；caret 语义是唯一能**零动作**证明「焦点已在输入框」的机制，覆盖「客服手动回复后直接贴素材」高频场景，避免多余点击移动文字光标/扰动草稿；未命中成本仅毫秒级只读探测。内置画像注释已写明防误删。
+- **拼多多 input_point 同构迁移**：`x="WINDOW_WIDTH * 49 / 100" y="WINDOW_HEIGHT - 66"`，与 D74 底部锚**逐像素等价**（生产实贴 3/4 verified 的同一点）；策略改 `already → input_point → anchor`（锚降为后备）。CEF 网页布局 x 随宽度等比缩放，故 x 用比例表达式（解析器整数运算可表达）。D74 遗留「E2E 未实贴复核」待办由生产日志关账。
+- **观察未实施项**：千牛 `verified=false` 为已知边界（composer 无 ValuePattern），候选升级方向=粘贴前后 caret 位置变化作弱证据（需真机验证）；进程内首次 UIA 查询 ~30ms 热身三份日志一致——UIA 实例线程本地缓存，后台线程预热无效、UI 线程预热仅省首次 15~30ms，判定不值得做。
+
 
 
 
