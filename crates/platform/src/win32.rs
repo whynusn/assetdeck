@@ -48,19 +48,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, PostThreadMessageW, SendMessageTimeoutW, SetCursorPos, SetForegroundWindow,
-    ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
-    WINEVENT_OUTOFCONTEXT, WM_QUIT,
+    ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
 };
 
 use crate::{
     caret_identity_matches, input_point_logical, AnchorGeometry, CaretSemanticIdentity,
     ClickEvidence, ClipboardPayload, ClipboardSink, EventWait, FileDialogs, FocusAttempt,
     FocusOutcome, FocusPlan, FocusReport, FocusStep, FocusWatcher, ForegroundObserver,
-    ForegroundRelation, InputFocuser, KeyInjector, PlatformError, ReadinessBlocker,
-    ReadinessProbe, ReadinessSignal, Result, WaitOutcome, WindowActivator, WindowEnumerator,
-    WindowEventSource, WindowHandle, WindowRect, WindowSnapshot, KEY_UP,
+    ForegroundRelation, InputFocuser, KeyInjector, PlatformError, ReadinessBlocker, ReadinessProbe,
+    ReadinessSignal, Result, WaitOutcome, WindowActivator, WindowEnumerator, WindowEventSource,
+    WindowHandle, WindowRect, WindowSnapshot, KEY_UP,
 };
 
 /// 原生文件对话框（IFileDialog）：ComCtl 版免 PowerShell 冷启动（消除数秒延迟）。
@@ -2171,7 +2170,10 @@ fn click_point_in_client(
             let y = (client_height - offset).clamp(8, (client_height - 8).max(8));
             (x, y)
         }
-        AnchorGeometry::ExprPoint { x_logical, y_logical } => {
+        AnchorGeometry::ExprPoint {
+            x_logical,
+            y_logical,
+        } => {
             // 求值已在计划级完成（逻辑像素），这里只按实时 DPI 放大并夹进客户区。
             // 允许贴边（角落内缩配方可能就是贴边点），只防越界点击到窗外。
             let scale = dpi.max(1) as f32 / 96.0;
@@ -2583,7 +2585,8 @@ mod tests {
 
     /// 表达式点击点的求值面：四则/变量/括号/一元负号可用，垃圾一律拒绝。
     #[test]
-    fn point_expr_supports_arithmetic_variables_and_rejects_garbage() {        assert_eq!(crate::eval_point_expr("8", 1920, 1080), Ok(8));
+    fn point_expr_supports_arithmetic_variables_and_rejects_garbage() {
+        assert_eq!(crate::eval_point_expr("8", 1920, 1080), Ok(8));
         assert_eq!(
             crate::eval_point_expr("WINDOW_WIDTH - 8", 1920, 1080),
             Ok(1912)
@@ -2592,7 +2595,10 @@ mod tests {
             crate::eval_point_expr("WINDOW_HEIGHT - 8", 1920, 1080),
             Ok(1072)
         );
-        assert_eq!(crate::eval_point_expr("WINDOW_WIDTH / 2", 1920, 1080), Ok(960));
+        assert_eq!(
+            crate::eval_point_expr("WINDOW_WIDTH / 2", 1920, 1080),
+            Ok(960)
+        );
         assert_eq!(
             crate::eval_point_expr("(WINDOW_WIDTH - 16) / 2", 1920, 1080),
             Ok(952)
@@ -2644,15 +2650,27 @@ mod tests {
             Some(7),
             Some("买家账号")
         ));
-        assert!(!caret_identity_matches(&default_identity, Some(10), Some("编辑")));
-        assert!(!caret_identity_matches(&default_identity, None, Some("编辑")));
+        assert!(!caret_identity_matches(
+            &default_identity,
+            Some(10),
+            Some("编辑")
+        ));
+        assert!(!caret_identity_matches(
+            &default_identity,
+            None,
+            Some("编辑")
+        ));
         assert!(!caret_identity_matches(&default_identity, Some(7), None));
 
         let custom = CaretSemanticIdentity {
             role: 42,
             name: "chat input".to_string(),
         };
-        assert!(caret_identity_matches(&custom, Some(42), Some("chat input")));
+        assert!(caret_identity_matches(
+            &custom,
+            Some(42),
+            Some("chat input")
+        ));
         assert!(!caret_identity_matches(&custom, Some(7), Some("编辑")));
     }
 

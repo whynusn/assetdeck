@@ -509,20 +509,18 @@ fn uia_focus_wechat_input(window: WindowHandle) -> Result<String, String> {
 }
 
 /// 探针侧独立的 UIA 实例获取（与 platform 内缓存互不影响）。
-fn platform_win32_automation() -> Result<
-    windows::Win32::UI::Accessibility::IUIAutomation,
-    String,
-> {
-    use windows::Win32::UI::Accessibility::CUIAutomation;
+fn platform_win32_automation() -> Result<windows::Win32::UI::Accessibility::IUIAutomation, String> {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
     };
+    use windows::Win32::UI::Accessibility::CUIAutomation;
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
     if !matches!(hr, S_OK | S_FALSE | RPC_E_CHANGED_MODE) {
         return Err(format!("CoInitializeEx failed: {hr:?}"));
     }
-    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.map_err(|e| e.to_string())
+    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+        .map_err(|e| e.to_string())
 }
 
 fn uia_search_from_focus(

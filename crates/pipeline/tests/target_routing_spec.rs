@@ -148,6 +148,8 @@ fn profile() -> Profile {
         ],
         input_anchor: None,
         input_anchor_bottom: None,
+        input_point: None,
+        caret_semantic: None,
     }
 }
 

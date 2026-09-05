@@ -179,7 +179,10 @@ pub struct InputPointConfig {
 
 impl From<InputPointConfig> for InputPointExpr {
     fn from(value: InputPointConfig) -> Self {
-        InputPointExpr { x: value.x, y: value.y }
+        InputPointExpr {
+            x: value.x,
+            y: value.y,
+        }
     }
 }
 
@@ -381,7 +384,9 @@ pub enum ProfileError {
     /// 空数组不能静默退化成「不聚焦」：那样 Ctrl+V 会落空且不留任何线索。
     #[error("目标画像 {0} 的 focus_strategy 为空数组(至少声明一个聚焦级别，或整体省略以取缺省)")]
     EmptyFocusStrategy(String),
-    #[error("目标画像 {profile} 的 focus_strategy 声明了 input_point 级但未提供 [profiles.input_point]")]
+    #[error(
+        "目标画像 {profile} 的 focus_strategy 声明了 input_point 级但未提供 [profiles.input_point]"
+    )]
     InputPointMissing { profile: String },
     #[error("目标画像 {profile} 的点击点表达式无效: {axis}={expr:?}: {reason}")]
     InvalidInputPointExpr {
@@ -963,10 +968,7 @@ x = "WINDOW_WIDTH - 8"
 y = "WINDOW_HEIGHT - 8"
 "#;
         let set = load_profiles(doc, None).unwrap();
-        let plan = set
-            .get(&TargetId::new("wechat"))
-            .unwrap()
-            .focus_plan();
+        let plan = set.get(&TargetId::new("wechat")).unwrap().focus_plan();
         assert_eq!(
             plan.steps,
             vec![

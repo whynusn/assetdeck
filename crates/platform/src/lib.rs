@@ -1,4 +1,4 @@
-﻿//! 平台抽象层：剪贴板写入、前台窗口观测、按键注入。
+//! 平台抽象层：剪贴板写入、前台窗口观测、按键注入。
 //!
 //! 分层纪律（spec/platform）：
 //! - 本文件为 trait 层，**零依赖、零条件编译门**——依赖方（pipeline/ui-viewmodels）
@@ -314,7 +314,10 @@ pub enum AnchorGeometry {
     BottomUp(BottomUpAnchor),
     /// 表达式点击点（已求值）：客户区逻辑坐标（原点=客户区左上角）。
     /// 表达式与变量见 [`InputPointExpr`]；现场记录只留求值结果，表达式本身在计划里。
-    ExprPoint { x_logical: i32, y_logical: i32 },
+    ExprPoint {
+        x_logical: i32,
+        y_logical: i32,
+    },
 }
 
 /// 一次「把键盘焦点送进聊天输入框」的结果。
@@ -429,7 +432,11 @@ pub struct InputPointExpr {
 /// 求值点击点表达式。支持 `+ - * /`（i32 整除）、括号、一元正负号、整数
 /// 字面量与变量 `WINDOW_WIDTH`/`WINDOW_HEIGHT`；除零、整数溢出、未知变量
 /// 与任何语法错误都返回 Err——画像加载期即拒绝，不把坏配置带进点击路径。
-pub fn eval_point_expr(expr: &str, window_width: i32, window_height: i32) -> std::result::Result<i32, String> {
+pub fn eval_point_expr(
+    expr: &str,
+    window_width: i32,
+    window_height: i32,
+) -> std::result::Result<i32, String> {
     struct Parser<'a> {
         bytes: &'a [u8],
         pos: usize,
@@ -509,9 +516,7 @@ pub fn eval_point_expr(expr: &str, window_width: i32, window_height: i32) -> std
                 Some(b'-') => {
                     self.pos += 1;
                     let value = self.unary()?;
-                    value
-                        .checked_neg()
-                        .ok_or_else(|| "整数溢出".to_string())
+                    value.checked_neg().ok_or_else(|| "整数溢出".to_string())
                 }
                 _ => self.atom(),
             }
@@ -531,11 +536,7 @@ pub fn eval_point_expr(expr: &str, window_width: i32, window_height: i32) -> std
                 }
                 Some(c) if c.is_ascii_digit() => {
                     let start = self.pos;
-                    while self
-                        .bytes
-                        .get(self.pos)
-                        .is_some_and(u8::is_ascii_digit)
-                    {
+                    while self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
                         self.pos += 1;
                     }
                     std::str::from_utf8(&self.bytes[start..self.pos])

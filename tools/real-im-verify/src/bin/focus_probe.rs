@@ -1547,7 +1547,9 @@ fn run_semantic_probe(hwnd: HWND, automation: &IUIAutomation) {
     use platform::{WindowActivator, WindowHandle};
     let pid = window_pid(hwnd);
     println!("semantic-probe target={:?} pid={pid} action=activate", hwnd);
-    let activated = Win32WindowActivator.activate(WindowHandle(hwnd.0 as isize), 200, 120).unwrap_or(false);
+    let activated = Win32WindowActivator
+        .activate(WindowHandle(hwnd.0 as isize), 200, 120)
+        .unwrap_or(false);
     if !activated || unsafe { GetForegroundWindow() } != hwnd {
         println!("semantic-probe candidate=none action=fallback reason=activation_failed");
         return;
@@ -1556,18 +1558,41 @@ fn run_semantic_probe(hwnd: HWND, automation: &IUIAutomation) {
     let mut candidates = Vec::new();
     let mut elements = Vec::new();
     uia_collect_editables(automation, hwnd, &mut candidates, Some(&mut elements));
-    let strict: Vec<usize> = candidates.iter().enumerate().filter_map(|(i, c)| {
-        let d = c.detail.to_ascii_lowercase();
-        (c.source == "uia" && d.contains("focusable=true") && (d.contains("name=\"编辑\"") || d.contains("name=\"edit\"")) && d.contains("pid=")).then_some(i)
-    }).collect();
-    println!("semantic-probe candidates={} strict={}", candidates.len(), strict.len());
-    if strict.len() != 1 { println!("semantic-probe action=none fallback=ambiguous_or_weak_evidence"); return; }
+    let strict: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let d = c.detail.to_ascii_lowercase();
+            (c.source == "uia"
+                && d.contains("focusable=true")
+                && (d.contains("name=\"编辑\"") || d.contains("name=\"edit\""))
+                && d.contains("pid="))
+            .then_some(i)
+        })
+        .collect();
+    println!(
+        "semantic-probe candidates={} strict={}",
+        candidates.len(),
+        strict.len()
+    );
+    if strict.len() != 1 {
+        println!("semantic-probe action=none fallback=ambiguous_or_weak_evidence");
+        return;
+    }
     let i = strict[0];
-    println!("semantic-probe candidate={} action=SetFocus evidence={:?}", i, candidates[i].detail);
+    println!(
+        "semantic-probe candidate={} action=SetFocus evidence={:?}",
+        i, candidates[i].detail
+    );
     let _ = unsafe { elements[i].SetFocus() };
     let verified = focused_element_info(automation, pid).0;
-    println!("semantic-probe post-focus caret_role=7 caret_name=编辑 target_root={} verified={verified}", unsafe { GetForegroundWindow() } == hwnd);
-    if !verified { println!("semantic-probe fallback=focus_not_verified"); }
+    println!(
+        "semantic-probe post-focus caret_role=7 caret_name=编辑 target_root={} verified={verified}",
+        unsafe { GetForegroundWindow() } == hwnd
+    );
+    if !verified {
+        println!("semantic-probe fallback=focus_not_verified");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1600,7 +1625,10 @@ fn resolve_corner_point(spec: &str, w: i32, h: i32) -> Option<(i32, i32)> {
         return Some((clamp_x(w - 1 - d), clamp_y(d)));
     }
     let (x, y) = spec.split_once(',')?;
-    Some((clamp_x(x.trim().parse().ok()?), clamp_y(y.trim().parse().ok()?)))
+    Some((
+        clamp_x(x.trim().parse().ok()?),
+        clamp_y(y.trim().parse().ok()?),
+    ))
 }
 
 struct CornerVerdict {
@@ -1613,11 +1641,7 @@ struct CornerVerdict {
 }
 
 /// 点击 settle 后的即时判决：前台 → GTI caret → MSAA point 语义 → UIA 焦点兜底。
-unsafe fn classify_after_click(
-    root: HWND,
-    pid: u32,
-    automation: &IUIAutomation,
-) -> CornerVerdict {
+unsafe fn classify_after_click(root: HWND, pid: u32, automation: &IUIAutomation) -> CornerVerdict {
     let empty = || CornerVerdict {
         outcome: "internal_error",
         role: None,
@@ -1677,7 +1701,13 @@ unsafe fn classify_after_click(
                                 "caret_text_role"
                             };
                             return finish_verdict(
-                                outcome, role, name, gti_focus_class, caret_screen, automation, root,
+                                outcome,
+                                role,
+                                name,
+                                gti_focus_class,
+                                caret_screen,
+                                automation,
+                                root,
                             );
                         }
                         return finish_verdict(
@@ -1730,7 +1760,15 @@ unsafe fn classify_after_click(
     } else {
         "foreground_only"
     };
-    finish_verdict(outcome, None, String::new(), gti_focus_class, caret_screen, automation, root)
+    finish_verdict(
+        outcome,
+        None,
+        String::new(),
+        gti_focus_class,
+        caret_screen,
+        automation,
+        root,
+    )
 }
 
 /// 附加 UIA 树注记：可写 Edit/Document 候选数 + 当前 has_focus 的名字（≤3 个）。
@@ -1788,8 +1826,8 @@ fn focused_value(automation: &IUIAutomation) -> Option<(IUIAutomationElement, St
 /// 合成 Ctrl+<vk>（scancode 路径）+ 单键。仅用于已确认 composer 的清理（Ctrl+A/Backspace）。
 fn send_ctrl_chord_then_key(chord_vk: u16, chord_sc: u16, key_vk: u16, key_sc: u16) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        KEYEVENTF_SCANCODE, VIRTUAL_KEY, VK_CONTROL,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
+        VIRTUAL_KEY, VK_CONTROL,
     };
     let make = |flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
                 vk: VIRTUAL_KEY,
@@ -1933,8 +1971,7 @@ fn run_corner_probe(
                             let _ = AttachThreadInput(my_tid, d_tid, false);
                         }
                         let deadline = Instant::now() + std::time::Duration::from_millis(600);
-                        while Instant::now() < deadline
-                            && unsafe { GetForegroundWindow() } == root
+                        while Instant::now() < deadline && unsafe { GetForegroundWindow() } == root
                         {
                             std::thread::sleep(std::time::Duration::from_millis(40));
                         }
@@ -1946,9 +1983,7 @@ fn run_corner_probe(
                     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
                     let _ = unsafe { ShowWindow(root, SW_MINIMIZE) };
                     let deadline = Instant::now() + std::time::Duration::from_millis(800);
-                    while Instant::now() < deadline
-                        && unsafe { GetForegroundWindow() } == root
-                    {
+                    while Instant::now() < deadline && unsafe { GetForegroundWindow() } == root {
                         std::thread::sleep(std::time::Duration::from_millis(40));
                     }
                 }
@@ -2016,7 +2051,9 @@ fn run_corner_probe(
 
             // 3a) 解析候选点（客户区物理像素）。
             let mut rc = windows::Win32::Foundation::RECT::default();
-            unsafe { let _ = GetClientRect(root, &mut rc); }
+            unsafe {
+                let _ = GetClientRect(root, &mut rc);
+            }
             let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
             let Some((bx, by)) = resolve_corner_point(spec, cw, ch) else {
                 println!("CORNER pt={spec} outcome=bad_point_spec");
@@ -2040,7 +2077,9 @@ fn run_corner_probe(
             let mut clickable = false;
             for step in 0..=6 {
                 screen = POINT { x: cx, y: cy };
-                unsafe { let _ = ClientToScreen(root, &mut screen); }
+                unsafe {
+                    let _ = ClientToScreen(root, &mut screen);
+                }
                 match unsafe { hit_test_client(root, (screen.x, screen.y)) } {
                     Some(1) => {
                         clickable = true;
@@ -2155,9 +2194,7 @@ fn corner_paste_and_cleanup(
                 let mut cleaned = false;
                 if let Some((element, _)) = after.as_ref() {
                     if let Ok(pattern) = unsafe {
-                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(
-                            UIA_ValuePatternId,
-                        )
+                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                     } {
                         cleaned = unsafe { pattern.SetValue(&windows::core::BSTR::new()) }.is_ok();
                     }
@@ -2678,7 +2715,10 @@ fn main() {
     }
 
     if let Some(index) = args.iter().position(|arg| arg == "--semantic-probe") {
-        let value = args.get(index + 1).and_then(|v| v.parse::<isize>().ok()).expect("--semantic-probe 需要窗口句柄数字");
+        let value = args
+            .get(index + 1)
+            .and_then(|v| v.parse::<isize>().ok())
+            .expect("--semantic-probe 需要窗口句柄数字");
         run_semantic_probe(HWND(value as *mut core::ffi::c_void), &automation);
         return;
     }
