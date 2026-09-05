@@ -946,6 +946,12 @@ if (click_count % 2) == 1 {
 - 已知边界：千牛 UIA 焦点元素是窗壳（无 ValuePattern），粘贴内容读回不可用，verified 仍只能靠 caret/settle/视觉证据；探针 paste 门禁=caret 在目标内或可写 Edit 获焦非买家账号。
 - 探针新增 --corner-matrix / --via-product / --paste-marker / --cleanup-backspaces（E2E 统计与自清理；清理只删本轮 marker，草稿保护=基线非空且不含 marker 时跳过）。
 
+### D76.1 概念动作抽象定稿 + 千牛「边角内缩」主张复测（2026-09-05，用户评审后修正）
+
+**抽象修正（用户指令）**：把具体行为（「角落点击恢复输入框聚焦」）抽象为概念动作「**把焦点放入目标应用的输入框**」。这一直是代码的既有边界：`InputFocuser` trait（概念动作）→ `FocusStep` 值（可选机制）→ `focus_strategy` 画像数据（哪些机制对哪些目标有效=观测事实）。符合 Rust 组合式设计：trait 定语义边界、机制是策略值而非 per-app 分支、目标差异全部落在数据里。拼多多是例证——实测**无法**以任何点击恢复焦点，其画像只是不声明 input_point/anchor 之外的东西，零代码差异。已按此重写 `InputPointExpr`/`FocusStep::InputPointClick`/内置画像注释的文档语态（机制语言→概念语言）。
+
+**千牛边角主张复测（与用户口头模型冲突，按数据处理）**：用户主张千牛与微信同构=「窗口左下角内缩即有效」。本机复测 `bl8/bl10/bl12/bl16` ×2 轮（peer 失焦、settle 2000ms、HTCLIENT 确证）= **8/8 foreground_only**；连同此前 bl4~bl20 与四角极限点，窗口左下角区域累计 30+ 轮未复现。本机有效点维持实测结论=中栏输入框本体内部（x=413, y=WINDOW_HEIGHT-75）。两模型并不互斥于设计：有效点是画像数据，用户机型若边角有效，用户画像两行表达式覆盖即可（`x="8" y="WINDOW_HEIGHT - 8"`），已在内置画像注释中写明切换方法；待用户在自己机型上用 `focus_probe --corner-matrix <hwnd> --points "bl8 bl12" --rounds 3 --defocus peer` 实测后回填。
+
 
 
 

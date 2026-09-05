@@ -36,6 +36,9 @@
 # 自动进入）保留比例锚，量取前不动。
 #
 # focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "anchor"]。
+# 概念动作是「把焦点放入目标应用的输入框」；级别=可选用的机制清单，哪个机制
+# 对哪个目标有效是**观测事实数据**，不是代码分支——拼多多实测无法以任何点击
+# 恢复焦点，其画像就只有 ["already", "anchor"]，零代码差异。
 # 微信 / 千牛显式去掉 "uia"：实测这两个目标的 UIA 子树里可写 Edit/Document 候选数为 0
 # （微信 descendant count=2、千牛 91 个全不可写），该级别必然失败，白付 22~83ms。
 # pdd 2026-09-01 真机实测同样裁掉 "uia"（editable=0，且 prop 条件变体 109~124ms，
@@ -63,9 +66,9 @@ settle_ms = 150
 # 实测微信 4.0 对图片与视频的 CF_HDROP 都停在输入框，无需排除任何组合。
 paste_sends = { image = [], video = [], text = [], other = [] }
 # 实测：UIA 全子树扫描在微信 4.0 上耗 22~27ms 且候选数 0，跳过。
-# 2026-09-05 实测新增 input_point 级（失焦恢复输入面）：点击窗口右下角内缩点，
-# composer（UIA class=mmui::ChatInputField）10/10 轮恢复键盘焦点；贴角 0px 会被
-# 尺寸调整边框吞掉（HTCLIENT 守卫已内建）。优先于旧比例锚点执行。
+# 2026-09-05 实测：input_point 级（点击式聚焦机制）对本目标有效——点击窗口
+# 右下角内缩点，composer（UIA class=mmui::ChatInputField）10/10 轮恢复键盘
+# 焦点；贴角 0px 会被尺寸调整边框吞掉（HTCLIENT 守卫已内建）。优先于旧比例锚点。
 focus_strategy = ["already", "input_point", "anchor"]
 
 # 微信 4.0 主窗口 1342x971 时输入框位于底部图标行之上、正文列中部偏右。
@@ -73,9 +76,10 @@ focus_strategy = ["already", "input_point", "anchor"]
 x_ratio = 0.66
 y_ratio = 0.85
 
-# 表达式点击点（2026-09-05 真机实测）：右下角内缩 8 逻辑像素（=12 物理像素@150%
-# DPI，在实测有效带 4~20 物理像素的中段）。用户设备版式不同可自行改写，
-# 变量 WINDOW_WIDTH/WINDOW_HEIGHT = 客户区逻辑宽高，实时求值。
+# 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是右下角
+# 内缩 8 逻辑像素（=12 物理像素@150% DPI，实测有效带 4~20 物理像素的中段）。
+# 你的设备版式若不同，直接改写表达式（变量 WINDOW_WIDTH/WINDOW_HEIGHT =
+# 客户区逻辑宽高，实时求值；四角内缩与窗口内任意一点是同一配置面）。
 [profiles.input_point]
 x = "WINDOW_WIDTH - 8"
 y = "WINDOW_HEIGHT - 8"
@@ -112,10 +116,11 @@ settle_ms = 120
 # video × files 标为即发，图片得以走 files 的低成本路径。
 paste_sends = { image = [], video = ["files"], text = [], other = [] }
 # 实测：UIA 全子树扫描在千牛接待中心（CEF）上耗 83ms 且可写候选数 0，跳过。
-# 2026-09-05 实测新增 input_point 级（失焦恢复输入面）：点击中栏输入框内部的
-# 表达式点后 caret 出现（9/10 轮），Ctrl+V 文本 marker 落框经截图复核成立；
-# 窗口四角/侧栏/面板 padding 的点击均不能恢复 composer（逐点证伪）。
-# caret_semantic 保留在前面：composer 已获焦时零动作直接确认，最快路径。
+# 2026-09-05 实测：input_point 级（点击式聚焦机制）对本目标有效，但**有效点
+# 不是窗口边角**——左下角内缩 8~16 物理像素 ×8 轮、四角极限点 ×16 轮均不能
+# 恢复 composer（左下角是原生侧栏），只有点进中栏输入框本体内部才出 caret
+#（9/10 轮 + 粘贴截图复核）。caret_semantic 保留在前面：composer 已获焦时
+# 零动作直接确认，最快路径。
 focus_strategy = ["already", "caret_semantic", "input_point", "anchor"]
 
 # 千牛接待中心 1845x1200 时会话输入框在中栏下部；锚点必须落在中栏，
@@ -131,10 +136,12 @@ y_ratio = 0.787
 x_ratio = 0.394
 y_from_bottom = 127
 
-# 表达式点击点（2026-09-05 真机实测）：中栏输入框内部、底边向上 75 逻辑像素
-# （=831 物理像素@150% DPI、实测 caret 复现带 780~860 的中部），x 取输入框
-# 中部（413 逻辑 = 620 物理实测点）。千牛的「输入面」不在窗口角落而在中栏，
-# x 必须给绝对值而非 WINDOW_WIDTH 比例——右侧是千牛工单面板，比例会漂进工单。
+# 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是中栏
+# 输入框内部（底边向上 75 逻辑像素 = 831 物理像素@150% DPI、实测 caret 复现带
+# 780~860 的中部；x 取输入框中部 413 逻辑 = 620 物理实测点）。x 必须给绝对值
+# 而非窗口比例——右侧是「千牛工单」面板，比例会漂进工单；左下角边角内缩在本机
+# 实测无效（见 focus_strategy 注释）。你的机型若实测边角有效，改成
+# x="8" y="WINDOW_HEIGHT - 8" 即可，无需改代码。
 [profiles.input_point]
 x = "413"
 y = "WINDOW_HEIGHT - 75"
