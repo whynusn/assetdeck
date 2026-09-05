@@ -952,6 +952,13 @@ if (click_count % 2) == 1 {
 
 **千牛边角主张复测（与用户口头模型冲突，按数据处理）**：用户主张千牛与微信同构=「窗口左下角内缩即有效」。本机复测 `bl8/bl10/bl12/bl16` ×2 轮（peer 失焦、settle 2000ms、HTCLIENT 确证）= **8/8 foreground_only**；连同此前 bl4~bl20 与四角极限点，窗口左下角区域累计 30+ 轮未复现。本机有效点维持实测结论=中栏输入框本体内部（x=413, y=WINDOW_HEIGHT-75）。两模型并不互斥于设计：有效点是画像数据，用户机型若边角有效，用户画像两行表达式覆盖即可（`x="8" y="WINDOW_HEIGHT - 8"`），已在内置画像注释中写明切换方法；待用户在自己机型上用 `focus_probe --corner-matrix <hwnd> --points "bl8 bl12" --rounds 3 --defocus peer` 实测后回填。
 
+### D76.2 组合式设计审计：caret 身份数据化 + 微信专属死代码迁出（2026-09-05，用户指令）
+
+- **修复一（caret 身份硬编码）**：`native_caret_semantic` 原在平台层写死 `role==7 && name=="编辑"`（千牛专属身份）。改为 `FocusPlan.caret_identity: Option<CaretSemanticIdentity>` + 画像 `[profiles.caret_semantic]`（expected_role/expected_name），平台层零 per-app 判断；缺省=千牛校准值，旧画像零行为变化。谓词抽纯函数 `caret_identity_matches` 附单测。
+- **修复二（微信专属死代码）**：`platform::uia_focus_wechat_input`（找「文件传输助手」会话+微信输入框）全仓零产品调用方——连同伴搜索 helper 与 `WECHAT_SESSION_SWITCH_CAP_MS` 从 platform 迁入 real-im-verify 探针（dev 代码归 dev 工具，平台层只留通用能力）。
+- **审计保持现状项（机制参数非目标差异）**：前台确认/聚焦 settle 上限、HTCLIENT 内缩步长、剪贴板重试间隔等 timing 常量；`VK_RETURN` 序列（D8 独立开关默认关）；「千牛包/.emo」是素材包格式语义而非目标路由。
+- **用户修改入口（默认值在哪改）**：用户画像 `profiles.user.toml`，与 settings.toml 同目录（库根优先、回退 exe 旁），按目标 id 字段级覆盖内置（含 input_point/caret_semantic/锚点/策略全字段）；坏画像自动退回内置不拖垮主程序。客户端 UI 现有目标选择/别名编辑（targets.json），画像表达式暂无 UI 编辑端点——如需再加。
+
 
 
 

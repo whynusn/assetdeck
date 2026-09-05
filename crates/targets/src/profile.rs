@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use platform::{eval_point_expr, BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep, InputPointExpr};
+use platform::{
+    eval_point_expr, BottomUpAnchor, CaretSemanticIdentity, FocusAnchor, FocusPlan, FocusStep,
+    InputPointExpr,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -180,6 +183,26 @@ impl From<InputPointConfig> for InputPointExpr {
     }
 }
 
+/// 「caret 语义确认」机制的身份声明（可反序列化镜像，见 `platform::CaretSemanticIdentity`）。
+///
+/// 缺省（画像不声明 `[profiles.caret_semantic]`）= 千牛 9.33 真机校准值
+/// role 7 / name 编辑；caret 对象语义不同的目标在此声明自己的期望值，
+/// 平台层不做 per-app 判断。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaretSemanticConfig {
+    pub expected_role: i32,
+    pub expected_name: String,
+}
+
+impl From<CaretSemanticConfig> for CaretSemanticIdentity {
+    fn from(value: CaretSemanticConfig) -> Self {
+        CaretSemanticIdentity {
+            role: value.expected_role,
+            name: value.expected_name,
+        }
+    }
+}
+
 /// 聚焦级别的可反序列化镜像（`platform::FocusStep` 在 trait 层零依赖，不能引入 serde）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +280,9 @@ pub struct Profile {
     /// 表达式点击点：`focus_strategy` 含 `input_point` 级时必填；坐标模型见
     /// [`InputPointConfig`]。
     pub input_point: Option<InputPointConfig>,
+    /// caret 语义确认的身份声明：`focus_strategy` 含 `caret_semantic` 级时生效；
+    /// 未声明取缺省（千牛校准值 role 7/编辑）。
+    pub caret_semantic: Option<CaretSemanticConfig>,
 }
 
 impl Profile {
@@ -277,6 +303,7 @@ impl Profile {
             input_anchor: None,
             input_anchor_bottom: None,
             input_point: None,
+            caret_semantic: None,
         }
     }
 
@@ -302,6 +329,7 @@ impl Profile {
             anchor: self.focus_anchor(),
             anchor_bottom: self.input_anchor_bottom.map(BottomUpAnchor::from),
             input_point_expr: self.input_point.clone().map(InputPointExpr::from),
+            caret_identity: self.caret_semantic.clone().map(CaretSemanticIdentity::from),
         }
     }
 }
@@ -387,6 +415,7 @@ struct ProfilePatch {
     input_anchor: Option<InputAnchor>,
     input_anchor_bottom: Option<InputAnchorBottom>,
     input_point: Option<InputPointConfig>,
+    caret_semantic: Option<CaretSemanticConfig>,
 }
 
 /// 合并随版本发布的内置画像与用户画像。用户画像按 id 做字段级覆盖。
@@ -491,6 +520,9 @@ fn merge_patch(base: &mut ProfilePatch, overlay: ProfilePatch) {
     if overlay.input_point.is_some() {
         base.input_point = overlay.input_point;
     }
+    if overlay.caret_semantic.is_some() {
+        base.caret_semantic = overlay.caret_semantic;
+    }
 }
 
 fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileError> {
@@ -572,6 +604,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         input_anchor: patch.input_anchor,
         input_anchor_bottom: patch.input_anchor_bottom,
         input_point: patch.input_point,
+        caret_semantic: patch.caret_semantic,
     })
 }
 
@@ -1012,6 +1045,40 @@ y = "WINDOW_HEIGHT - 60"
             .expect("用户覆写后表达式必须还在计划里");
         assert_eq!(point.x, "300");
         assert_eq!(point.y, "WINDOW_HEIGHT - 60");
+    }
+
+    /// caret 身份声明进计划：声明则带值，未声明为 None（平台层取缺省千牛校准值）。
+    #[test]
+    fn caret_semantic_config_is_parsed_into_focus_plan() {
+        let doc = r#"
+[[profiles]]
+id = "demo"
+label = "演示"
+focus_strategy = ["caret_semantic"]
+
+[profiles.caret_semantic]
+expected_role = 42
+expected_name = "chat input"
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let plan = set.get(&TargetId::new("demo")).unwrap().focus_plan();
+        let identity = plan
+            .caret_identity
+            .expect("声明了 caret_semantic 级就必须把身份带进计划");
+        assert_eq!(identity.role, 42);
+        assert_eq!(identity.name, "chat input");
+
+        let plain = r#"
+[[profiles]]
+id = "plain"
+label = "缺省身份"
+"#;
+        let set = load_profiles(plain, None).unwrap();
+        let plan = set.get(&TargetId::new("plain")).unwrap().focus_plan();
+        assert!(
+            plan.caret_identity.is_none(),
+            "未声明 caret_semantic 时保持 None，平台层取缺省（兼容旧画像）"
+        );
     }
 
     #[test]

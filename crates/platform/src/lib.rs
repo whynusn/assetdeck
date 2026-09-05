@@ -595,6 +595,39 @@ pub fn input_point_logical(
     ))
 }
 
+/// 「caret 语义确认」机制的身份谓词（画像数据，非代码分支）。
+///
+/// `FocusStep::CaretSemantic` 用它判定「原生 caret 所在处是否为聊天输入框」：
+/// 读 caret 屏幕点的 MSAA role/name，与这里声明的期望值比对。缺省值是千牛
+/// 9.33 的真机校准（role=7 CARET、name=编辑）；其他目标的 caret 对象语义
+/// 不同（微信无原生 caret、Telegram 未测），由画像 `[profiles.caret_semantic]`
+/// 声明，而不是往平台层里写 per-app 判断。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaretSemanticIdentity {
+    /// 期望的 MSAA 角色（`AccessibleObjectFromPoint` 返回的 i4 role）。
+    pub role: i32,
+    /// 期望的 MSAA 名称（精确匹配）。
+    pub name: String,
+}
+
+impl Default for CaretSemanticIdentity {
+    fn default() -> Self {
+        Self {
+            role: 7,
+            name: "编辑".to_string(),
+        }
+    }
+}
+
+/// 身份谓词的纯函数形态（可单测）：caret 点读到的 role/name 是否匹配画像声明。
+pub fn caret_identity_matches(
+    identity: &CaretSemanticIdentity,
+    role: Option<i32>,
+    name: Option<&str>,
+) -> bool {
+    role == Some(identity.role) && name.map(|n| n == identity.name).unwrap_or(false)
+}
+
 /// 一次聚焦尝试的完整计划：按 `steps` 顺序降级，直到某级别被验证成功。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FocusPlan {
@@ -605,6 +638,8 @@ pub struct FocusPlan {
     /// 表达式点击点：`steps` 含 [`FocusStep::InputPointClick`] 且本字段存在时，
     /// 该级对求值点做单次左键单击（定位模型见 [`InputPointExpr`]）。
     pub input_point_expr: Option<InputPointExpr>,
+    /// `FocusStep::CaretSemantic` 的身份谓词；None = 缺省（千牛校准值 role 7/编辑）。
+    pub caret_identity: Option<CaretSemanticIdentity>,
 }
 
 /// 聊天输入框焦点获取端。

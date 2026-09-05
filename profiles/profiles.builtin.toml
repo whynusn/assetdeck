@@ -136,6 +136,13 @@ y_ratio = 0.787
 x_ratio = 0.394
 y_from_bottom = 127
 
+# caret 语义确认的身份声明（caret_semantic 级用）：点击输入框后原生 caret 所在点
+# 的 MSAA role/name。与缺省值相同，显式写出便于用户按自己的千牛变体改写
+# （其他 IM 的 caret 对象语义不同，在此声明，平台层不做 per-app 判断）。
+[profiles.caret_semantic]
+expected_role = 7
+expected_name = "编辑"
+
 # 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是中栏
 # 输入框内部（底边向上 75 逻辑像素 = 831 物理像素@150% DPI、实测 caret 复现带
 # 780~860 的中部；x 取输入框中部 413 逻辑 = 620 物理实测点）。x 必须给绝对值

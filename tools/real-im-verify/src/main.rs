@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use platform::win32::{uia_focus_debug, uia_focus_wechat_input, uia_read_visible_text};
+use platform::win32::{uia_focus_debug, uia_read_visible_text};
 use platform::win32::{
     Win32Clipboard, Win32Focus, Win32ForegroundObserver, Win32Injector, Win32InputFocuser,
     Win32Readiness, Win32WindowActivator, Win32WindowEnumerator, Win32WindowEvents,
@@ -437,6 +437,144 @@ fn print_focus_debug(debug: String, quiet: bool) {
         return;
     }
     println!("{}", debug.lines().take(7).collect::<Vec<_>>().join("\n"));
+}
+
+// ---------------------------------------------------------------------------
+// 微信会话切换（dev 电池专用，自 `platform` 迁入）：
+// 平台层只保留通用能力；「文件传输助手」是开发验证的专属约定，不属于产品
+// 目标路由，因此连同伴搜索 helper 一起收进本工具。
+// ---------------------------------------------------------------------------
+
+/// 切换微信会话后**最多**等输入区重建多久。
+const WECHAT_SESSION_SWITCH_CAP_MS: u64 = 400;
+
+/// 在目标窗口内选择「文件传输助手」并把焦点移到微信聊天输入框。
+fn uia_focus_wechat_input(window: WindowHandle) -> Result<String, String> {
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, UIA_EditControlTypeId,
+        UIA_InvokePatternId, UIA_SelectionItemPatternId,
+    };
+    let automation = platform_win32_automation()?;
+    let mut raw_process_id = 0u32;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            windows::Win32::Foundation::HWND(window.0 as *mut core::ffi::c_void),
+            Some(&mut raw_process_id),
+        )
+    };
+    let target_process_id = i32::try_from(raw_process_id).unwrap_or(-1);
+
+    let contact = uia_search_from_focus(&automation, target_process_id, |element| {
+        unsafe { element.CurrentName() }
+            .map(|name| name.to_string().contains("文件传输助手"))
+            .unwrap_or(false)
+    })?
+    .ok_or_else(|| "未找到微信「文件传输助手」会话项".to_string())?;
+
+    // 先订阅再动作：切会话会让微信重建输入区，订阅必须早于 Select/Invoke。
+    let mut surface = Win32WindowEvents.await_input_surface(window);
+    let mut selected = false;
+    if let Ok(pattern) = unsafe {
+        contact.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+    } {
+        unsafe { pattern.Select() }.map_err(|e| e.to_string())?;
+        selected = true;
+    } else if let Ok(pattern) =
+        unsafe { contact.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
+    {
+        unsafe { pattern.Invoke() }.map_err(|e| e.to_string())?;
+        selected = true;
+    }
+    if !selected {
+        return Err("微信「文件传输助手」不支持 UIA 选择".to_string());
+    }
+
+    let _ = surface.wait(WECHAT_SESSION_SWITCH_CAP_MS);
+    let edit = uia_search_from_focus(&automation, target_process_id, |element| {
+        let Ok(control_type) = (unsafe { element.CurrentControlType() }) else {
+            return false;
+        };
+        let class_name = unsafe { element.CurrentClassName() }
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        control_type == UIA_EditControlTypeId
+            && (class_name.contains("ChatInputField") || class_name.contains("Input"))
+    })?
+    .ok_or_else(|| "选择会话后未找到微信聊天输入框".to_string())?;
+    let name = unsafe { edit.CurrentName() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    unsafe { edit.SetFocus() }.map_err(|e| e.to_string())?;
+    Ok(format!("focused={name} selected_contact=true"))
+}
+
+/// 探针侧独立的 UIA 实例获取（与 platform 内缓存互不影响）。
+fn platform_win32_automation() -> Result<
+    windows::Win32::UI::Accessibility::IUIAutomation,
+    String,
+> {
+    use windows::Win32::UI::Accessibility::CUIAutomation;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+    if !matches!(hr, S_OK | S_FALSE | RPC_E_CHANGED_MODE) {
+        return Err(format!("CoInitializeEx failed: {hr:?}"));
+    }
+    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.map_err(|e| e.to_string())
+}
+
+fn uia_search_from_focus(
+    automation: &windows::Win32::UI::Accessibility::IUIAutomation,
+    target_process_id: i32,
+    predicate: impl Fn(&windows::Win32::UI::Accessibility::IUIAutomationElement) -> bool,
+) -> Result<Option<windows::Win32::UI::Accessibility::IUIAutomationElement>, String> {
+    let walker = unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
+    let focused = unsafe { automation.GetFocusedElement() }.map_err(|e| e.to_string())?;
+    let mut current = focused;
+    for _ in 0..8 {
+        if unsafe { current.CurrentProcessId() }.unwrap_or(-1) != target_process_id {
+            break;
+        }
+        if let Some(found) = uia_search_subtree(&walker, &current, 0, &predicate)? {
+            return Ok(Some(found));
+        }
+        let parent = match unsafe { walker.GetParentElement(&current) } {
+            Ok(parent) => parent,
+            Err(_) => break,
+        };
+        current = parent;
+    }
+    Ok(None)
+}
+
+fn uia_search_subtree(
+    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+    current: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+    depth: u8,
+    predicate: &impl Fn(&windows::Win32::UI::Accessibility::IUIAutomationElement) -> bool,
+) -> Result<Option<windows::Win32::UI::Accessibility::IUIAutomationElement>, String> {
+    if predicate(current) {
+        return Ok(Some(current.clone()));
+    }
+    if depth >= 6 {
+        return Ok(None);
+    }
+    let mut child = match unsafe { walker.GetFirstChildElement(current) } {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    for _ in 0..200 {
+        if let Some(found) = uia_search_subtree(walker, &child, depth + 1, predicate)? {
+            return Ok(Some(found));
+        }
+        child = match unsafe { walker.GetNextSiblingElement(&child) } {
+            Ok(next) => next,
+            Err(_) => return Ok(None),
+        };
+    }
+    Ok(None)
 }
 
 fn selection_key_for(choice: &TargetChoice) -> String {

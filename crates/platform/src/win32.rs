@@ -20,10 +20,8 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationSelectionItemPattern, IUIAutomationTreeWalker, IUIAutomationValuePattern,
-    TreeScope_Descendants, UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_InvokePatternId,
-    UIA_SelectionItemPatternId, UIA_TextPatternId, UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationValuePattern, TreeScope_Descendants,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, GlobalFree, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
@@ -57,12 +55,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{
-    input_point_logical, AnchorGeometry, ClickEvidence, ClipboardPayload, ClipboardSink,
-    EventWait, FileDialogs, FocusAttempt, FocusOutcome, FocusPlan, FocusReport, FocusStep,
-    FocusWatcher, ForegroundObserver, ForegroundRelation, InputFocuser, KeyInjector,
-    PlatformError, ReadinessBlocker, ReadinessProbe, ReadinessSignal, Result, WaitOutcome,
-    WindowActivator, WindowEnumerator, WindowEventSource, WindowHandle, WindowRect,
-    WindowSnapshot, KEY_UP,
+    caret_identity_matches, input_point_logical, AnchorGeometry, CaretSemanticIdentity,
+    ClickEvidence, ClipboardPayload, ClipboardSink, EventWait, FileDialogs, FocusAttempt,
+    FocusOutcome, FocusPlan, FocusReport, FocusStep, FocusWatcher, ForegroundObserver,
+    ForegroundRelation, InputFocuser, KeyInjector, PlatformError, ReadinessBlocker,
+    ReadinessProbe, ReadinessSignal, Result, WaitOutcome, WindowActivator, WindowEnumerator,
+    WindowEventSource, WindowHandle, WindowRect, WindowSnapshot, KEY_UP,
 };
 
 /// 原生文件对话框（IFileDialog）：ComCtl 版免 PowerShell 冷启动（消除数秒延迟）。
@@ -1743,115 +1741,6 @@ pub fn uia_read_visible_text(window: WindowHandle) -> std::result::Result<String
     Ok(values.join("\n"))
 }
 
-/// 切换微信会话后**最多**等输入区重建多久（仅开发验证入口用）。
-const WECHAT_SESSION_SWITCH_CAP_MS: u64 = 400;
-
-/// 在目标窗口内选择「文件传输助手」并把焦点移到微信聊天输入框。
-///
-/// 这个入口只用于真实 IM 的开发验证，避免多实例下全局快捷键落到错误账号。
-/// 产品路径不调用本函数；上线前仍应通过目标画像的会话状态确认输入框。
-pub fn uia_focus_wechat_input(window: WindowHandle) -> std::result::Result<String, String> {
-    let automation = uia_automation()?;
-    let mut raw_process_id = 0u32;
-    unsafe { GetWindowThreadProcessId(window.0 as HWND, &mut raw_process_id) };
-    let target_process_id = i32::try_from(raw_process_id).unwrap_or(-1);
-
-    let contact = uia_search_from_focus(&automation, target_process_id, |element| {
-        unsafe { element.CurrentName() }
-            .map(|name| name.to_string().contains("文件传输助手"))
-            .unwrap_or(false)
-    })?
-    .ok_or_else(|| "未找到微信「文件传输助手」会话项".to_string())?;
-
-    // 先订阅再动作：切会话会让微信重建输入区，订阅必须早于 Select/Invoke。
-    let mut surface = Win32WindowEvents.await_input_surface(window);
-    let mut selected = false;
-    if let Ok(pattern) = unsafe {
-        contact.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
-    } {
-        unsafe { pattern.Select() }.map_err(|e| e.to_string())?;
-        selected = true;
-    } else if let Ok(pattern) =
-        unsafe { contact.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
-    {
-        unsafe { pattern.Invoke() }.map_err(|e| e.to_string())?;
-        selected = true;
-    }
-    if !selected {
-        return Err("微信「文件传输助手」不支持 UIA 选择".to_string());
-    }
-
-    let _ = surface.wait(WECHAT_SESSION_SWITCH_CAP_MS);
-    let edit = uia_search_from_focus(&automation, target_process_id, |element| {
-        let Ok(control_type) = (unsafe { element.CurrentControlType() }) else {
-            return false;
-        };
-        let class_name = unsafe { element.CurrentClassName() }
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        control_type == UIA_EditControlTypeId
-            && (class_name.contains("ChatInputField") || class_name.contains("Input"))
-    })?
-    .ok_or_else(|| "选择会话后未找到微信聊天输入框".to_string())?;
-    let name = unsafe { edit.CurrentName() }
-        .map(|value| value.to_string())
-        .unwrap_or_default();
-    unsafe { edit.SetFocus() }.map_err(|e| e.to_string())?;
-    Ok(format!("focused={name} selected_contact=true"))
-}
-
-fn uia_search_from_focus(
-    automation: &IUIAutomation,
-    target_process_id: i32,
-    predicate: impl Fn(&IUIAutomationElement) -> bool,
-) -> std::result::Result<Option<IUIAutomationElement>, String> {
-    let walker = unsafe { automation.ControlViewWalker() }.map_err(|e| e.to_string())?;
-    let focused = unsafe { automation.GetFocusedElement() }.map_err(|e| e.to_string())?;
-    let mut current = focused;
-    for _ in 0..8 {
-        if unsafe { current.CurrentProcessId() }.unwrap_or(-1) != target_process_id {
-            break;
-        }
-        if let Some(found) = uia_search_subtree(&walker, &current, 0, &predicate)? {
-            return Ok(Some(found));
-        }
-        let parent = match unsafe { walker.GetParentElement(&current) } {
-            Ok(parent) => parent,
-            Err(_) => break,
-        };
-        current = parent;
-    }
-    Ok(None)
-}
-
-fn uia_search_subtree(
-    walker: &IUIAutomationTreeWalker,
-    current: &IUIAutomationElement,
-    depth: u8,
-    predicate: &impl Fn(&IUIAutomationElement) -> bool,
-) -> std::result::Result<Option<IUIAutomationElement>, String> {
-    if predicate(current) {
-        return Ok(Some(current.clone()));
-    }
-    if depth >= 6 {
-        return Ok(None);
-    }
-    let mut child = match unsafe { walker.GetFirstChildElement(current) } {
-        Ok(child) => child,
-        Err(_) => return Ok(None),
-    };
-    for _ in 0..200 {
-        if let Some(found) = uia_search_subtree(walker, &child, depth + 1, predicate)? {
-            return Ok(Some(found));
-        }
-        child = match unsafe { walker.GetNextSiblingElement(&child) } {
-            Ok(next) => next,
-            Err(_) => return Ok(None),
-        };
-    }
-    Ok(None)
-}
-
 thread_local! {
     /// 线程内 `IUIAutomation` 缓存。
     ///
@@ -1954,7 +1843,11 @@ fn format_attempts(attempts: &[FocusAttempt]) -> String {
         .join(" | ")
 }
 
-fn native_caret_semantic(hwnd: HWND) -> bool {
+/// 原生 caret + MSAA 身份确认（`FocusStep::CaretSemantic` 的机制实现）。
+///
+/// 身份谓词来自画像（[`CaretSemanticIdentity`]，缺省=千牛校准值），平台层不做
+/// per-app 判断：读 caret 屏幕点 → `AccessibleObjectFromPoint` → 与声明比对。
+fn native_caret_semantic(hwnd: HWND, identity: &CaretSemanticIdentity) -> bool {
     unsafe {
         if GetForegroundWindow() != hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd {
             return false;
@@ -1994,16 +1887,16 @@ fn native_caret_semantic(hwnd: HWND) -> bool {
         let Some(accessible) = acc else {
             return false;
         };
-        let role = accessible.get_accRole(&child).ok();
-        let name = accessible.get_accName(&child).ok();
-        role.map(|v| {
-            v.Anonymous.Anonymous.vt == windows::Win32::System::Variant::VARENUM(3)
-                && v.Anonymous.Anonymous.Anonymous.lVal == 7
-        })
-        .unwrap_or(false)
-            && name
-                .map(|v: BSTR| "编辑".encode_utf16().eq(v.as_ref().iter().copied()))
-                .unwrap_or(false)
+        let role = accessible
+            .get_accRole(&child)
+            .ok()
+            .filter(|v| v.Anonymous.Anonymous.vt == windows::Win32::System::Variant::VARENUM(3))
+            .map(|v| v.Anonymous.Anonymous.Anonymous.lVal);
+        let name = accessible
+            .get_accName(&child)
+            .ok()
+            .map(|v: BSTR| v.to_string());
+        caret_identity_matches(identity, role, name.as_deref())
     }
 }
 
@@ -2040,7 +1933,8 @@ fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
                 }
             }
             FocusStep::CaretSemantic => {
-                let ok = native_caret_semantic(hwnd);
+                let identity = plan.caret_identity.clone().unwrap_or_default();
+                let ok = native_caret_semantic(hwnd, &identity);
                 attempts.push(FocusAttempt {
                     step: *step,
                     outcome: if ok {
@@ -2689,8 +2583,7 @@ mod tests {
 
     /// 表达式点击点的求值面：四则/变量/括号/一元负号可用，垃圾一律拒绝。
     #[test]
-    fn point_expr_supports_arithmetic_variables_and_rejects_garbage() {
-        assert_eq!(crate::eval_point_expr("8", 1920, 1080), Ok(8));
+    fn point_expr_supports_arithmetic_variables_and_rejects_garbage() {        assert_eq!(crate::eval_point_expr("8", 1920, 1080), Ok(8));
         assert_eq!(
             crate::eval_point_expr("WINDOW_WIDTH - 8", 1920, 1080),
             Ok(1912)
@@ -2735,6 +2628,32 @@ mod tests {
             y_logical: 99_999,
         };
         assert_eq!(click_point_in_client(1000, 800, 96, overflow), (999, 799));
+    }
+
+    /// caret 身份谓词：缺省=千牛校准值（role 7/编辑）；画像自定义后按声明比对。
+    #[test]
+    fn caret_identity_matches_declared_role_and_name() {
+        let default_identity = CaretSemanticIdentity::default();
+        assert!(caret_identity_matches(
+            &default_identity,
+            Some(7),
+            Some("编辑")
+        ));
+        assert!(!caret_identity_matches(
+            &default_identity,
+            Some(7),
+            Some("买家账号")
+        ));
+        assert!(!caret_identity_matches(&default_identity, Some(10), Some("编辑")));
+        assert!(!caret_identity_matches(&default_identity, None, Some("编辑")));
+        assert!(!caret_identity_matches(&default_identity, Some(7), None));
+
+        let custom = CaretSemanticIdentity {
+            role: 42,
+            name: "chat input".to_string(),
+        };
+        assert!(caret_identity_matches(&custom, Some(42), Some("chat input")));
+        assert!(!caret_identity_matches(&custom, Some(7), Some("编辑")));
     }
 
     fn event(kind: u32, hwnd: isize, root: isize, pid: u32, object_id: i32) -> PumpEvent {
