@@ -22,9 +22,10 @@ use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::{
     AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, DarkThemeProvider,
-    FacetIndex, Filter, LightThemeProvider, RealAssetResolver, SearchProvider, SortDirection,
-    SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot, TargetHealth,
-    TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider, ThemeTokens,
+    FacetIndex, Filter, InputPointOverride, LightThemeProvider, RealAssetResolver, SearchProvider,
+    SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot,
+    TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
+    ThemeTokens, TuningTarget,
 };
 
 use task_runner::ChildTask;
@@ -162,6 +163,41 @@ fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     file.sync_all().ok();
     drop(file);
     std::fs::rename(&tmp, path)
+}
+
+/// 手编 user.toml + 设置面板覆盖的画像串合成（D76.4）：拼接后交给
+/// `load_profiles`，同 id 字段级后写胜出——优先级 设置面板 > 手编 > 内置。
+/// 两者皆空返回 None（无用户画像层）。
+fn combine_profiles_user(user_file: Option<&str>, settings: &AppSettings) -> Option<String> {
+    let synth = settings.synthesized_profiles_toml();
+    match (user_file, synth.is_empty()) {
+        (Some(content), false) => Some(format!("{content}\n{synth}")),
+        (Some(content), true) => Some(content.to_string()),
+        (None, false) => Some(synth),
+        (None, true) => None,
+    }
+}
+
+/// 设置面板「上框点位」行模型：声明了 input_point 的目标 + 当前生效表达式。
+fn sync_target_tunings(ui: &AppWindow, routing: &TargetRoutingRuntime) {
+    let rows: Vec<TargetTuningData> = routing
+        .tuning_targets()
+        .into_iter()
+        .map(
+            |TuningTarget {
+                 id,
+                 label,
+                 point_x,
+                 point_y,
+             }| TargetTuningData {
+                target_id: id.into(),
+                label: label.into(),
+                point_x: point_x.into(),
+                point_y: point_y.into(),
+            },
+        )
+        .collect();
+    ui.set_target_tunings(ModelRc::from(Rc::new(VecModel::from(rows))));
 }
 
 fn show_notice(ui: &AppWindow, tone: TargetNoticeTone, text: String) {
@@ -1828,8 +1864,11 @@ fn main() {
     ));
 
     // 用户画像损坏不得拖垮主程序：退回内置画像并留痕（内置画像有编译期测试兜底）。
-    let profiles_user = std::fs::read_to_string(&profiles_user_path);
-    let profiles_user = match profiles_user {
+    // D76.4：手编文件之上再拼接设置面板管理的「上框点位」覆盖（settings.toml，
+    // 程序唯一写入方；手编文件保持只读不被 UI 破坏）。手编坏→只丢手编层；
+    // 拼接后整体坏→退回手编层；再坏→退回内置（各步留痕）。
+    let profiles_user_file = std::fs::read_to_string(&profiles_user_path);
+    let profiles_user_file = match profiles_user_file {
         Ok(content) => match ui_viewmodels::TargetRoutingRuntime::profile_load_check(
             BUILTIN_PROFILES,
             Some(&content),
@@ -1844,6 +1883,24 @@ fn main() {
             }
         },
         Err(_) => None,
+    };
+    let profiles_user = {
+        let combined = combine_profiles_user(profiles_user_file.as_deref(), &settings.borrow());
+        match combined.as_deref() {
+            Some(text) => {
+                match ui_viewmodels::TargetRoutingRuntime::profile_load_check(
+                    BUILTIN_PROFILES,
+                    Some(text),
+                ) {
+                    Ok(()) => combined,
+                    Err(error) => {
+                        logging::error!("含上框点位覆盖的画像解析失败，退回手编画像链: {error}");
+                        profiles_user_file.clone()
+                    }
+                }
+            }
+            None => None,
+        }
     };
     let routing = Rc::new(RefCell::new(
         TargetRoutingRuntime::new(
@@ -1862,6 +1919,7 @@ fn main() {
     let target_choices: Rc<VecModel<TargetChoiceData>> = Rc::new(VecModel::default());
     app.set_target_choices(ModelRc::from(target_choices.clone()));
     sync_target_bar(&app, &target_choices, routing.borrow().snapshot());
+    sync_target_tunings(&app, &routing.borrow());
 
     // CRUD 协作上下文（D46–D48）：选区同步/过滤切换/库写子命令的统一出口。
     let crud = CrudCtx {
@@ -2544,6 +2602,149 @@ fn main() {
             let ui = ui.unwrap();
             pending.replace(None);
             ui.set_target_rename_open(false);
+        });
+    }
+
+    // —— D76.4 上框点位（设置面板高级区）：编辑 → 校验 → 落 settings.toml → 热生效 ——
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        app.on_tuning_selected(move |target_id| {
+            let ui = ui.unwrap();
+            let routing = routing.borrow();
+            if let Some(tuning) = routing
+                .tuning_targets()
+                .into_iter()
+                .find(|tuning| tuning.id == target_id.as_str())
+            {
+                ui.set_tuning_selected_id(tuning.id.clone().into());
+                ui.set_tuning_selected_label(
+                    format!("{} · 当前生效表达式（客户区逻辑像素）", tuning.label).into(),
+                );
+                ui.set_tuning_x_text(tuning.point_x.into());
+                ui.set_tuning_y_text(tuning.point_y.into());
+                ui.set_tuning_error("".into());
+            }
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        let profiles_user_file = profiles_user_file.clone();
+        app.on_tuning_save(move |x, y| {
+            let ui = ui.unwrap();
+            let target_id = ui.get_tuning_selected_id().to_string();
+            if target_id.is_empty() {
+                return;
+            }
+            // 干跑：新覆盖合成进画像串后必须整体可加载（含表达式试算），否则
+            // 原地报错不动任何状态——坏值既不落 settings 也不进运行时。
+            let mut overrides = settings.borrow().input_point_overrides.clone();
+            overrides.insert(
+                target_id.clone(),
+                InputPointOverride {
+                    x: x.to_string(),
+                    y: y.to_string(),
+                },
+            );
+            let probe = AppSettings {
+                input_point_overrides: overrides,
+                ..settings.borrow().clone()
+            };
+            let combined = combine_profiles_user(profiles_user_file.as_deref(), &probe);
+            if let Err(error) = ui_viewmodels::TargetRoutingRuntime::profile_load_check(
+                BUILTIN_PROFILES,
+                combined.as_deref(),
+            ) {
+                logging::warn!("上框点位保存被拒（{target_id}）: {error}");
+                ui.set_tuning_error(format!("保存被拒：{error}").into());
+                return;
+            }
+            settings.borrow_mut().input_point_overrides.insert(
+                target_id.clone(),
+                InputPointOverride {
+                    x: x.to_string(),
+                    y: y.to_string(),
+                },
+            );
+            if let Err(error) = settings.borrow().save(&settings_path) {
+                logging::error!("settings.toml 保存失败: {error}");
+                ui.set_tuning_error(format!("设置保存失败: {error}").into());
+                return;
+            }
+            let combined = combine_profiles_user(profiles_user_file.as_deref(), &settings.borrow());
+            if let Err(error) = routing
+                .borrow_mut()
+                .reload_profiles(BUILTIN_PROFILES, combined.as_deref())
+            {
+                logging::error!("画像热更新失败: {error}");
+                ui.set_tuning_error(format!("画像热更新失败: {error}").into());
+                return;
+            }
+            ui.set_tuning_error("".into());
+            sync_target_tunings(&ui, &routing.borrow());
+            show_notice(
+                &ui,
+                TargetNoticeTone::Success,
+                format!("{target_id} 上框点位已更新并生效"),
+            );
+        });
+    }
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        let settings = settings.clone();
+        let settings_path = settings_path.clone();
+        let profiles_user_file = profiles_user_file.clone();
+        app.on_tuning_reset(move || {
+            let ui = ui.unwrap();
+            let target_id = ui.get_tuning_selected_id().to_string();
+            if target_id.is_empty() {
+                return;
+            }
+            if settings
+                .borrow()
+                .input_point_overrides
+                .contains_key(&target_id)
+            {
+                settings
+                    .borrow_mut()
+                    .input_point_overrides
+                    .remove(&target_id);
+                if let Err(error) = settings.borrow().save(&settings_path) {
+                    logging::error!("settings.toml 保存失败: {error}");
+                    ui.set_tuning_error(format!("设置保存失败: {error}").into());
+                    return;
+                }
+            }
+            let combined = combine_profiles_user(profiles_user_file.as_deref(), &settings.borrow());
+            if let Err(error) = routing
+                .borrow_mut()
+                .reload_profiles(BUILTIN_PROFILES, combined.as_deref())
+            {
+                logging::error!("画像热更新失败: {error}");
+                ui.set_tuning_error(format!("画像热更新失败: {error}").into());
+                return;
+            }
+            // 回填为画像链上的当前值，便于继续编辑或确认已回默认。
+            if let Some(tuning) = routing
+                .borrow()
+                .tuning_targets()
+                .into_iter()
+                .find(|tuning| tuning.id == target_id)
+            {
+                ui.set_tuning_x_text(tuning.point_x.into());
+                ui.set_tuning_y_text(tuning.point_y.into());
+            }
+            ui.set_tuning_error("".into());
+            sync_target_tunings(&ui, &routing.borrow());
+            show_notice(
+                &ui,
+                TargetNoticeTone::Success,
+                format!("{target_id} 上框点位已恢复画像链上的值"),
+            );
         });
     }
 

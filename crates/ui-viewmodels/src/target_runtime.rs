@@ -49,6 +49,21 @@ impl TargetRoutingRuntime {
         targets::load_profiles(builtin, user).map(|_| ())
     }
 
+    /// 画像集热更新（D76.4 设置面板「上框点位」）：先干跑校验，通过后只换
+    /// 画像集（热目标/钉住/别名原样保留），失败原样不动并返回错误供 UI 内联显示。
+    pub fn reload_profiles(
+        &mut self,
+        builtin: &str,
+        user: Option<&str>,
+    ) -> Result<(), TargetProfileError> {
+        self.routing.replace_profiles(builtin, user)
+    }
+
+    /// 声明了「上框点位」的目标 + 当前生效表达式（设置面板编辑区行数据）。
+    pub fn tuning_targets(&self) -> Vec<crate::TuningTarget> {
+        self.routing.tuning_targets()
+    }
+
     pub fn new(
         builtin: &str,
         user: Option<&str>,

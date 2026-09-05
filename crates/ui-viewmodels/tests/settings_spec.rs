@@ -1,5 +1,6 @@
 //! AppSettings round-trip 与容错回落：设置持久化数据侧契约。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -47,6 +48,7 @@ fn save_then_load_roundtrips() {
         auto_update_check: false,
         last_check_unix: 1_700_000_000,
         dismissed_version: "v0.2.0".into(),
+        input_point_overrides: BTreeMap::new(),
     };
     s.save(&path).expect("写设置失败");
     let loaded = AppSettings::load(&path);

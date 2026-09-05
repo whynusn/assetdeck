@@ -23,12 +23,12 @@ pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent};
 pub use layout::{masonry_layout, Rect};
 pub use search::{FtsNameSource, HybridSearchProvider, SearchError, SearchProvider, SearchScope};
 pub use settings::{
-    settings_path, AppSettings, SettingKind, SettingSpec, SettingView, SETTING_SPECS,
-    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
+    settings_path, AppSettings, InputPointOverride, SettingKind, SettingSpec, SettingView,
+    SETTING_SPECS, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
-    TargetPasteNotice, TargetRoutingVm,
+    TargetPasteNotice, TargetRoutingVm, TuningTarget,
 };
 pub use theme::{DarkThemeProvider, LightThemeProvider, ThemeProvider, ThemeTokens};
 pub use update_apply::{

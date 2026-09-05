@@ -41,6 +41,15 @@ pub struct TargetBarSnapshot {
     pub choices: Vec<TargetChoice>,
 }
 
+/// 「上框点位」设置区的一行（D76.4）：声明了 input_point 的目标 + 当前生效表达式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuningTarget {
+    pub id: String,
+    pub label: String,
+    pub point_x: String,
+    pub point_y: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetNoticeTone {
     Success,
@@ -268,6 +277,38 @@ impl TargetRoutingVm {
             bar: TargetBarVm::new(),
             aliases: AliasMap::new(),
         })
+    }
+
+    /// 画像集热更新（D76.4）：先干跑校验，通过后只换 `profiles`——
+    /// tracker（热目标/钉住）、目标条状态与别名册原样保留，正在使用的
+    /// 窗口绑定不失效；下一次上框/候选刷新即用新值。校验失败原样不动。
+    pub fn replace_profiles(
+        &mut self,
+        builtin: &str,
+        user: Option<&str>,
+    ) -> Result<(), ProfileError> {
+        let profiles = targets::load_profiles(builtin, user)?;
+        self.profiles = profiles;
+        Ok(())
+    }
+
+    /// 声明了「上框点位」（input_point）的目标清单：id + 展示名 + 当前生效
+    /// 的 x/y 表达式（已是 画像链合并后 的结果）。设置面板「上框点位」区的
+    /// 行数据来源。
+    pub fn tuning_targets(&self) -> Vec<TuningTarget> {
+        self.profiles
+            .profiles()
+            .iter()
+            .filter_map(|profile| {
+                let point = profile.input_point.as_ref()?;
+                Some(TuningTarget {
+                    id: profile.id.as_str().to_string(),
+                    label: profile.label.clone(),
+                    point_x: point.x.clone(),
+                    point_y: point.y.clone(),
+                })
+            })
+            .collect()
     }
 
     /// 装配层在启动时注入已加载的别名册；对已存在的候选立即重放。
@@ -962,5 +1003,115 @@ require_title = true
         assert_eq!(bar.snapshot().mode, TargetBarMode::ChooseTarget);
         bar.set_hot_target(Some(choice("wechat-a", false)));
         assert_eq!(bar.snapshot().mode, TargetBarMode::Ready);
+    }
+
+    const TUNING_PROFILES_V1: &str = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "413"
+y = "WINDOW_HEIGHT - 75"
+
+[[profiles]]
+id = "pdd"
+label = "拼多多"
+exe_names = ["PddWorkbench.exe"]
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "WINDOW_WIDTH * 49 / 100"
+y = "WINDOW_HEIGHT - 66"
+"#;
+
+    const TUNING_PROFILES_V2: &str = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "999"
+y = "WINDOW_HEIGHT - 8"
+"#;
+
+    const TUNING_PROFILES_BROKEN: &str = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+exe_names = ["AliWorkbench.exe"]
+focus_strategy = ["input_point"]
+
+[profiles.input_point]
+x = "WINDOW_DEPTH - 8"
+y = "8"
+"#;
+
+    /// 设置面板行数据：只列声明了 input_point 的目标，值 = 画像链合并结果。
+    #[test]
+    fn tuning_targets_lists_declared_points_in_order() {
+        let vm = TargetRoutingVm::from_profiles(TUNING_PROFILES_V1, None).unwrap();
+        let tunings = vm.tuning_targets();
+        assert_eq!(tunings.len(), 2);
+        assert_eq!(tunings[0].id, "qianniu");
+        assert_eq!(tunings[0].label, "千牛");
+        assert_eq!(tunings[0].point_x, "413");
+        assert_eq!(tunings[0].point_y, "WINDOW_HEIGHT - 75");
+        assert_eq!(tunings[1].id, "pdd");
+    }
+
+    /// 热更新三定律：换值生效、热目标/别名保留、坏输入原样不动。
+    #[test]
+    fn replace_profiles_swaps_values_and_preserves_state() {
+        let mut vm = TargetRoutingVm::from_profiles(TUNING_PROFILES_V1, None).unwrap();
+        vm.refresh_windows(&[snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        )]);
+        let instance_id = vm.snapshot().choices[0].binding.instance_id.clone();
+        let mut aliases = targets::AliasMap::new();
+        aliases.set(&instance_id, Some("主接待"));
+        vm.set_aliases(aliases);
+        // 前台跟随锁热目标（别名在锁定时重放到 chip 标签）。
+        vm.on_foreground(&snapshot_with_class(
+            1,
+            "AliWorkbench.exe",
+            "Qt5152QWindowIcon",
+            "易软坊-接待中心",
+        ));
+        assert_eq!(
+            vm.selected().map(|binding| binding.label.clone()),
+            Some("主接待".to_string()),
+            "前置状态：热目标已带别名锁定"
+        );
+
+        // 换 V2：input_point 新值生效，热目标与别名都不丢。
+        vm.replace_profiles(TUNING_PROFILES_V2, None).unwrap();
+        assert_eq!(vm.tuning_targets()[0].point_x, "999");
+        assert_eq!(
+            vm.selected().map(|binding| binding.label.clone()),
+            Some("主接待".to_string()),
+            "热目标绑定必须穿越画像热更新"
+        );
+
+        // 坏表达式：Err 且原值原状态原样不动（不半更新）。
+        let error = vm
+            .replace_profiles(TUNING_PROFILES_BROKEN, None)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            targets::ProfileError::InvalidInputPointExpr { .. }
+        ));
+        assert_eq!(vm.tuning_targets()[0].point_x, "999");
+        assert_eq!(
+            vm.selected().map(|binding| binding.label.clone()),
+            Some("主接待".to_string())
+        );
     }
 }

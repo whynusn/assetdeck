@@ -10,11 +10,23 @@
 //! [`AppSettings::describe`] 按此序产出动态视图，[`AppSettings::toggle`]
 //! 按 key 翻转字段——壳层设置面板不需要再维护一份 key 表。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+/// 单个目标的「上框点位」覆盖（D76.4）：设置面板里编辑的 input_point 表达式。
+///
+/// 存 settings.toml 而不是 profiles.user.toml——该文件是用户手编通道，程序
+/// 不改写它（保住手写注释）；UI 覆盖在装载时合成 TOML 段拼接其后，同 id
+/// 字段级后写胜出，优先级 = 设置面板 > 手编 user.toml > 内置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputPointOverride {
+    pub x: String,
+    pub y: String,
+}
 
 /// 便携设置。全字段都带 `#[serde(default)]`，缺字段回落默认而非报错。
 ///
@@ -70,6 +82,10 @@ pub struct AppSettings {
     /// 不再弹窗（手动检查不受影响）。
     #[serde(default)]
     pub dismissed_version: String,
+    /// 目标「上框点位」的 UI 覆盖（D76.4）：key = 目标 id（如 qianniu）。
+    /// 空 = 该目标用画像链上的值（手编 user.toml 或内置）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input_point_overrides: BTreeMap<String, InputPointOverride>,
 }
 
 fn default_auto_update_check() -> bool {
@@ -100,6 +116,50 @@ impl AppSettings {
             .sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
         self
+    }
+
+    /// 把本设置的 input_point 覆盖合成为可拼接的用户画像 TOML 段（D76.4）。
+    ///
+    /// 拼接语义：装配层把它追加在 profiles.user.toml 内容之后交给
+    /// `targets::load_profiles`——同 id 字段级后写胜出，因此优先级为
+    /// 设置面板 > 手编 user.toml > 内置。首行自带换行，手编文件即使以
+    /// 无换行的表结尾也不会粘连。无覆盖时返回空串（调用方跳过拼接）。
+    pub fn synthesized_profiles_toml(&self) -> String {
+        if self.input_point_overrides.is_empty() {
+            return String::new();
+        }
+        #[derive(Serialize)]
+        struct OverlayInputPoint {
+            x: String,
+            y: String,
+        }
+        #[derive(Serialize)]
+        struct OverlayProfile {
+            id: String,
+            input_point: OverlayInputPoint,
+        }
+        #[derive(Serialize)]
+        struct OverlayDoc {
+            profiles: Vec<OverlayProfile>,
+        }
+        let doc = OverlayDoc {
+            profiles: self
+                .input_point_overrides
+                .iter()
+                .map(|(id, point)| OverlayProfile {
+                    id: id.clone(),
+                    input_point: OverlayInputPoint {
+                        x: point.x.clone(),
+                        y: point.y.clone(),
+                    },
+                })
+                .collect(),
+        };
+        let body = toml::to_string_pretty(&doc).unwrap_or_default();
+        if body.is_empty() {
+            return String::new();
+        }
+        format!("\n# ↓ 由设置面板「上框点位」管理（客户端编辑保存于 settings.toml）\n{body}")
     }
 }
 
@@ -148,6 +208,7 @@ impl Default for AppSettings {
             auto_update_check: default_auto_update_check(),
             last_check_unix: 0,
             dismissed_version: String::new(),
+            input_point_overrides: BTreeMap::new(),
         }
     }
 }
@@ -360,6 +421,7 @@ mod tests {
             auto_update_check: true,
             last_check_unix: 0,
             dismissed_version: String::new(),
+            input_point_overrides: BTreeMap::new(),
         };
         let views = settings.describe();
 
@@ -490,5 +552,46 @@ mod tests {
         let before = settings.clone();
         assert!(!settings.toggle("no_such_setting"));
         assert_eq!(settings, before, "未知 key 不修改任何字段");
+    }
+
+    /// 覆盖合成（D76.4）：空 = 空串；有覆盖 = 可拼接的合法 [[profiles]] 段，
+    /// save→load roundtrip 不丢。
+    #[test]
+    fn synthesized_profiles_toml_roundtrips_overrides() {
+        let empty = AppSettings::default();
+        assert!(empty.synthesized_profiles_toml().is_empty());
+
+        let mut settings = AppSettings::default();
+        settings.input_point_overrides.insert(
+            "qianniu".to_string(),
+            InputPointOverride {
+                x: "413".to_string(),
+                y: "WINDOW_HEIGHT - 75".to_string(),
+            },
+        );
+        settings.input_point_overrides.insert(
+            "weixin".to_string(),
+            InputPointOverride {
+                x: "WINDOW_WIDTH - 8".to_string(),
+                y: "WINDOW_HEIGHT - 8".to_string(),
+            },
+        );
+        let synth = settings.synthesized_profiles_toml();
+        assert!(synth.starts_with('\n'), "首行换行保证与手编文件安全拼接");
+        assert!(synth.contains("id = \"qianniu\""));
+        assert!(synth.contains("id = \"weixin\""));
+        assert!(synth.contains("x = \"WINDOW_WIDTH - 8\""));
+
+        let dir =
+            std::env::temp_dir().join(format!("assetdeck-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        settings.save(&path).unwrap();
+        let loaded = AppSettings::load(&path);
+        assert_eq!(
+            loaded.input_point_overrides, settings.input_point_overrides,
+            "settings.toml roundtrip 不丢覆盖"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

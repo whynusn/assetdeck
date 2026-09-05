@@ -20,6 +20,6 @@ pub use model::{Health, NotReadyReason, Readiness, TargetBinding, TargetId, Targ
 pub use platform::{WindowHandle, WindowRect, WindowSnapshot};
 pub use profile::{
     load_profiles, ClipboardFormat, FocusStrategyStep, FormatKind, FormatPolicy, InputAnchor,
-    KindFormats, Profile, ProfileError, ProfileSet, ReadinessMode, SendPolicy,
+    InputPointConfig, KindFormats, Profile, ProfileError, ProfileSet, ReadinessMode, SendPolicy,
 };
 pub use tracker::TargetTracker;

@@ -85,6 +85,15 @@ export struct TargetChoiceData {
     available: bool,
 }
 
+// D76.4 上框点位（高级）行数据：声明了 input_point 的目标 + 当前生效表达式
+// （画像链合并结果；保存进 settings.toml 覆盖层，优先级 > profiles.user.toml）。
+export struct TargetTuningData {
+    target-id: string,
+    label: string,
+    point-x: string,
+    point-y: string,
+}
+
 // D65 导入结果行：kind = UiEnums.result-row-*（0=完全相同跳过 1=相似已导入
 // 2=失败）；source = 导入源文件名；existing = 已有素材名（exact/similar）或
 // 失败原因（failed）；distance = 感知距离（仅 similar 行有意义）。
@@ -269,6 +278,17 @@ export component AppWindow inherits Window {
     callback target-chip-clicked();
     callback target-choice-selected(string);
     callback target-pin-toggled();
+    // D76.4 上框点位（设置面板高级区）：选目标行回填表达式；保存先校验再
+    // 写 settings.toml 覆盖层并热生效；恢复默认 = 删除该目标覆盖。
+    in property <[TargetTuningData]> target-tunings;
+    in property <string> tuning-selected-id: "";
+    in property <string> tuning-selected-label: "";
+    in-out property <string> tuning-x-text: "";
+    in-out property <string> tuning-y-text: "";
+    in property <string> tuning-error: "";
+    callback tuning-selected(string);
+    callback tuning-save(string, string);
+    callback tuning-reset();
     callback settings-toggled();
     // D67 设置面板显式关闭（点外部不再收起——见挡板注释）。
     callback settings-closed();
@@ -1746,6 +1766,91 @@ export component AppWindow inherits Window {
                                 enabled: setting.enabled;
                                 toggled => {
                                     root.setting-toggled(setting.key);
+                                }
+                            }
+                        }
+
+                        // D76.4 上框点位（高级）：声明了 input_point 的目标可在
+                        // 此改 x/y 表达式。保存 = 校验 + 写 settings.toml 覆盖层 +
+                        // 热生效（优先级 设置面板 > 手编 user.toml > 内置）；
+                        // 恢复默认 = 删除覆盖。包在 VerticalLayout 内（同上方
+                        // 设置行：裸 Rectangle 不传播首选高度，渲染实测）。
+                        VerticalLayout {
+                            spacing: 5px;
+
+                            if root.target-tunings.length > 0: SectionLabel {
+                                height: 14px;
+                                text: "上框点位（高级）";
+                            }
+
+                            if root.tuning-selected-id == "": HorizontalLayout {
+                                spacing: 4px;
+                                for tuning in root.target-tunings: FlatButton {
+                                    text: tuning.label;
+                                    tip: "调整该目标「把焦点放入输入框」的点击坐标表达式";
+                                    clicked => { root.tuning-selected(tuning.target-id); }
+                                }
+                            }
+
+                            if root.tuning-selected-id != "": VerticalLayout {
+                                spacing: 4px;
+
+                                Text {
+                                    text: root.tuning-selected-label;
+                                    color: Theme.text-3;
+                                    font-size: 10px;
+                                    overflow: elide;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text {
+                                            text: "x 表达式";
+                                            color: Theme.text-3;
+                                            font-size: 9px;
+                                        }
+                                        tuning-x-input := LineEdit {
+                                            text: root.tuning-x-text;
+                                            font-size: 10px;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text {
+                                            text: "y 表达式";
+                                            color: Theme.text-3;
+                                            font-size: 9px;
+                                        }
+                                        tuning-y-input := LineEdit {
+                                            text: root.tuning-y-text;
+                                            font-size: 10px;
+                                        }
+                                    }
+                                }
+
+                                if root.tuning-error != "": Text {
+                                    text: root.tuning-error;
+                                    color: Theme.danger;
+                                    font-size: 10px;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Rectangle { horizontal-stretch: 1; }
+                                    FlatButton {
+                                        text: "恢复默认";
+                                        clicked => { root.tuning-reset(); }
+                                    }
+                                    Button {
+                                        text: "保存";
+                                        primary: true;
+                                        clicked => {
+                                            root.tuning-save(tuning-x-input.text, tuning-y-input.text);
+                                        }
+                                    }
                                 }
                             }
                         }
