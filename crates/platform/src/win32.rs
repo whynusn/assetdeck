@@ -2436,7 +2436,7 @@ pub fn window_process_elevated_beyond_current(window: WindowHandle) -> Option<bo
     Some(target > own)
 }
 
-/// 进程令牌的完整性级别 SID 末段 RID（0x2000 低 / 0x3000 中 / 0x4000 高）。
+/// 进程令牌的完整性级别 SID 末段 RID（0x1000 低 / 0x2000 中 / 0x3000 高 / 0x4000 系统）。
 fn process_integrity_rid(pid: u32) -> Option<u32> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -2503,14 +2503,17 @@ fn token_integrity_rid(token: HANDLE) -> Option<u32> {
 // 自身提权与交棒重启（D78）
 // ---------------------------------------------------------------------------
 
-/// 当前进程能否向高完整性目标注入输入：自身令牌完整性 RID ≥ 高（0x4000）。
+/// 当前进程能否向高完整性目标注入输入：自身令牌完整性 RID ≥ 高（0x3000）。
 ///
 /// 用完整性级别而不是 `TokenElevation`：UAC 关闭时管理员进程拿的就是完整
 /// 令牌，TokenElevation 未必为真；而「能不能注入」只由完整性级别决定。
 pub fn current_process_is_elevated() -> bool {
-    // 0x4000 = SECURITY_MANDATORY_HIGH_RID（windows-sys 0.59 未导出该常量，
-    // 与 D77 的 RID 口径一致：0x2000 低 / 0x3000 中 / 0x4000 高）。
-    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x4000;
+    // 0x3000 = SECURITY_MANDATORY_HIGH_RID（windows-sys 0.59 未导出该常量）。
+    // 档位实值：0x1000 低 / 0x2000 中 / 0x3000 高 / 0x4000 系统。2026-09-06
+    // 真机钉正：本机管理员进程 rid=0x3000（whoami「High Mandatory Level
+    // S-1-16-12288」），旧值 0x4000 把提权判定恒错成 false，消息通道与 D78
+    // 交棒都不会触发。
+    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x3000;
     matches!(
         current_process_integrity_rid(),
         Some(rid) if rid >= SECURITY_MANDATORY_HIGH_RID
@@ -3610,10 +3613,13 @@ pub mod dragdrop {
     /// `ChangeWindowMessageFilterEx` 显式放行的消息。DragAcceptFiles 挂
     /// WS_EX_ACCEPTFILES，Explorer 对未注册 OLE 目标的拖放即走此通道。
     ///
-    /// 与 OLE 注册互斥：同一 HWND 上 OLE 目标优先于 DragAcceptFiles，提权会话
-    /// 由 [`register_file_drop`] 分叉保证只走本通道。子类化模式与 paint_guard
-    /// 相同（SetWindowLongPtrW 链 + WM_NCDESTROY 还原），两链按安装顺序自然
-    /// 串接；UI 线程 STA 单线程泵消息，安装期间无并发 proc 调用。
+    /// 与 OLE 注册互斥：同一 HWND 上 OLE 目标优先于 DragAcceptFiles，shell
+    /// 见到 OLE 目标就不再走 WM_DROPFILES 回退。winit 建窗时会自行挂
+    /// DragAcceptFiles/OLE 目标，因此这里除了由 [`register_file_drop`] 分叉
+    /// 保证不走 OLE 注册外，还必须先 `RevokeDragDrop` 摘掉既有目标。子类化
+    /// 模式与 paint_guard 相同（SetWindowLongPtrW 链 + WM_NCDESTROY 还原），
+    /// 两链按安装顺序自然串接；UI 线程 STA 单线程泵消息，安装期间无并发
+    /// proc 调用。
     fn register_file_drop_message_channel(
         hwnd: isize,
         sink: Arc<dyn FileDropSink>,
@@ -3623,6 +3629,9 @@ pub mod dragdrop {
         // 名字，这里直接以裸指针传参避免同名冲突。
         let raw = hwnd as *mut core::ffi::c_void;
         unsafe {
+            // 摘掉 winit/此前注册留下的 OLE 目标（没有则失败无害），否则
+            // shell 把拖放路由给 OLE，跨完整性级别时被 UIPI 拦成死局。
+            let _ = RevokeDragDrop(HWND(raw));
             DragAcceptFiles(raw, 1);
             for message in [WM_DROPFILES_MSG, WM_COPYGLOBALDATA] {
                 // 放行失败只告警：拖入降级为不可用，导入入口仍在。
