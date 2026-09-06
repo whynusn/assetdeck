@@ -980,6 +980,14 @@ if (click_count % 2) == 1 {
 - **误判成因（两个）**：① 保存成功的可观测性为零——点位改没改，粘贴成功时画面完全一样（新旧点位都落在 composer），只有故意填坏值看失败才能"看见"；WeChat 更甚（`already` 步恒命中，input_point 根本不被消费）。② 手编 `profiles.user.toml` / settings.toml 的确**只在启动时读**——手编渠道要重启是既有设计。补救：保存/恢复默认成功路径补 INFO 日志（此前零留痕，本次排查全靠 mtime 反推），提示语明示「即时生效（无需重启）」。
 - **GPU/CPU 渲染开关维持重启生效**：渲染档在建窗前经 BackendSelector 一次性选定（Slint 无运行时换渲染器能力，换档=拆窗重建，状态迁移成本不成比例）；设置行文案本就写明「重启后生效」，不改。
 
+### D77 跨机拼多多失效根因 + 三件产品化修复（2026-09-06，他机日志分析）
+
+- **根因判定（ZhangYue 机日志）**：拼多多 37 分钟 ~30 次上框全部 `click: None`——点击从未发出，被自有守卫拒绝；同机千牛/微信正常；focus 阶段仅 2–16ms（排除 300ms×6 命中测试超时=窗口挂起）；y=-120 深处也拒（排除 resize 边框几何）。首要嫌疑：**拼多多以管理员运行而本应用没有**——UIPI 把我们向高完整性进程发的 WM_NCHITTEST 探针与 SendInput 注入静默拦截（快速失败、注入器层面"成功"但事件被丢弃），粘贴落空。热重载在其机器工作正常（保存留痕齐全），点位改什么都无效因为点击根本不发生。
+- **修复一（拒绝留痕）**：`window_hit_test` 改返回 `Result<i32, u32>`（GetLastError 随行）；click_anchor 三道守卫（前台校验/客户区获取/坐标换算）拦截时逐关卡打日志，命中测试拒绝记录首查/末查探针——`Err(5)=UIPI提权拦截`、`Err(1460)=超时`、`Ok(非1)=非客户区`，下次同类问题一行日志实锤。
+- **修复二（提权目标显式提示）**：新增 `window_process_elevated_beyond_current`（OpenProcess+TokenIntegrityLevel 对比双方 RID），经 `InputFocuser` trait 的默认方法 `target_process_elevated_beyond_us`（默认 `None`，测试替身零成本；VM 层只碰 trait——分层守卫测试 `layering_guard.rs` 禁止 VM 源码出现 `platform::win32`/`Win32`/`cfg(windows)`，本次被它当场拦下后改道）；注入未验证（`Injected{verified:false}`）且目标提权时，提示改为「{目标} 以管理员权限运行，本应用无法向它注入——请勿以管理员运行目标，或以管理员运行本应用」，并落 WARN。判定失败一律维持原「请确认」。
+- **修复三（屏外窗口自愈，设置项默认开）**：ZhangYue 机千牛窗口滑出屏幕左缘（client 原点 x 到 -169），点击点在虚拟桌面外，SendInput 坐标被系统钳到桌面边缘、落点与守卫校验点脱节。新增设置「屏外窗口自愈」（高级区）：click_anchor 算出屏幕点后检测是否在虚拟桌面外，是则 `SetWindowPos` 按最小位移拉回（尺寸不变、SWP_NOACTIVATE 不抢激活、留 8px 边距），重算点后照常走 HTCLIENT 守卫；关闭则维持旧行为。开关经 `Arc<AtomicBool>` 注入 `Win32InputFocuser`，设置面板即时生效（无需重启）；位移计算是纯函数 `offscreen_shift`（单测覆盖屏内/四向屏外/负坐标副屏/退化尺寸）。
+- 红线不变：只合成鼠标、不合成键盘；前台校验、HTCLIENT 守卫、失败降级链全部保留；移动窗口不属于输入注入。探针工具（focus_probe）经 `Win32InputFocuser::default()` 拿与产品一致的行为。
+
 
 
 

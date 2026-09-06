@@ -23,8 +23,14 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationValuePattern, TreeScope_Descendants,
     UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_TextPatternId, UIA_ValuePatternId,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, GlobalFree, HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, POINT, RECT,
+};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+use windows_sys::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatA, SetClipboardData,
 };
@@ -32,8 +38,8 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcessId, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, Sleep,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, Sleep, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -48,9 +54,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, PostThreadMessageW, SendMessageTimeoutW, SetCursorPos, SetForegroundWindow,
-    ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS, EVENT_OBJECT_LOCATIONCHANGE,
-    EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
+    SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
 };
 
 use crate::{
@@ -1795,12 +1802,36 @@ const ANCHOR_CLICK_SETTLE_CAP_MS: u64 = 60;
 /// 级别顺序由 [`FocusPlan`] 给出（画像声明，缺省仍是「已可写 → UIA → 锚点」）。
 /// 每一级都要**验证**焦点真的落在目标进程的可写控件上才敢声明成功；
 /// 验证不了就继续下一级，全部走不通返回 `Unavailable`（＝没能证明，不是证明失败）。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Win32InputFocuser;
+///
+/// `nudge_offscreen`（D77）：点击点落在虚拟桌面外时先把窗口最小平移回可视区。
+/// 用 `Arc<AtomicBool>` 而非构造期 bool，让壳层设置面板能在运行中热翻转；
+/// `Default` 即产品默认（开），探针工具用它拿与产品一致的行为。
+#[derive(Clone)]
+pub struct Win32InputFocuser {
+    nudge_offscreen: Arc<AtomicBool>,
+}
+
+impl Default for Win32InputFocuser {
+    fn default() -> Self {
+        Self {
+            nudge_offscreen: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+impl Win32InputFocuser {
+    pub fn new(nudge_offscreen: Arc<AtomicBool>) -> Self {
+        Self { nudge_offscreen }
+    }
+}
 
 impl InputFocuser for Win32InputFocuser {
     fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusReport {
-        let report = focus_input_by_plan(window, plan);
+        let report = focus_input_by_plan(
+            window,
+            plan,
+            self.nudge_offscreen.load(AtomicOrdering::Relaxed),
+        );
         // 低配机延迟归因（D41）与「报成功但没落框」现场（D74）：实际走了哪一级、
         // 点击点与客户区几何、settle 证据，配合 pipeline 的 focus 段耗时判读。
         log::debug!(
@@ -1810,6 +1841,10 @@ impl InputFocuser for Win32InputFocuser {
             format_attempts(&report.attempts)
         );
         report
+    }
+
+    fn target_process_elevated_beyond_us(&self, window: WindowHandle) -> Option<bool> {
+        window_process_elevated_beyond_current(window)
     }
 }
 
@@ -1899,7 +1934,11 @@ fn native_caret_semantic(hwnd: HWND, identity: &CaretSemanticIdentity) -> bool {
     }
 }
 
-fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
+fn focus_input_by_plan(
+    window: WindowHandle,
+    plan: &FocusPlan,
+    nudge_offscreen: bool,
+) -> FocusReport {
     let hwnd = window.0 as HWND;
     let mut attempts = Vec::new();
     if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
@@ -2012,7 +2051,7 @@ fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
                     x_logical: evaluated.0,
                     y_logical: evaluated.1,
                 };
-                let (outcome, click, settle) = click_anchor(hwnd, geometry);
+                let (outcome, click, settle) = click_anchor(hwnd, geometry, nudge_offscreen);
                 attempts.push(FocusAttempt {
                     step: *step,
                     outcome,
@@ -2033,7 +2072,7 @@ fn focus_input_by_plan(window: WindowHandle, plan: &FocusPlan) -> FocusReport {
                     .map(AnchorGeometry::BottomUp)
                     .or(plan.anchor.map(AnchorGeometry::Ratio));
                 if let Some(geometry) = geometry {
-                    let (outcome, click, settle) = click_anchor(hwnd, geometry);
+                    let (outcome, click, settle) = click_anchor(hwnd, geometry, nudge_offscreen);
                     attempts.push(FocusAttempt {
                         step: *step,
                         outcome,
@@ -2218,9 +2257,11 @@ fn normalize_to_virtual_desktop(
 /// `WM_NCHITTEST` 命中码：客户区。
 const HTCLIENT: i32 = 1;
 
-/// 跨进程询问窗口「这个屏幕点会被命中测试归到哪」。返回 None = 查询失败
-/// （目标挂起/超时），调用方按「不点击」处理——宁可放弃也不猜。
-fn window_hit_test(hwnd: HWND, point: POINT) -> Option<i32> {
+/// 跨进程询问窗口「这个屏幕点会被命中测试归到哪」。Err = 查询失败（目标挂起/
+/// 超时/被 UIPI 拦截，GetLastError 随行），调用方按「不点击」处理——宁可放弃
+/// 也不猜。D77：错误码随行返回，拒绝日志得以区分「提权拦截(5)」「超时(1460)」
+/// 「非客户区命中码」三类，不再只能靠间接证据反推。
+fn window_hit_test(hwnd: HWND, point: POINT) -> std::result::Result<i32, u32> {
     const WM_NCHITTEST: u32 = 0x0084;
     const SMTO_ABORTIFHUNG: u32 = 0x0002;
     let packed = ((point.y as u16 as u32) << 16) | point.x as u16 as u32;
@@ -2235,7 +2276,122 @@ fn window_hit_test(hwnd: HWND, point: POINT) -> Option<i32> {
             std::ptr::null_mut(),
         )
     };
-    (result != 0).then_some(result as i32)
+    if result != 0 {
+        Ok(result as i32)
+    } else {
+        Err(unsafe { GetLastError() })
+    }
+}
+
+/// 屏外自愈的最小位移计算：点击点落在虚拟桌面外时，给出把「点」拉回桌内
+/// （留 8px 边距）所需的窗口平移量（窗口与点同位移，尺寸不变）。点在桌内
+/// 或桌面尺寸不可得（≤0）→ None，不动窗口。
+fn offscreen_shift(point: (i32, i32), origin: (i32, i32), size: (i32, i32)) -> Option<(i32, i32)> {
+    const MARGIN: i32 = 8;
+    if size.0 <= 0 || size.1 <= 0 {
+        return None;
+    }
+    let right = origin.0.saturating_add(size.0);
+    let bottom = origin.1.saturating_add(size.1);
+    let mut dx = 0;
+    let mut dy = 0;
+    if point.0 < origin.0 {
+        dx = origin.0 + MARGIN - point.0;
+    } else if point.0 >= right {
+        dx = (right - MARGIN) - point.0;
+    }
+    if point.1 < origin.1 {
+        dy = origin.1 + MARGIN - point.1;
+    } else if point.1 >= bottom {
+        dy = (bottom - MARGIN) - point.1;
+    }
+    if dx == 0 && dy == 0 {
+        None
+    } else {
+        Some((dx, dy))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 完整性级别对比（D77 提权目标检测）
+// ---------------------------------------------------------------------------
+
+/// 目标窗口所属进程的完整性级别是否高于当前进程。高于 = UIPI 会拦截我们向它
+/// 发送的跨进程消息（命中测试探针）与注入输入——上框点击链路注定失效，应给
+/// 用户显式指引而不是泛泛的「请确认」。None = 无法判定（窗口失效/进程退出/
+/// 令牌不可读），按「不提示」处理，维持既有文案。
+pub fn window_process_elevated_beyond_current(window: WindowHandle) -> Option<bool> {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window.0 as HWND, &mut pid) };
+    if pid == 0 {
+        return None;
+    }
+    let target = process_integrity_rid(pid)?;
+    let own = current_process_integrity_rid()?;
+    Some(target > own)
+}
+
+/// 进程令牌的完整性级别 SID 末段 RID（0x2000 低 / 0x3000 中 / 0x4000 高）。
+fn process_integrity_rid(pid: u32) -> Option<u32> {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut token = ptr::null_mut();
+        let rid = if OpenProcessToken(process, TOKEN_QUERY, &mut token) != 0 {
+            token_integrity_rid(token)
+        } else {
+            None
+        };
+        let _ = CloseHandle(process);
+        rid
+    }
+}
+
+fn current_process_integrity_rid() -> Option<u32> {
+    unsafe {
+        let mut token = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let rid = token_integrity_rid(token);
+        let _ = CloseHandle(token);
+        rid
+    }
+}
+
+/// TokenIntegrityLevel → SID 末段 RID。两段式调用：先用空缓冲探出实际大小
+/// （必然失败、needed 带回长度），再正式取值。
+fn token_integrity_rid(token: HANDLE) -> Option<u32> {
+    unsafe {
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let label = buffer.as_mut_ptr() as *mut TOKEN_MANDATORY_LABEL;
+        if GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            label.cast(),
+            needed,
+            &mut needed,
+        ) == 0
+        {
+            return None;
+        }
+        let sid = (*label).Label.Sid;
+        if sid.is_null() {
+            return None;
+        }
+        let count = *GetSidSubAuthorityCount(sid);
+        if count == 0 {
+            return None;
+        }
+        Some(*GetSidSubAuthority(sid, u32::from(count - 1)))
+    }
 }
 
 /// 对画像声明的锚点做一次左键单击。
@@ -2249,8 +2405,17 @@ fn window_hit_test(hwnd: HWND, point: POINT) -> Option<i32> {
 fn click_anchor(
     hwnd: HWND,
     geometry: AnchorGeometry,
+    nudge_offscreen: bool,
 ) -> (FocusOutcome, Option<ClickEvidence>, Option<WaitOutcome>) {
-    if unsafe { GetForegroundWindow() } != hwnd {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground != hwnd {
+        // D77 拒绝留痕：此前守卫拦截零日志，跨机问题（提权目标全链路
+        // click:None）只能靠间接证据反推。拦截关卡必须可见。
+        log::info!(
+            "点击守卫拦截 关卡=前台校验 目标hwnd={:#x} 当前后台={:#x}",
+            hwnd as usize,
+            foreground as usize
+        );
         return (FocusOutcome::Unavailable, None, None);
     }
     let mut client = RECT {
@@ -2260,6 +2425,11 @@ fn click_anchor(
         bottom: 0,
     };
     if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
+        log::warn!(
+            "点击守卫拦截 关卡=客户区获取 hwnd={:#x} last_error={}",
+            hwnd as usize,
+            unsafe { GetLastError() }
+        );
         return (FocusOutcome::Unavailable, None, None);
     }
     let dpi = window_dpi(hwnd);
@@ -2270,7 +2440,69 @@ fn click_anchor(
         y: client.top + offset_y,
     };
     if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
+        log::warn!(
+            "点击守卫拦截 关卡=坐标换算 hwnd={:#x} last_error={}",
+            hwnd as usize,
+            unsafe { GetLastError() }
+        );
         return (FocusOutcome::Unavailable, None, None);
+    }
+
+    // D77 屏外自愈：窗口被拖出桌面后目标点物理上点不到——SendInput 的绝对
+    // 坐标会被系统钳到虚拟桌面边缘，实际落点与守卫校验的点脱节（误点风险 +
+    // 命不中输入框，ZhangYue 机千牛贴边窗口实测）。开启时按最小位移把窗口
+    // 拉回（尺寸不变、不抢激活），重算屏幕点后照常走下方守卫；关闭时维持
+    // 旧行为（钳边点击）。与 paste 链路「解绑自愈」同一设计：上框请求就是
+    // 最高优先级的修复时机。
+    if nudge_offscreen {
+        let origin = (unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) }, unsafe {
+            GetSystemMetrics(SM_YVIRTUALSCREEN)
+        });
+        let size = (unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }, unsafe {
+            GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        });
+        if let Some((dx, dy)) = offscreen_shift((point.x, point.y), origin, size) {
+            let mut window_rect = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            let moved = unsafe { GetWindowRect(hwnd, &mut window_rect) } != 0
+                && unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        ptr::null_mut(),
+                        window_rect.left + dx,
+                        window_rect.top + dy,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                } != 0;
+            if moved {
+                log::info!(
+                    "屏外自愈：点击点 ({},{}) 在可视区外，窗口已平移 ({dx},{dy}) hwnd={:#x}",
+                    point.x,
+                    point.y,
+                    hwnd as usize
+                );
+                if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
+                    log::warn!(
+                        "点击守卫拦截 关卡=坐标换算(自愈后) hwnd={:#x} last_error={}",
+                        hwnd as usize,
+                        unsafe { GetLastError() }
+                    );
+                    return (FocusOutcome::Unavailable, None, None);
+                }
+            } else {
+                log::warn!(
+                    "屏外自愈失败：窗口平移未生效 hwnd={:#x} last_error={}，按原点继续守卫校验",
+                    hwnd as usize,
+                    unsafe { GetLastError() }
+                );
+            }
+        }
     }
 
     // 内缩点可能落在非客户区命中区：真机实证（2026-09-05，千牛窗口角落），
@@ -2282,14 +2514,21 @@ fn click_anchor(
         client.left + client_size.0 / 2,
         client.top + client_size.1 / 2,
     );
+    let original_point = point;
     let mut hit_client = false;
+    let mut first_probe: Option<std::result::Result<i32, u32>> = None;
+    let mut last_probe: Option<std::result::Result<i32, u32>> = None;
     for _ in 0..=5 {
         match window_hit_test(hwnd, point) {
-            Some(HTCLIENT) => {
+            Ok(HTCLIENT) => {
                 hit_client = true;
                 break;
             }
-            _ => {
+            probe => {
+                if first_probe.is_none() {
+                    first_probe = Some(probe);
+                }
+                last_probe = Some(probe);
                 let step_x = (center.0 - point.x).signum() * 8;
                 let step_y = (center.1 - point.y).signum() * 8;
                 let (next_x, next_y) = (point.x + step_x, point.y + step_y);
@@ -2304,6 +2543,14 @@ fn click_anchor(
         }
     }
     if !hit_client {
+        log::warn!(
+            "点击守卫拦截 关卡=命中测试 hwnd={:#x} 点=({},{}) 首查={:?} 末查={:?}（Err(5)=UIPI提权拦截 Err(1460)=超时 Ok(非1)=非客户区命中码）",
+            hwnd as usize,
+            original_point.x,
+            original_point.y,
+            first_probe,
+            last_probe
+        );
         return (FocusOutcome::Unavailable, None, None);
     }
 
@@ -2634,6 +2881,27 @@ mod tests {
             y_logical: 99_999,
         };
         assert_eq!(click_point_in_client(1000, 800, 96, overflow), (999, 799));
+    }
+
+    /// 屏外自愈位移：屏内点不动；屏外点最小拉回并留 8px 边距；退化桌面不动。
+    #[test]
+    fn offscreen_shift_nudges_only_outside_points() {
+        let origin = (0, 0);
+        let size = (1920, 1080);
+        assert_eq!(offscreen_shift((960, 540), origin, size), None, "屏内不动");
+        assert_eq!(
+            offscreen_shift((-161, 1027), origin, size),
+            Some((169, 0)),
+            "左滑出的真机案例（ZhangYue 千牛 x=-161）"
+        );
+        assert_eq!(offscreen_shift((2000, 540), origin, size), Some((-88, 0)));
+        assert_eq!(offscreen_shift((960, 1200), origin, size), Some((0, -128)));
+        assert_eq!(offscreen_shift((960, -5), origin, size), Some((0, 13)));
+        // 负坐标副屏原点：点恰在原点上不算屏外。
+        assert_eq!(offscreen_shift((-1920, 540), (-1920, 0), size), None);
+        // 桌面尺寸不可得（0/负）→ 不动窗口。
+        assert_eq!(offscreen_shift((0, 0), (0, 0), (0, 0)), None);
+        assert_eq!(offscreen_shift((0, 0), (0, 0), (100, -1)), None);
     }
 
     /// caret 身份谓词：缺省=千牛校准值（role 7/编辑）；画像自定义后按声明比对。

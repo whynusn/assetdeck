@@ -1902,11 +1902,13 @@ fn main() {
             None => None,
         }
     };
+    // D77 屏外窗口自愈开关：聚焦器经 Arc 共享，设置面板运行中热翻转。
+    let nudge_offscreen = Arc::new(AtomicBool::new(settings.borrow().nudge_offscreen_window));
     let routing = Rc::new(RefCell::new(
         TargetRoutingRuntime::new(
             BUILTIN_PROFILES,
             profiles_user.as_deref(),
-            win32_runtime_deps(),
+            win32_runtime_deps(nudge_offscreen.clone()),
         )
         .expect("目标画像加载失败"),
     ));
@@ -3580,6 +3582,7 @@ fn main() {
         let settings = settings.clone();
         let settings_path = settings_path.clone();
         let single_click = single_click.clone();
+        let nudge_offscreen = nudge_offscreen.clone();
         app.on_setting_toggled(move |key| {
             let ui = ui.unwrap();
             let key = key.to_string();
@@ -3595,6 +3598,10 @@ fn main() {
             ui.set_single_click_activate(s.activate_on_single_click);
             ui.set_send_after_paste(s.send_after_paste);
             ui.set_gpu_rendering(s.gpu_rendering);
+            // D77 屏外窗口自愈：聚焦器经 Arc 热读，立即生效。
+            if key == "nudge_offscreen_window" {
+                nudge_offscreen.store(s.nudge_offscreen_window, Ordering::Relaxed);
+            }
             // 浅色主题：立即实时重铺自绘层令牌（std-widgets 仍 fluent-dark，v1 边界）。
             if key == "light_theme" {
                 let tokens = if s.light_theme {
@@ -4642,7 +4649,7 @@ fn helper_exe(name: &str) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(name))
 }
 
-fn win32_runtime_deps() -> TargetRuntimeDeps {
+fn win32_runtime_deps(nudge_offscreen: Arc<AtomicBool>) -> TargetRuntimeDeps {
     use platform::win32::{
         Win32Clipboard, Win32FileDialogs, Win32Focus, Win32ForegroundObserver, Win32Injector,
         Win32InputFocuser, Win32Readiness, Win32WindowActivator, Win32WindowEnumerator,
@@ -4658,7 +4665,7 @@ fn win32_runtime_deps() -> TargetRuntimeDeps {
         injector: Box::new(Win32Injector),
         activator: Box::new(Win32WindowActivator),
         readiness: Box::new(Win32Readiness),
-        focuser: Box::new(Win32InputFocuser),
+        focuser: Box::new(Win32InputFocuser::new(nudge_offscreen)),
         dialogs: Box::new(Win32FileDialogs),
     }
 }

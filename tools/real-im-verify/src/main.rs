@@ -330,7 +330,8 @@ fn win32_runtime_deps(timings: bool) -> TargetRuntimeDeps {
             timings,
         }),
         readiness: Box::new(Win32Readiness),
-        focuser: Box::new(Win32InputFocuser),
+        // 与产品默认一致（D77 屏外自愈开）。
+        focuser: Box::new(Win32InputFocuser::default()),
         // 验证工具无对话框场景：占位实现恒「取消」（返回 None）。
         dialogs: Box::new(NoDialogs),
     }

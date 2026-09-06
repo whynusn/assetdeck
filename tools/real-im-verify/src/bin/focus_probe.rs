@@ -2018,7 +2018,8 @@ fn run_corner_probe(
                     }),
                     caret_identity: None,
                 };
-                let report = Win32InputFocuser.focus_input(WindowHandle(root_value), &plan);
+                let report =
+                    Win32InputFocuser::default().focus_input(WindowHandle(root_value), &plan);
                 let verdict = unsafe { classify_after_click(root, pid, &automation) };
                 println!(
                     "CORNER pt=product({expr_x}|{expr_y}) round={round} attempts={:?} outcome={} role={:?} name={:?} gti_focus={:?} caret_screen={:?} {} us={}",
@@ -2539,7 +2540,7 @@ fn run_click_only(
         }
     };
     let started = Instant::now();
-    let report = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
+    let report = Win32InputFocuser::default().focus_input(WindowHandle(hwnd_value), &plan);
     println!(
         "probe=anchor_click outcome={:?} attempts={:?} us={}",
         report.outcome,
@@ -2967,7 +2968,7 @@ fn main() {
             caret_identity: None,
         };
         let started = Instant::now();
-        let report = Win32InputFocuser.focus_input(WindowHandle(hwnd_value), &plan);
+        let report = Win32InputFocuser::default().focus_input(WindowHandle(hwnd_value), &plan);
         println!(
             "probe=anchor_click outcome={:?} attempts={:?} us={}",
             report.outcome,

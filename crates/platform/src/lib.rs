@@ -649,6 +649,14 @@ pub struct FocusPlan {
 /// **单次左键单击**。禁止合成任何键盘事件（尤其 Enter），禁止点击未声明的位置。
 pub trait InputFocuser {
     fn focus_input(&self, window: WindowHandle, plan: &FocusPlan) -> FocusReport;
+
+    /// D77 提权目标检测：目标窗口所属进程的完整性级别是否高于本进程
+    /// （高于 = UIPI 拦截我们的命中测试与注入，上框点击链路注定失效，应显式
+    /// 提示而非「请确认」）。`None` = 平台无关实现或判定失败，按「不提示」。
+    /// 只读探测，零副作用；默认 `None` 让 trait 层测试替身零成本。
+    fn target_process_elevated_beyond_us(&self, _window: WindowHandle) -> Option<bool> {
+        None
+    }
 }
 
 /// 一次事件等待的结局。

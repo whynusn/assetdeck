@@ -4,6 +4,16 @@ use targets::{
     ProfileSet, TargetBinding, TargetId, TargetTracker, WindowSnapshot,
 };
 
+/// 未验证注入的用户提示（D77）：目标提权时显式给出处与两侧解法，不再让用户
+/// 对着「请确认」猜。
+fn unverified_paste_text(label: &str, elevated_beyond_us: bool) -> String {
+    if elevated_beyond_us {
+        format!("{label} 以管理员权限运行，本应用无法向它注入——请勿以管理员运行目标，或以管理员运行本应用")
+    } else {
+        format!("已粘贴到 {label}，请确认输入框内容")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetBarMode {
     Empty,
@@ -581,14 +591,25 @@ impl TargetRoutingVm {
                 ),
                 injected: true,
             },
-            TargetPasteOutcome::Injected { verified: false } => TargetPasteNotice {
-                tone: TargetNoticeTone::Warning,
-                text: format!(
-                    "已粘贴到 {}，请确认输入框内容",
-                    target.map_or(profile.label.as_str(), |binding| binding.label.as_str())
-                ),
-                injected: true,
-            },
+            TargetPasteOutcome::Injected { verified: false } => {
+                let label = target.map_or(profile.label.as_str(), |binding| binding.label.as_str());
+                // D77 提权目标：UIPI 拦截我们的命中测试与注入，上框必然落空
+                // （跨机拼多多实证：全链路 click:None、粘贴落不到输入框）。
+                // 此时「请确认」是让用户猜；显式给出处与两侧解法。检测经
+                // InputFocuser trait（VM 层不触碰平台实现，分层守卫红线）。
+                let elevated = target
+                    .and_then(|binding| binding.hwnd)
+                    .and_then(|hwnd| deps.focuser.target_process_elevated_beyond_us(hwnd))
+                    .unwrap_or(false);
+                if elevated {
+                    log::warn!("目标进程完整性级别高于本进程，UIPI 拦截注入 label={label}");
+                }
+                TargetPasteNotice {
+                    tone: TargetNoticeTone::Warning,
+                    text: unverified_paste_text(label, elevated),
+                    injected: true,
+                }
+            }
             TargetPasteOutcome::CopiedOnly { feedback }
             | TargetPasteOutcome::Failed { feedback } => TargetPasteNotice {
                 tone: if feedback.severity == pipeline::FeedbackSeverity::Error {
@@ -643,6 +664,19 @@ mod tests {
         let snapshot = vm.snapshot();
         assert_eq!(snapshot.mode, TargetBarMode::Ready);
         assert_eq!(snapshot.label, "wechat");
+    }
+
+    /// D77 未验证注入提示：目标提权时显式给出处与解法，常态维持「请确认」。
+    #[test]
+    fn unverified_paste_text_calls_out_elevated_target() {
+        assert_eq!(
+            unverified_paste_text("拼多多商家版 · 拼多多工作台", true),
+            "拼多多商家版 · 拼多多工作台 以管理员权限运行，本应用无法向它注入——请勿以管理员运行目标，或以管理员运行本应用"
+        );
+        assert_eq!(
+            unverified_paste_text("千牛 · 易软坊-接待中心", false),
+            "已粘贴到 千牛 · 易软坊-接待中心，请确认输入框内容"
+        );
     }
 
     #[test]

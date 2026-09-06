@@ -30,6 +30,7 @@ fn defaults_are_conservative() {
     assert!(s.auto_update_check, "默认开自动检查更新（D56）");
     assert_eq!(s.last_check_unix, 0, "默认从未检查过");
     assert!(s.dismissed_version.is_empty(), "默认没有跳过的版本");
+    assert!(s.nudge_offscreen_window, "默认开屏外窗口自愈（D77）");
 }
 
 #[test]
@@ -48,6 +49,7 @@ fn save_then_load_roundtrips() {
         auto_update_check: false,
         last_check_unix: 1_700_000_000,
         dismissed_version: "v0.2.0".into(),
+        nudge_offscreen_window: false,
         input_point_overrides: BTreeMap::new(),
     };
     s.save(&path).expect("写设置失败");

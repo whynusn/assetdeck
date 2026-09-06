@@ -82,10 +82,19 @@ pub struct AppSettings {
     /// 不再弹窗（手动检查不受影响）。
     #[serde(default)]
     pub dismissed_version: String,
+    /// D77 屏外窗口自愈：true（默认）= 上框点击点落在虚拟桌面外时，先把目标
+    /// 窗口按最小位移平移回可视区（尺寸不变、不抢激活）再走点击链；false =
+    /// 维持旧行为（SendInput 坐标被系统钳到桌面边缘，点击可能落不到目标）。
+    #[serde(default = "default_nudge_offscreen_window")]
+    pub nudge_offscreen_window: bool,
     /// 目标「上框点位」的 UI 覆盖（D76.4）：key = 目标 id（如 qianniu）。
     /// 空 = 该目标用画像链上的值（手编 user.toml 或内置）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub input_point_overrides: BTreeMap<String, InputPointOverride>,
+}
+
+fn default_nudge_offscreen_window() -> bool {
+    true
 }
 
 fn default_auto_update_check() -> bool {
@@ -208,6 +217,7 @@ impl Default for AppSettings {
             auto_update_check: default_auto_update_check(),
             last_check_unix: 0,
             dismissed_version: String::new(),
+            nudge_offscreen_window: default_nudge_offscreen_window(),
             input_point_overrides: BTreeMap::new(),
         }
     }
@@ -268,6 +278,7 @@ impl AppSettings {
             "fast_import_mode" => self.fast_import_mode,
             "verbose_diagnostics" => self.verbose_diagnostics,
             "auto_update_check" => self.auto_update_check,
+            "nudge_offscreen_window" => self.nudge_offscreen_window,
             _ => false,
         }
     }
@@ -283,6 +294,7 @@ impl AppSettings {
             "fast_import_mode" => Some(&mut self.fast_import_mode),
             "verbose_diagnostics" => Some(&mut self.verbose_diagnostics),
             "auto_update_check" => Some(&mut self.auto_update_check),
+            "nudge_offscreen_window" => Some(&mut self.nudge_offscreen_window),
             _ => None,
         }
     }
@@ -305,6 +317,7 @@ impl AppSettings {
             "fast_import_mode" => "多线程高速导入；关闭后转后台慢速，不抢前台。",
             "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
             "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",
+            "nudge_offscreen_window" => "窗口滑出屏幕时上框前自动拉回，立即生效。",
             _ => "",
         }
     }
@@ -364,6 +377,12 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
     SettingSpec::new("ui_animations", "界面动画", "外观", SettingKind::Toggle),
     SettingSpec::new("gpu_rendering", "GPU 渲染", "高级", SettingKind::Toggle),
     SettingSpec::new(
+        "nudge_offscreen_window",
+        "屏外窗口自愈",
+        "高级",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
         "verbose_diagnostics",
         "细粒度诊断日志",
         "高级",
@@ -421,6 +440,7 @@ mod tests {
             auto_update_check: true,
             last_check_unix: 0,
             dismissed_version: String::new(),
+            nudge_offscreen_window: false,
             input_point_overrides: BTreeMap::new(),
         };
         let views = settings.describe();
@@ -454,6 +474,7 @@ mod tests {
                 "fast_import_mode" => settings.fast_import_mode,
                 "verbose_diagnostics" => settings.verbose_diagnostics,
                 "auto_update_check" => settings.auto_update_check,
+                "nudge_offscreen_window" => settings.nudge_offscreen_window,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(
