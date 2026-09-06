@@ -3687,7 +3687,11 @@ pub mod dragdrop {
         lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_DROPFILES_MSG {
-            let hdrop = lparam as *mut core::ffi::c_void;
+            // WM_DROPFILES 的 HDROP 在 wParam（lParam 未用）。2026-09-06 真机
+            // 抓错：曾误读 lParam（恒 0）⇒ 每次拖入都解析出 0 条路径，而剪贴板
+            // CF_HDROP 走独立入口得以幸免；独立 WinForms 探针（HEX 块 +
+            // DragQueryFile 双路）证明 OS 送达的 HDROP 内容完好后定位到此处。
+            let hdrop = wparam as *mut core::ffi::c_void;
             let paths = paths_from_hdrop(hdrop);
             // 系统分配的 HDROP 必须归还（DragFinish），否则每次拖入泄漏一块。
             unsafe { DragFinish(hdrop) };
