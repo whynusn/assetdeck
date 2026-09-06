@@ -87,6 +87,11 @@ pub struct AppSettings {
     /// 维持旧行为（SendInput 坐标被系统钳到桌面边缘，点击可能落不到目标）。
     #[serde(default = "default_nudge_offscreen_window")]
     pub nudge_offscreen_window: bool,
+    /// D78 启动自动提权：true = 启动时若未提权则经 UAC 交棒重启（管理员运行，
+    /// 可向提权目标注入）；false（默认）= 普通权限，用户显式选择。代价见
+    /// detail：管理员下 Explorer 拖入导入被 UIPI 拦截（OLE 跨完整性级别无解）。
+    #[serde(default)]
+    pub auto_elevate_on_launch: bool,
     /// 目标「上框点位」的 UI 覆盖（D76.4）：key = 目标 id（如 qianniu）。
     /// 空 = 该目标用画像链上的值（手编 user.toml 或内置）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -218,6 +223,7 @@ impl Default for AppSettings {
             last_check_unix: 0,
             dismissed_version: String::new(),
             nudge_offscreen_window: default_nudge_offscreen_window(),
+            auto_elevate_on_launch: false,
             input_point_overrides: BTreeMap::new(),
         }
     }
@@ -279,6 +285,7 @@ impl AppSettings {
             "verbose_diagnostics" => self.verbose_diagnostics,
             "auto_update_check" => self.auto_update_check,
             "nudge_offscreen_window" => self.nudge_offscreen_window,
+            "auto_elevate_on_launch" => self.auto_elevate_on_launch,
             _ => false,
         }
     }
@@ -295,6 +302,7 @@ impl AppSettings {
             "verbose_diagnostics" => Some(&mut self.verbose_diagnostics),
             "auto_update_check" => Some(&mut self.auto_update_check),
             "nudge_offscreen_window" => Some(&mut self.nudge_offscreen_window),
+            "auto_elevate_on_launch" => Some(&mut self.auto_elevate_on_launch),
             _ => None,
         }
     }
@@ -318,6 +326,7 @@ impl AppSettings {
             "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
             "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",
             "nudge_offscreen_window" => "窗口滑出屏幕时上框前自动拉回，立即生效。",
+            "auto_elevate_on_launch" => "开启即弹 UAC 以管理员重启，可向管理员运行的目标注入；代价：无法再从资源管理器拖入素材。",
             _ => "",
         }
     }
@@ -383,6 +392,12 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
         SettingKind::Toggle,
     ),
     SettingSpec::new(
+        "auto_elevate_on_launch",
+        "自动以管理员运行",
+        "高级",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
         "verbose_diagnostics",
         "细粒度诊断日志",
         "高级",
@@ -441,6 +456,7 @@ mod tests {
             last_check_unix: 0,
             dismissed_version: String::new(),
             nudge_offscreen_window: false,
+            auto_elevate_on_launch: false,
             input_point_overrides: BTreeMap::new(),
         };
         let views = settings.describe();
@@ -475,6 +491,7 @@ mod tests {
                 "verbose_diagnostics" => settings.verbose_diagnostics,
                 "auto_update_check" => settings.auto_update_check,
                 "nudge_offscreen_window" => settings.nudge_offscreen_window,
+                "auto_elevate_on_launch" => settings.auto_elevate_on_launch,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(

@@ -31,6 +31,10 @@ fn defaults_are_conservative() {
     assert_eq!(s.last_check_unix, 0, "默认从未检查过");
     assert!(s.dismissed_version.is_empty(), "默认没有跳过的版本");
     assert!(s.nudge_offscreen_window, "默认开屏外窗口自愈（D77）");
+    assert!(
+        !s.auto_elevate_on_launch,
+        "默认不自动提权（D78）：UAC 每次启动弹窗 + 管理员下拖入导入失效，须用户显式选择"
+    );
 }
 
 #[test]
@@ -50,11 +54,16 @@ fn save_then_load_roundtrips() {
         last_check_unix: 1_700_000_000,
         dismissed_version: "v0.2.0".into(),
         nudge_offscreen_window: false,
+        auto_elevate_on_launch: true,
         input_point_overrides: BTreeMap::new(),
     };
     s.save(&path).expect("写设置失败");
     let loaded = AppSettings::load(&path);
     assert_eq!(loaded, s);
+    assert!(
+        loaded.auto_elevate_on_launch,
+        "自动提权参与持久化 round-trip"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 

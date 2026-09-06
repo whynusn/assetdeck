@@ -1672,6 +1672,36 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
     });
 }
 
+/// D78 提权交棒的防环标记：经 runas 拉起的新进程带此参数，即使再被判定为
+/// 未提权（异常环境）也不会再次交棒——否则 UAC 放行后可能陷入重启循环。
+const ELEVATION_RELAUNCHED_ARG: &str = "--elevation-relaunched";
+
+/// D78 立即交棒提权：对当前 exe 发起 runas 重启，命令行透传现有参数（各自
+/// 加引号防含空格路径拆散）并追加防环标记。成功返回 true，调用方应尽快
+/// 退出本进程；UAC 被拒或交棒失败返回 false。
+fn relaunch_elevated_now() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            logging::warn!("提权重启失败：求不到当前 exe 路径（{error}）");
+            return false;
+        }
+    };
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|arg| arg != ELEVATION_RELAUNCHED_ARG)
+        .map(|arg| format!("\"{arg}\""))
+        .chain(std::iter::once(format!("\"{ELEVATION_RELAUNCHED_ARG}\"")))
+        .collect();
+    let ok = platform::win32::relaunch_self_elevated(&exe.to_string_lossy(), &args.join(" "));
+    if ok {
+        logging::info!("提权重启已交棒（runas），本进程即将退出");
+    } else {
+        logging::warn!("提权交棒未成功（UAC 拒绝或 ShellExecute 失败）");
+    }
+    ok
+}
+
 fn main() {
     // D38：日志初始化。目录 = exe 同目录 logs/（便携约定：跟 settings.toml 同一
     // 推理——无库根时贴 exe 走）。初始化失败只降级不阻断启动。
@@ -1722,6 +1752,18 @@ fn main() {
         ui_viewmodels::settings_path(library_root.as_deref().map(std::path::Path::new));
     let settings = Rc::new(RefCell::new(AppSettings::load(&settings_path)));
     let settings_path = Rc::new(settings_path);
+
+    // D78 启动自动提权：设置开启且当前未提权时，经 UAC 交棒重启自身（防环
+    // 标记保证只交棒一次）。UAC 被拒则按普通权限继续——不因拒提权打断用户
+    // 开应用。必须在建窗前判定：交棒成功即退出，不开窗、不占渲染后端。
+    if platform::win32::should_relaunch_elevated(
+        settings.borrow().auto_elevate_on_launch,
+        platform::win32::current_process_is_elevated(),
+        std::env::args().any(|arg| arg == ELEVATION_RELAUNCHED_ARG),
+    ) && relaunch_elevated_now()
+    {
+        return;
+    }
 
     // D59 目标配置双通道：用户画像 profiles.user.toml（同 id 覆盖内置）与实例
     // 别名册 targets.json。与设置同目录约定（库根优先，回退 exe 旁）。
@@ -3601,6 +3643,20 @@ fn main() {
             // D77 屏外窗口自愈：聚焦器经 Arc 热读，立即生效。
             if key == "nudge_offscreen_window" {
                 nudge_offscreen.store(s.nudge_offscreen_window, Ordering::Relaxed);
+            }
+            // D78 自动提权：开启且当前未提权 → 立即交棒重启（等价于应用内
+            // 「以管理员重启」一键入口，不用去右键菜单找）。UAC 被拒则设置
+            // 保留、本次继续普通权限，下次启动再试；已提权时开关仅持久化。
+            if key == "auto_elevate_on_launch"
+                && s.auto_elevate_on_launch
+                && platform::win32::should_relaunch_elevated(
+                    true,
+                    platform::win32::current_process_is_elevated(),
+                    std::env::args().any(|arg| arg == ELEVATION_RELAUNCHED_ARG),
+                )
+                && relaunch_elevated_now()
+            {
+                std::process::exit(0); // 与更新移交（D70）同风格：交棒成功立即退出
             }
             // 浅色主题：立即实时重铺自绘层令牌（std-widgets 仍 fluent-dark，v1 边界）。
             if key == "light_theme" {

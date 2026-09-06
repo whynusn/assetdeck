@@ -48,7 +48,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
 };
-use windows_sys::Win32::UI::Shell::DROPFILES;
+use windows_sys::Win32::UI::Shell::{ShellExecuteW, DROPFILES};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
@@ -57,7 +57,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, EVENT_OBJECT_FOCUS,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GA_ROOT, MSG, OBJID_CARET,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
+    SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOWNORMAL, WINEVENT_OUTOFCONTEXT, WM_QUIT,
 };
 
 use crate::{
@@ -2394,6 +2394,60 @@ fn token_integrity_rid(token: HANDLE) -> Option<u32> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 自身提权与交棒重启（D78）
+// ---------------------------------------------------------------------------
+
+/// 当前进程能否向高完整性目标注入输入：自身令牌完整性 RID ≥ 高（0x4000）。
+///
+/// 用完整性级别而不是 `TokenElevation`：UAC 关闭时管理员进程拿的就是完整
+/// 令牌，TokenElevation 未必为真；而「能不能注入」只由完整性级别决定。
+pub fn current_process_is_elevated() -> bool {
+    // 0x4000 = SECURITY_MANDATORY_HIGH_RID（windows-sys 0.59 未导出该常量，
+    // 与 D77 的 RID 口径一致：0x2000 低 / 0x3000 中 / 0x4000 高）。
+    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x4000;
+    matches!(
+        current_process_integrity_rid(),
+        Some(rid) if rid >= SECURITY_MANDATORY_HIGH_RID
+    )
+}
+
+/// D78 以管理员重启自身：对指定 exe 发起 `ShellExecuteW` runas（触发 UAC）。
+/// `params` 原样透传给新进程命令行（调用方负责带防环标记与参数引号）。
+/// 返回是否已成功交棒——true 时调用方应尽快退出本进程；UAC 被拒/Shell
+/// 失败返回 false，调用方按普通权限继续。
+pub fn relaunch_self_elevated(exe_path: &str, params: &str) -> bool {
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    let operation = wide("runas");
+    let file = wide(exe_path);
+    let arguments = wide(params);
+    let instance = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            arguments.as_ptr(),
+            ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW 约定：返回值 > 32 为成功。
+    instance as usize > 32
+}
+
+/// D78 自动提权判定（纯函数）：设置开启、当前未提权、且本次启动不是提权
+/// 交棒的产物——三者同时成立才交棒。防环参数保证即使 UAC 放行后新进程
+/// 仍被判定为未提权（异常环境），也不会陷入无限重启循环。
+pub fn should_relaunch_elevated(
+    setting_on: bool,
+    is_elevated: bool,
+    relaunched_once: bool,
+) -> bool {
+    setting_on && !is_elevated && !relaunched_once
+}
+
 /// 对画像声明的锚点做一次左键单击。
 ///
 /// 红线：只合成鼠标移动与左键按下/释放，绝不合成任何键盘事件；
@@ -2902,6 +2956,27 @@ mod tests {
         // 桌面尺寸不可得（0/负）→ 不动窗口。
         assert_eq!(offscreen_shift((0, 0), (0, 0), (0, 0)), None);
         assert_eq!(offscreen_shift((0, 0), (0, 0), (100, -1)), None);
+    }
+
+    /// 自动提权判定：三条件同时成立才交棒，防环参数一票否决。
+    #[test]
+    fn should_relaunch_elevated_requires_all_three_conditions() {
+        assert!(
+            should_relaunch_elevated(true, false, false),
+            "设置开 + 未提权 + 未交棒过 → 交棒"
+        );
+        assert!(
+            !should_relaunch_elevated(false, false, false),
+            "设置关 → 不动"
+        );
+        assert!(
+            !should_relaunch_elevated(true, true, false),
+            "已提权 → 不动"
+        );
+        assert!(
+            !should_relaunch_elevated(true, false, true),
+            "防环：交棒产物即使仍判未提权也不再交棒"
+        );
     }
 
     /// caret 身份谓词：缺省=千牛校准值（role 7/编辑）；画像自定义后按声明比对。
