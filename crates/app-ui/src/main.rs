@@ -2224,6 +2224,11 @@ fn main() {
             } else if ui.get_target_rename_open() {
                 pending_target_rename.replace(None);
                 ui.set_target_rename_open(false);
+            } else if ui.get_tuning_open() {
+                // D76.5 上框点位弹窗叠在设置面板上，Esc 先收它。
+                ui.set_tuning_open(false);
+                ui.set_tuning_selected_id("".into());
+                ui.set_tuning_error("".into());
             } else if ui.get_settings_open() {
                 ui.set_settings_shown(false);
                 ui.set_settings_open(false);
@@ -2624,8 +2629,18 @@ fn main() {
                 ui.set_tuning_x_text(tuning.point_x.into());
                 ui.set_tuning_y_text(tuning.point_y.into());
                 ui.set_tuning_error("".into());
+                ui.set_tuning_open(true);
             }
         });
+        {
+            let ui = app.as_weak();
+            app.on_tuning_cancelled(move || {
+                let Some(ui) = ui.upgrade() else { return };
+                ui.set_tuning_open(false);
+                ui.set_tuning_selected_id("".into());
+                ui.set_tuning_error("".into());
+            });
+        }
     }
     {
         let ui = app.as_weak();
@@ -2684,11 +2699,16 @@ fn main() {
                 return;
             }
             ui.set_tuning_error("".into());
+            // 热更新留痕：真机排查「是否即时生效」曾只能靠 settings.toml 的
+            // mtime 反推（D76.5 成功路径此前零日志）。
+            logging::info!("上框点位已保存并热更新 target={target_id} x={x} y={y}");
             sync_target_tunings(&ui, &routing.borrow());
+            ui.set_tuning_open(false);
+            ui.set_tuning_selected_id("".into());
             show_notice(
                 &ui,
                 TargetNoticeTone::Success,
-                format!("{target_id} 上框点位已更新并生效"),
+                format!("{target_id} 上框点位已更新并即时生效（无需重启）"),
             );
         });
     }
@@ -2739,11 +2759,12 @@ fn main() {
                 ui.set_tuning_y_text(tuning.point_y.into());
             }
             ui.set_tuning_error("".into());
+            logging::info!("上框点位已恢复画像链值并热更新 target={target_id}");
             sync_target_tunings(&ui, &routing.borrow());
             show_notice(
                 &ui,
                 TargetNoticeTone::Success,
-                format!("{target_id} 上框点位已恢复画像链上的值"),
+                format!("{target_id} 上框点位已恢复画像链上的值（即时生效）"),
             );
         });
     }
@@ -3104,6 +3125,9 @@ fn main() {
             let closing = ui.get_settings_open();
             if closing {
                 ui.set_settings_shown(false);
+                // 叠在面板上的上框点位弹窗随面板一起收（D76.5）。
+                ui.set_tuning_open(false);
+                ui.set_tuning_selected_id("".into());
             } else {
                 // D61：每次展开重检旧版库（迁移可能刚被文件管理器改名/删除）。
                 refresh_migration_entry(&ui, library_root.as_deref());
@@ -3120,6 +3144,9 @@ fn main() {
             let ui = ui.unwrap();
             ui.set_settings_shown(false);
             ui.set_settings_open(false);
+            // 叠在面板上的上框点位弹窗随面板一起收（D76.5）。
+            ui.set_tuning_open(false);
+            ui.set_tuning_selected_id("".into());
         });
     }
 

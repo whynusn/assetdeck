@@ -278,9 +278,11 @@ export component AppWindow inherits Window {
     callback target-chip-clicked();
     callback target-choice-selected(string);
     callback target-pin-toggled();
-    // D76.4 上框点位（设置面板高级区）：选目标行回填表达式；保存先校验再
-    // 写 settings.toml 覆盖层并热生效；恢复默认 = 删除该目标覆盖。
+    // D76.5 上框点位（设置面板高级区点开独立弹窗）：选目标回填表达式并弹窗；
+    // 保存先校验再写 settings.toml 覆盖层并热生效，成功/取消都收弹窗；
+    // 恢复默认 = 删除该目标覆盖（弹窗留在原地便于继续看回填值）。
     in property <[TargetTuningData]> target-tunings;
+    in property <bool> tuning-open: false;
     in property <string> tuning-selected-id: "";
     in property <string> tuning-selected-label: "";
     in-out property <string> tuning-x-text: "";
@@ -289,6 +291,7 @@ export component AppWindow inherits Window {
     callback tuning-selected(string);
     callback tuning-save(string, string);
     callback tuning-reset();
+    callback tuning-cancelled();
     callback settings-toggled();
     // D67 设置面板显式关闭（点外部不再收起——见挡板注释）。
     callback settings-closed();
@@ -1411,6 +1414,7 @@ export component AppWindow inherits Window {
             || root.rename-open || root.properties-open
             || root.scope-menu-open || root.classify-open
             || root.target-rename-open
+            || root.tuning-open
             || root.update-open: TouchArea {
             width: 100%;
             height: 100%;
@@ -1770,11 +1774,13 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // D76.4 上框点位（高级）：声明了 input_point 的目标可在
-                        // 此改 x/y 表达式。保存 = 校验 + 写 settings.toml 覆盖层 +
-                        // 热生效（优先级 设置面板 > 手编 user.toml > 内置）；
-                        // 恢复默认 = 删除覆盖。包在 VerticalLayout 内（同上方
-                        // 设置行：裸 Rectangle 不传播首选高度，渲染实测）。
+                        // D76.5 上框点位（高级）：声明了 input_point 的目标在此
+                        // 列出，点开独立弹窗编辑 x/y 表达式（D76.4 曾内联展开在
+                        // 面板里，选中后没有回退出口——用户反馈改弹窗）。保存 =
+                        // 校验 + 写 settings.toml 覆盖层 + 热生效（优先级 设置
+                        // 面板 > 手编 user.toml > 内置）；恢复默认 = 删除覆盖。
+                        // 包在 VerticalLayout 内（同上方设置行：裸 Rectangle 不
+                        // 传播首选高度，渲染实测）。
                         VerticalLayout {
                             spacing: 5px;
 
@@ -1783,74 +1789,12 @@ export component AppWindow inherits Window {
                                 text: "上框点位（高级）";
                             }
 
-                            if root.tuning-selected-id == "": HorizontalLayout {
+                            if root.target-tunings.length > 0: HorizontalLayout {
                                 spacing: 4px;
                                 for tuning in root.target-tunings: FlatButton {
                                     text: tuning.label;
                                     tip: "调整该目标「把焦点放入输入框」的点击坐标表达式";
                                     clicked => { root.tuning-selected(tuning.target-id); }
-                                }
-                            }
-
-                            if root.tuning-selected-id != "": VerticalLayout {
-                                spacing: 4px;
-
-                                Text {
-                                    text: root.tuning-selected-label;
-                                    color: Theme.text-3;
-                                    font-size: 10px;
-                                    overflow: elide;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text {
-                                            text: "x 表达式";
-                                            color: Theme.text-3;
-                                            font-size: 9px;
-                                        }
-                                        tuning-x-input := LineEdit {
-                                            text: root.tuning-x-text;
-                                            font-size: 10px;
-                                        }
-                                    }
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text {
-                                            text: "y 表达式";
-                                            color: Theme.text-3;
-                                            font-size: 9px;
-                                        }
-                                        tuning-y-input := LineEdit {
-                                            text: root.tuning-y-text;
-                                            font-size: 10px;
-                                        }
-                                    }
-                                }
-
-                                if root.tuning-error != "": Text {
-                                    text: root.tuning-error;
-                                    color: Theme.danger;
-                                    font-size: 10px;
-                                    wrap: word-wrap;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Rectangle { horizontal-stretch: 1; }
-                                    FlatButton {
-                                        text: "恢复默认";
-                                        clicked => { root.tuning-reset(); }
-                                    }
-                                    Button {
-                                        text: "保存";
-                                        primary: true;
-                                        clicked => {
-                                            root.tuning-save(tuning-x-input.text, tuning-y-input.text);
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -1945,6 +1889,110 @@ export component AppWindow inherits Window {
                 }
             }
         }
+        // D76.5 上框点位弹窗：设置面板「上框点位（高级）」点目标进入。挂在设置
+        // 面板之后 = 文档序叠其上；即时挂载（同重命名/属性弹窗，两段式动画仅
+        // 菜单级）。显式出口：取消 / 保存成功 / Esc——D76.4 内联编辑无回退的
+        // 教训在这里兜死。
+        if root.tuning-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: tuning-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            tuning-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: "上框点位";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.tuning-selected-label;
+                    color: Theme.text-3;
+                    font-size: 10px;
+                    overflow: elide;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "x 表达式";
+                            color: Theme.text-3;
+                            font-size: 9px;
+                        }
+                        tuning-x-input := LineEdit {
+                            text: root.tuning-x-text;
+                            font-size: 10px;
+                            placeholder-text: "如 8 或 WINDOW_WIDTH - 8";
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        Text {
+                            text: "y 表达式";
+                            color: Theme.text-3;
+                            font-size: 9px;
+                        }
+                        tuning-y-input := LineEdit {
+                            text: root.tuning-y-text;
+                            font-size: 10px;
+                            placeholder-text: "如 WINDOW_HEIGHT - 8";
+                        }
+                    }
+                }
+
+                Text {
+                    text: "客户区左上角为原点，逻辑像素（96 DPI 基准）；支持 + - * / 括号与 WINDOW_WIDTH / WINDOW_HEIGHT";
+                    color: Theme.text-3;
+                    font-size: 9px;
+                    wrap: word-wrap;
+                }
+
+                if root.tuning-error != "": Text {
+                    text: root.tuning-error;
+                    color: Theme.danger;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    FlatButton {
+                        text: "恢复默认";
+                        tip: "删除本目标覆盖值，回到手编 user.toml / 内置画像的值";
+                        clicked => { root.tuning-reset(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "取消";
+                        clicked => {
+                            root.tuning-cancelled();
+                        }
+                    }
+                    Button {
+                        text: "保存";
+                        primary: true;
+                        clicked => {
+                            root.tuning-save(tuning-x-input.text, tuning-y-input.text);
+                        }
+                    }
+                }
+            }
+        }
+
         // —— D48 右键菜单浮层：锚右键命中点，坐标由壳层夹取（贴边不越窗）——
         if root.context-menu-open: Rectangle {
             x: Math.min(root.context-menu-x, root.width - 220px);
