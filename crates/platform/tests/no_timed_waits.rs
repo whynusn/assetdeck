@@ -58,20 +58,23 @@ fn win32_production_paths_do_not_step_a_clock_forward() {
 
 #[test]
 fn guard_allowlist_stays_minimal() {
-    // 白名单只应有剪贴板退避那一条。多出来一条就要在评审里被看见。
+    // 白名单只允许「剪贴板打开退避」这一类理由。D79 起 = 写侧 + 读侧（粘贴
+    // 导入）两处，同一物理事实：剪贴板占用无事件可订阅，只能退避重试一次。
+    // 再多一条就要在评审里被看见。
     let allowed: Vec<&str> = production_lines()
         .filter(|(_, line)| line.contains(ALLOW_MARK))
         .map(|(_, line)| line.trim())
         .collect();
     assert_eq!(
         allowed.len(),
-        1,
+        2,
         "sleep-allowed 白名单发生变化，请确认每一条都真的无事件可订阅：\n{}",
         allowed.join("\n")
     );
-    assert!(
-        allowed[0].contains("CLIPBOARD_RETRY_DELAY_MS"),
-        "唯一白名单应是剪贴板退避，实际是：{}",
-        allowed[0]
-    );
+    for line in &allowed {
+        assert!(
+            line.contains("CLIPBOARD_RETRY_DELAY_MS"),
+            "白名单只应是剪贴板打开退避，实际是：{line}"
+        );
+    }
 }

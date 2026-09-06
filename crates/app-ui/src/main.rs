@@ -2184,6 +2184,23 @@ fn main() {
         });
     }
 
+    // D79 粘贴导入（key-root 捕获 Ctrl+V，文本输入持焦时已让位）：读剪贴板
+    // CF_HDROP 走与拖入同一导入流。提权会话收不到 Explorer 拖入（UIPI 硬拦
+    // OLE），这是与拖入等价的键盘入口；普通会话同样可用。剪贴板无文件列表
+    // （如刚复制过素材图片）按「没有可导入内容」静默忽略。
+    {
+        let flow = import_flow.clone();
+        app.on_paste_import_requested(move || {
+            let paths = platform::win32::read_clipboard_file_paths();
+            if paths.is_empty() {
+                logging::info!("粘贴导入：剪贴板无文件列表（CF_HDROP），忽略");
+                return;
+            }
+            logging::info!("粘贴导入：{} 条路径", paths.len());
+            flow.open(paths);
+        });
+    }
+
     // 顶栏「选择」按钮：切换多选模式；退出清选区（R8/R9）。
     {
         let crud = crud.clone();

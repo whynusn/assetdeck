@@ -32,10 +32,13 @@ use windows_sys::Win32::Security::{
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatA, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatA,
+    SetClipboardData,
 };
 // 剪贴板格式常量在 windows-sys 元数据中归属 Ole 模块（类型 CLIPBOARD_FORMAT = u16）。
-use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows_sys::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows_sys::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
@@ -533,6 +536,108 @@ impl Win32Clipboard {
         }
         Ok(())
     }
+}
+
+/// DROPFILES 全局块 → 路径列表（纯函数，单测覆盖；D79）。
+///
+/// 布局：DROPFILES 头（pFiles = 文件列表起始偏移 + pt + fNC + fWide）+
+/// 文件名列表（每项 NUL 结尾，整体以双 NUL 终止；fWide=1 为 UTF-16，否则
+/// ANSI）。资源管理器拖入（WM_DROPFILES 的 HDROP）与剪贴板 CF_HDROP 同一
+/// 布局，拖入消息通道与粘贴导入共用本解析。
+fn parse_dropfiles_bytes(bytes: &[u8]) -> Vec<std::path::PathBuf> {
+    const HEADER_LEN: usize = std::mem::size_of::<DROPFILES>();
+    if bytes.len() < HEADER_LEN {
+        return Vec::new();
+    }
+    let read_u32 =
+        |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+    let list_offset = read_u32(0) as usize;
+    let wide = read_u32(16) != 0; // fWide
+    if list_offset < HEADER_LEN || list_offset >= bytes.len() {
+        return Vec::new();
+    }
+    let list = &bytes[list_offset..];
+    let mut paths = Vec::new();
+    if wide {
+        let units: Vec<u16> = list
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        let mut start = 0usize;
+        for (index, unit) in units.iter().enumerate() {
+            if *unit != 0 {
+                continue;
+            }
+            if index > start {
+                paths.push(String::from_utf16_lossy(&units[start..index]).into());
+            }
+            if index == start {
+                break; // 空串（双 NUL）= 列表终止
+            }
+            start = index + 1;
+        }
+    } else {
+        let mut start = 0usize;
+        for (index, byte) in list.iter().enumerate() {
+            if *byte != 0 {
+                continue;
+            }
+            if index > start {
+                paths.push(
+                    String::from_utf8_lossy(&list[start..index])
+                        .into_owned()
+                        .into(),
+                );
+            }
+            if index == start {
+                break;
+            }
+            start = index + 1;
+        }
+    }
+    paths
+}
+
+/// D79 粘贴导入：读剪贴板 CF_HDROP 的文件路径列表（资源管理器「复制」的
+/// 文件）。提权进程读普通剪贴板是允许方向（UIPI 只拦向低完整性窗口发消息），
+/// 提权会话由此获得与拖入等价的导入入口。无文件剪贴板/占用失败返回空列表，
+/// 调用方按「没有可导入内容」静默处理，不报错。
+pub fn read_clipboard_file_paths() -> Vec<std::path::PathBuf> {
+    // 打开剪贴板可能与其他进程的占用竞争：失败后短暂等待重试一次（写侧同款）。
+    let mut opened = unsafe { OpenClipboard(ptr::null_mut()) };
+    if opened == 0 {
+        unsafe { Sleep(CLIPBOARD_RETRY_DELAY_MS) }; // sleep-allowed(剪贴板占用无事件可订阅,只能退避重试)
+        opened = unsafe { OpenClipboard(ptr::null_mut()) };
+    }
+    if opened == 0 {
+        return Vec::new();
+    }
+    let paths = unsafe { read_clipboard_file_paths_locked() };
+    unsafe { CloseClipboard() };
+    paths
+}
+
+/// 前置条件：剪贴板已由调用方成功打开。
+unsafe fn read_clipboard_file_paths_locked() -> Vec<std::path::PathBuf> {
+    let handle = unsafe { GetClipboardData(u32::from(CF_HDROP)) };
+    if handle.is_null() {
+        return Vec::new();
+    }
+    let size = unsafe { GlobalSize(handle) };
+    if size == 0 {
+        return Vec::new();
+    }
+    let locked = unsafe { GlobalLock(handle) };
+    if locked.is_null() {
+        return Vec::new();
+    }
+    // 安全：GlobalSize 给出块大小，from_raw_parts 只读访问锁定区间。
+    let bytes = unsafe { std::slice::from_raw_parts(locked.cast::<u8>(), size) };
+    let paths = parse_dropfiles_bytes(bytes);
+    unsafe { GlobalUnlock(handle) };
+    paths
 }
 
 // ---------------------------------------------------------------------------
@@ -2979,6 +3084,51 @@ mod tests {
         );
     }
 
+    /// D79 DROPFILES 解析：宽字符多路径 + 双 NUL 终止、ANSI 回落、坏头防呆。
+    #[test]
+    fn parse_dropfiles_bytes_wide_ansi_and_malformed() {
+        let make_header = |f_wide: i32| {
+            let mut blob = Vec::new();
+            blob.extend_from_slice(&20u32.to_le_bytes()); // pFiles
+            blob.extend_from_slice(&0i32.to_le_bytes()); // pt.x
+            blob.extend_from_slice(&0i32.to_le_bytes()); // pt.y
+            blob.extend_from_slice(&0i32.to_le_bytes()); // fNC
+            blob.extend_from_slice(&f_wide.to_le_bytes()); // fWide
+            blob
+        };
+        // 宽字符：两个路径 + 双 NUL 终止。
+        let mut wide = make_header(1);
+        for text in ["C:\\图库\\a.png", "D:\\dir with space\\b.jpg"] {
+            for unit in text.encode_utf16() {
+                wide.extend_from_slice(&unit.to_le_bytes());
+            }
+            wide.extend_from_slice(&0u16.to_le_bytes());
+        }
+        wide.extend_from_slice(&0u16.to_le_bytes());
+        let paths = parse_dropfiles_bytes(&wide);
+        assert_eq!(paths.len(), 2, "宽字符列表两条路径");
+        assert_eq!(paths[0], std::path::PathBuf::from("C:\\图库\\a.png"));
+        assert_eq!(
+            paths[1],
+            std::path::PathBuf::from("D:\\dir with space\\b.jpg")
+        );
+
+        // ANSI（fWide=0）：单路径。
+        let mut ansi = make_header(0);
+        ansi.extend_from_slice(b"C:\\a.png");
+        ansi.extend_from_slice(&[0, 0]); // 双 NUL
+        let paths = parse_dropfiles_bytes(&ansi);
+        assert_eq!(paths, vec![std::path::PathBuf::from("C:\\a.png")]);
+
+        // 坏头：pFiles 偏移越界 → 空列表不 panic。
+        let mut bad = make_header(1);
+        bad[0] = 0xFF;
+        assert!(parse_dropfiles_bytes(&bad).is_empty());
+        // 不足一个头 → 空。
+        assert!(parse_dropfiles_bytes(&[0u8; 8]).is_empty());
+        assert!(parse_dropfiles_bytes(&[]).is_empty());
+    }
+
     /// caret 身份谓词：缺省=千牛校准值（role 7/编辑）；画像自定义后按声明比对。
     #[test]
     fn caret_identity_matches_declared_role_and_name() {
@@ -3274,6 +3424,8 @@ mod tests {
 // 故经 OLE 注册自主 IDropTarget。回调在注册线程（UI 消息泵）派发。
 // ---------------------------------------------------------------------------
 pub mod dragdrop {
+    use std::cell::RefCell;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, OnceLock};
     use windows::core::implement;
     use windows::Win32::Foundation::{HGLOBAL, HWND, POINTL};
@@ -3286,6 +3438,16 @@ pub mod dragdrop {
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
     use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    // D79 消息型拖入通道（windows-sys 侧；HWND/HDROP 与 windows-crate 同名，
+    // 一律以裸指针传参规避导入冲突）。
+    use windows_sys::Win32::Foundation::{GetLastError, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, ChangeWindowMessageFilterEx, DefWindowProcW, SetWindowLongPtrW,
+        GWLP_WNDPROC, MSGFLT_ALLOW, WM_NCDESTROY, WNDPROC,
+    };
 
     use crate::{FileDropSink, PlatformError};
 
@@ -3399,12 +3561,18 @@ pub mod dragdrop {
     }
 
     /// 在主窗口 HWND 上注册拖入接收。重复注册会失败（先 Revoke 再注册）。
+    ///
+    /// D79 双通道：提权会话走 [`register_file_drop_message_channel`]（OLE 拖放
+    /// 跨完整性级别被 UIPI 硬拦，消息型拖入是正门）；普通会话维持 OLE 不变。
     pub fn register_file_drop(
         hwnd: isize,
         sink: Arc<dyn FileDropSink>,
     ) -> Result<(), PlatformError> {
         if hwnd == 0 {
             return Err(PlatformError::Window("窗口句柄为空，拖拽导入不可用".into()));
+        }
+        if super::current_process_is_elevated() {
+            return register_file_drop_message_channel(hwnd, sink);
         }
         ensure_ole_initialized()?;
         let target: IDropTarget = FileDropTarget { sink }.into();
@@ -3414,6 +3582,127 @@ pub mod dragdrop {
             let _ = RevokeDragDrop(hwnd);
             RegisterDragDrop(hwnd, &target)
                 .map_err(|error| PlatformError::Window(format!("注册拖入目标失败: {error}")))
+        }
+    }
+
+    // ---------------- D79 消息型拖入通道（提权会话） ----------------
+
+    /// `WM_DROPFILES`(0x0233) 与 `WM_COPYGLOBALDATA`(0x004A)：前者由
+    /// windows-sys 在 UI::Shell 导出与否不确定，后者属私有消息，均本地定义
+    /// 常量，避免依赖元数据归属。
+    const WM_DROPFILES_MSG: u32 = 0x0233;
+    const WM_COPYGLOBALDATA: u32 = 0x004A;
+
+    static MESSAGE_CHANNEL_INSTALLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static MESSAGE_PREVIOUS_PROC: std::sync::atomic::AtomicIsize =
+        std::sync::atomic::AtomicIsize::new(0);
+
+    thread_local! {
+        /// 消息型拖入的接收端。WM_DROPFILES 投递在窗口所属线程 = UI 线程（与
+        /// OLE 回调同线程语义），thread_local 存引用计数句柄即可。
+        static MESSAGE_SINK: RefCell<Option<Arc<dyn FileDropSink>>> = const { RefCell::new(None) };
+    }
+
+    /// 提权会话的拖入通道：OLE 拖放跨完整性级别被 UIPI 硬拦（Explorer 普通权限
+    /// → 本应用提权，DragEnter 都到不了我们），消息型拖入是 UIPI 留的正门——
+    /// `WM_DROPFILES` 与 `WM_COPYGLOBALDATA` 恰是官方允许经
+    /// `ChangeWindowMessageFilterEx` 显式放行的消息。DragAcceptFiles 挂
+    /// WS_EX_ACCEPTFILES，Explorer 对未注册 OLE 目标的拖放即走此通道。
+    ///
+    /// 与 OLE 注册互斥：同一 HWND 上 OLE 目标优先于 DragAcceptFiles，提权会话
+    /// 由 [`register_file_drop`] 分叉保证只走本通道。子类化模式与 paint_guard
+    /// 相同（SetWindowLongPtrW 链 + WM_NCDESTROY 还原），两链按安装顺序自然
+    /// 串接；UI 线程 STA 单线程泵消息，安装期间无并发 proc 调用。
+    fn register_file_drop_message_channel(
+        hwnd: isize,
+        sink: Arc<dyn FileDropSink>,
+    ) -> Result<(), PlatformError> {
+        MESSAGE_SINK.with(|slot| *slot.borrow_mut() = Some(sink));
+        // windows_sys 句柄均为裸指针别名；拖拽模块已用 windows-crate 的 HWND
+        // 名字，这里直接以裸指针传参避免同名冲突。
+        let raw = hwnd as *mut core::ffi::c_void;
+        unsafe {
+            DragAcceptFiles(raw, 1);
+            for message in [WM_DROPFILES_MSG, WM_COPYGLOBALDATA] {
+                // 放行失败只告警：拖入降级为不可用，导入入口仍在。
+                if ChangeWindowMessageFilterEx(raw, message, MSGFLT_ALLOW, std::ptr::null_mut())
+                    == 0
+                {
+                    log::warn!(
+                        "放行拖入消息 {message:#x} 失败（GetLastError={}）",
+                        GetLastError()
+                    );
+                }
+            }
+            if MESSAGE_CHANNEL_INSTALLED.swap(true, Ordering::AcqRel) {
+                return Ok(()); // 重复挂载只刷新 sink，不重复子类化
+            }
+            let previous = SetWindowLongPtrW(
+                raw,
+                GWLP_WNDPROC,
+                dropfiles_proc as *const () as usize as isize,
+            );
+            MESSAGE_PREVIOUS_PROC.store(previous, Ordering::Relaxed);
+        }
+        log::info!("拖入改走消息通道（提权会话，OLE 被 UIPI 拦截）hwnd={hwnd:#x}");
+        Ok(())
+    }
+
+    /// WM_DROPFILES 的 HDROP → 路径列表：GlobalLock 取原始 DROPFILES 块后按
+    /// 纯函数解析（与剪贴板 CF_HDROP 同一布局，共用 parse_dropfiles_bytes）。
+    fn paths_from_hdrop(hdrop: *mut core::ffi::c_void) -> Vec<std::path::PathBuf> {
+        if hdrop.is_null() {
+            return Vec::new();
+        }
+        unsafe {
+            let size = GlobalSize(hdrop);
+            if size == 0 {
+                return Vec::new();
+            }
+            let locked = GlobalLock(hdrop);
+            if locked.is_null() {
+                return Vec::new();
+            }
+            let bytes = std::slice::from_raw_parts(locked.cast::<u8>(), size);
+            let paths = super::parse_dropfiles_bytes(bytes);
+            GlobalUnlock(hdrop);
+            paths
+        }
+    }
+
+    unsafe extern "system" fn dropfiles_proc(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_DROPFILES_MSG {
+            let hdrop = lparam as *mut core::ffi::c_void;
+            let paths = paths_from_hdrop(hdrop);
+            // 系统分配的 HDROP 必须归还（DragFinish），否则每次拖入泄漏一块。
+            unsafe { DragFinish(hdrop) };
+            MESSAGE_SINK.with(|slot| {
+                if let Some(sink) = slot.borrow().as_ref() {
+                    sink.files_dropped(paths);
+                }
+            });
+            return 0;
+        }
+        if msg == WM_NCDESTROY {
+            // 还原子类化，避免销毁路径上 proc 悬垂；顺带释放 sink（paint_guard 同款）。
+            let previous = MESSAGE_PREVIOUS_PROC.load(Ordering::Relaxed);
+            if previous != 0 {
+                unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous) };
+            }
+            MESSAGE_SINK.with(|slot| *slot.borrow_mut() = None);
+        }
+        let previous = MESSAGE_PREVIOUS_PROC.load(Ordering::Relaxed);
+        if previous == 0 {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        } else {
+            let proc: WNDPROC = std::mem::transmute(previous);
+            unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
         }
     }
 }

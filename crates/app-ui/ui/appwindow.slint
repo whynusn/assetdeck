@@ -12,6 +12,17 @@ export { Theme } from "theme.slint";
 // 即可在运行时整体翻转明暗——这是「浅色主题切不全」问题的正解（D37）。
 export { Palette }
 
+// 文本输入聚焦计数（D79）：key-root 捕获的 Ctrl+A / Ctrl+V 必须向所有文本
+// 输入让位（否则输入框内的全选/粘贴被键盘根抢走）。各输入就地挂 changed
+// has-focus 钩子增减计数——计数而非布尔的理由：聚焦切换事件顺序不定，
+// 计数对「A 失焦与 B 获焦交错」天然幂等，布尔写法会出现闪断。
+export global TextInputFocus {
+    private property <int> focused-count: 0;
+    public function focus-gained() { focused-count += 1; }
+    public function focus-lost() { focused-count = Math.max(0, focused-count - 1); }
+    public function any() -> bool { return focused-count > 0; }
+}
+
 // UI 共享枚举常量：消灭 .slint 里的魔法数字（综合分析报告「三.9」）。
 // 数字值与 app-ui/src/ui_enums.rs 的映射保持一致。
 export global UiEnums {
@@ -269,6 +280,9 @@ export component AppWindow inherits Window {
     // Ctrl+A / Esc 键盘通道：FocusScope 捕获后转发，业务判定在壳层。
     callback key-a-pressed();
     callback escape-pressed();
+    // D79 粘贴导入：Ctrl+V（无文本输入持焦时截获）→ 壳层读剪贴板 CF_HDROP
+    // 走与拖入同一导入流。提权会话收不到 Explorer 拖入（UIPI），这是等价入口。
+    callback paste-import-requested();
     // 启动时给 key-root 上焦：Slint 不为子元素生成 get_* 访问器，聚焦只能
     // 在 .slint 内自理（Rust 侧 invoke，处理器里调元素方法）。
     callback key-focus-requested();
@@ -404,10 +418,16 @@ export component AppWindow inherits Window {
         focus-on-click: false;
 
         capture_key_pressed(event) => {
-            // Ctrl+A：仅在没有任何文本输入持焦时截获（否则留给输入框全选文本）。
+            // Ctrl+A / Ctrl+V（D79 粘贴导入）：仅在没有任何文本输入持焦时截获
+            //（TextInputFocus 计数 > 0 = 某输入框持焦，全选/粘贴留给输入框）。
             if (event.modifiers.control && (event.text == "a" || event.text == "A")
-                && !search-input.has-focus) {
+                && !TextInputFocus.any()) {
                 root.key-a-pressed();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "v" || event.text == "V")
+                && !TextInputFocus.any()) {
+                root.paste-import-requested();
                 return accept;
             }
             if (event.text == Key.Escape) {
@@ -578,6 +598,11 @@ export component AppWindow inherits Window {
                             // 文本经 self.text 转发。
                             edited => {
                                 root.search-changed(self.text);
+                            }
+                            // D79：聚焦计数（键根 Ctrl+A/Ctrl+V 让位判断用）。
+                            changed has-focus => {
+                                if (self.has-focus) { TextInputFocus.focus-gained(); }
+                                else { TextInputFocus.focus-lost(); }
                             }
                         }
 
@@ -1578,6 +1603,10 @@ export component AppWindow inherits Window {
                 target-rename-input := LineEdit {
                     text: root.target-rename-text;
                     placeholder-text: "别名（留空保存 = 恢复默认名）";
+                    changed has-focus => {
+                        if (self.has-focus) { TextInputFocus.focus-gained(); }
+                        else { TextInputFocus.focus-lost(); }
+                    }
                 }
 
                 HorizontalLayout {
@@ -1937,6 +1966,10 @@ export component AppWindow inherits Window {
                             text: root.tuning-x-text;
                             font-size: 10px;
                             placeholder-text: "如 8 或 WINDOW_WIDTH - 8";
+                            changed has-focus => {
+                                if (self.has-focus) { TextInputFocus.focus-gained(); }
+                                else { TextInputFocus.focus-lost(); }
+                            }
                         }
                     }
                     VerticalLayout {
@@ -1950,6 +1983,10 @@ export component AppWindow inherits Window {
                             text: root.tuning-y-text;
                             font-size: 10px;
                             placeholder-text: "如 WINDOW_HEIGHT - 8";
+                            changed has-focus => {
+                                if (self.has-focus) { TextInputFocus.focus-gained(); }
+                                else { TextInputFocus.focus-lost(); }
+                            }
                         }
                     }
                 }
@@ -2141,6 +2178,10 @@ export component AppWindow inherits Window {
                     move-name := LineEdit {
                         placeholder-text: "输入新分类名即新建";
                         horizontal-stretch: 1;
+                        changed has-focus => {
+                            if (self.has-focus) { TextInputFocus.focus-gained(); }
+                            else { TextInputFocus.focus-lost(); }
+                        }
                     }
                     Button {
                         text: "新建并移入";
@@ -2267,6 +2308,10 @@ export component AppWindow inherits Window {
                 rename-input := LineEdit {
                     text: root.rename-current;
                     placeholder-text: "新名称（只改显示名，不动磁盘路径）";
+                    changed has-focus => {
+                        if (self.has-focus) { TextInputFocus.focus-gained(); }
+                        else { TextInputFocus.focus-lost(); }
+                    }
                 }
 
                 if root.rename-error != "": Text {
@@ -2555,12 +2600,16 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                LineEdit {
+                classify-name-input := LineEdit {
                     height: 30px;
                     text: root.classify-argument;
                     placeholder-text: "输入分类名，实时匹配已有分类…";
                     edited(text) => { root.classify-name-changed(text); }
                     accepted(text) => { root.classify-name-changed(text); }
+                    changed has-focus => {
+                        if (self.has-focus) { TextInputFocus.focus-gained(); }
+                        else { TextInputFocus.focus-lost(); }
+                    }
                 }
 
                 // 候选列表：ScrollView 高度钉 min(166px, 内容高)，不钉会塌成

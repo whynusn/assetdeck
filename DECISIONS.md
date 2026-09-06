@@ -996,6 +996,20 @@ if (click_count % 2) == 1 {
 - **提权判定用完整性 RID 不用 TokenElevation**：`current_process_is_elevated` = 自身令牌完整性 RID ≥ 高（0x4000）。UAC 关闭时管理员进程拿的就是完整令牌，TokenElevation 未必为真；「能不能注入」只由完整性级别决定（与 D77 的目标侧判定同一把尺子）。
 - 交棒成功即 `process::exit(0)`（与更新移交 D70 同风格）；UAC 被拒/失败则普通权限继续，不因拒提权打断用户开应用，设置保留下次再试。判定链是纯函数 `should_relaunch_elevated(设置开, 已提权, 已交棒过)`，单测锁三条件同时成立才交棒。
 
+### D79 拖入双通道 + 粘贴导入：提权会话的导入入口补全（2026-09-06，用户拍板方案一/三）
+
+- **背景**：D78 的「自动以管理员运行」留了一个代价——提权会话收不到 Explorer 拖入。用户追问替代方案，四个方向评估后拍板：方案一（WM_DROPFILES 双通道）+ 方案三（粘贴导入）现在做，方案二（提权注入 broker）纳入未来规划，方案四（维持现状）自然废止。
+- **方案一（拖入双通道）**：`register_file_drop` 按进程提权态分叉——普通会话维持 OLE `IDropTarget`（D49）不变；提权会话改走消息型拖入：`DragAcceptFiles` 挂 `WS_EX_ACCEPTFILES` + `ChangeWindowMessageFilterEx` 放行 `WM_DROPFILES`(0x233) 与 `WM_COPYGLOBALDATA`(0x004A)——这两条恰是 UIPI 官方允许显式放行的消息，是提权窗口收 Explorer 拖入的正门。接收端子类化窗口 proc（`SetWindowLongPtrW` 链，模式与 paint_guard 相同，WM_NCDESTROY 还原防悬垂），`DragFinish` 必须归还系统分配的 HDROP 防泄漏。**两通道互斥的物理原因**：同一 HWND 上 OLE 目标优先于 DragAcceptFiles，提权时必须跳过 OLE 注册。消息通道丢掉 OLE 的拖悬富反馈（拖悬高亮），对「松手收路径」的导入语义无损。
+- **方案三（粘贴导入）**：Ctrl+V 在无文本输入持焦时读剪贴板 `CF_HDROP`，走与拖入完全相同的 `flow.open` 导入流。提权进程**读**普通剪贴板是 UIPI 允许方向（只拦向低完整性窗口发消息），零障碍；普通会话同样可用（复制文件后 Ctrl+V 导入）。剪贴板无文件列表（如刚复制过素材图片）静默忽略。
+- **共享解析器**：`parse_dropfiles_bytes` 纯函数解析 DROPFILES 块（pFiles 偏移 + fWide 宽/ANSI 双路 + 双 NUL 终止），WM_DROPFILES 的 HDROP（GlobalLock 取原始块）与剪贴板 `GetClipboardData(CF_HDROP)` 同布局共用；单测覆盖宽字符多路径（含中文与空格路径）、ANSI 回落、偏移越界/短块防呆。
+- **键盘让位机制升级（顺带修一个既有隐患）**：Ctrl+A/Ctrl+V 的让位判断从逐元素 `has-focus` 引用改为 `TextInputFocus` 全局计数（各文本输入就地挂 `changed has-focus` 钩子增减）。原因是 key-root 捕获臂引用不到子组件内部的输入元素（slint 作用域限制），计数对「A 失焦与 B 获焦交错」天然幂等。**既有隐患**：此前 Ctrl+A 只向检索框让位，重命名/归类/点位弹窗输入框里按 Ctrl+A 会被键盘根抢走（误触「全选素材」）——全局计数一并修复。
+- **no_timed_waits 白名单**：读侧剪贴板打开退避（`Sleep(CLIPBOARD_RETRY_DELAY_MS)` 重试一次）与写侧是同一物理事实（剪贴板占用无事件可订阅），守卫断言从「恰好 1 条」升为「恰好 2 条且都必须是剪贴板退避」——按理由类别钉死而非按条数钉死。
+- **已知边界**：消息型拖入只在拖放瞬间收一次路径（无 DragOver 反馈）；拖动的是虚拟文件（无 CF_HDROP 路径）时收不到——与 OLE 版行为一致。
+
+### 未来规划（用户已拍板纳入，未排期）
+
+- **提权注入 broker（D79 评审的方案二）**：主程序保持普通权限，单独一个一次 UAC 授权常驻的提权小进程，经命名管道接收「hwnd + 点击点」代跑 HTCLIENT 守卫与点击链，用于向提权目标注入。主程序从此不需要提权（拖入/UAC 问题同时消失），提权面收窄到一个只做点击的哑执行器。**前置条件**：提权 IPC 服务必须校验客户端 + ACL 收紧（否则任何中完整性进程都能指挥一支"幽灵鼠标"）；工程量 = 新进程 + IPC 协议 + 生命周期管理，v2 评估。
+
 
 
 
