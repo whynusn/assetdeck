@@ -10,3 +10,11 @@ publish = false
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+[patch.crates-io]
+# D80：iroh 1.1.0 / iroh-relay 1.1.0 上游为 FFI 场景声明 cdylib，cargo 会连带产出动态库；
+# windows-gnu 的 ld 用 16 位导出序号，6.8 万符号直接爆表（export ordinal too large）——
+# MSVC 无此限制，故 CI 绿而本地炸。vendor/ 副本仅去掉 cdylib crate-type，其余与上游逐字节一致。
+# 升级 iroh 时重跑 scripts/vendor-iroh.ps1 同步新版本（CI/本地同走此补丁，行为一致）。
+iroh = { path = "vendor/iroh" }
+iroh-relay = { path = "vendor/iroh-relay" }

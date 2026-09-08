@@ -1007,6 +1007,46 @@ if (click_count % 2) == 1 {
 - **已知边界**：消息型拖入只在拖放瞬间收一次路径（无 DragOver 反馈）；拖动的是虚拟文件（无 CF_HDROP 路径）时收不到——与 OLE 版行为一致。
 - **真机验证补丁（2026-09-06 真机轮，三处缺陷当场抓到）**：① 高完整性阈值 0x4000 → **0x3000**（见 D78 条目钉正注）；② 消息通道注册前必须先 `RevokeDragDrop` 摘掉 **winit 建窗时自装的 OLE 目标**——真机探针发现提权会话下窗口仍有 OLE 目标（来源不是我们的 OLE 分支），而 shell 的拖放路由是「有 OLE 目标就不走 WM_DROPFILES 回退」，跨完整性级别时拖入会卡死在 OLE 协议里，消息通道永远收不到；③ **接收端把 HDROP 从 lParam 读取——实际在 wParam**（`dropfiles_proc` 旧代码 `let hdrop = lparam as …`，lParam 恒 0 ⇒ 每次拖入都解析出 0 条路径，而剪贴板 CF_HDROP 走独立入口得以幸免、单测又只喂合成块，故 CI 不可见）。③的定位手法：独立 WinForms 探针窗体（`DragAcceptFiles` + WM_DROPFILES 里 GlobalLock HEX 转储 + DragQueryFile 双路对比）证实 OS 送达的 HDROP 内容完好（GlobalSize=188、pFiles=20、fWide=1、跨进程可读——顺带推翻了本机早前「GMEM_DDESHARE 不再跨进程共享」的错误结论），矛头收敛到接收代码后逐行读出。探针自坑两枚，复用配方时注意：WinForms 的 `DragAcceptFiles` 必须在 `OnShown` 里调（`OnHandleCreated` 里设的 `WS_EX_ACCEPTFILES` 会被建窗尾部样式调整冲掉）；`start /MIN` 启动会把首个窗口连坐成最小化（停在 -32000 停靠位）。**修复后用户真机手拖验证通过**：`拖拽 Drop 送达：1 条路径（…t2 long file name test.png）→ finalize → 归类弹窗`。顺带钉死验证手法坑：`GetProcess.MainWindowHandle` 在主窗口之外还有 D13 目标悬浮条窗口时会翻转指向，探针与前台化必须按 EnumWindows 全窗口枚举后取最大可见窗口定向；本机合成输入做拖拽时可能落进 Task View 覆盖层（Win+Tab 界面悬浮时 whatpoint 仍报底层窗口），判读截图先认 Task View。
 
+### D80 P2P 素材共享定盘：显式推送作用域 + iroh 直连底座（2026-09-08，用户三原则 + OneDrive 式作用域拍板）
+
+**用户三原则（总纲）**：① 允许使用第三方免费信令服务器；② 不提供 moon/TURN 中继——连接只走局域网或 P2P 直连，不通则诚实降级提示；③ 直连成功率尽可能高（曾倾向激进派生日攻击，见取舍记录）。
+
+**作用域红线（用户口述，优先级高于一切实现便利）**：
+1. **默认零共享**：安装/升级/运行不产生任何可被对端浏览或拉取的面。库内素材的存在性、清单、缩略图一律不对外暴露，除非用户对**当次选中集**发起显式共享——「共享」是动作的结果，不是安装的状态。
+2. **无常驻共享进程**：share-worker 仅在收发进行中存活（D11 按需 worker 模式），无后台服务、无开机自启、空闲 RSS 贡献为零（D10 不动）。推论：**不做离线投递**（需要常驻接收面或存储转发服务器，均违反 1/2），对端未在线 = 失败提示「对方设备未运行」。
+3. **共享 = 推送（send）而非授权（grant）**：无远端浏览库、无共享链接、无权限撤销面——撤销语义 = 不再发。OneDrive 式持续同步/授权模型记为 v2 评估项。
+4. **接收必经双重确认**：首连信任确认（弹窗显示发送方设备名与批规模）→ D50 归类弹窗 → 走既有导入管线（SHA-256 字节等值判死 D65 + pHash 相似提醒），绝不静默入库。
+
+**心智模型（对标 OneDrive-in-Explorer，用户点名）**——取其「操作就地、状态就地可见」的集成感：
+
+| OneDrive | 本产品 |
+|---|---|
+| 在文件所在处右键共享 | 瓦片右键菜单「共享到设备…」（D48 菜单扩展）+ 多选操作条「共享」（D47） |
+| 状态角标就地可见 | 瓦片角标 = 传输中/已送达/失败（TileData badge 通道，D26/D43 纪律） |
+| 「与我共享」入口 | 共享记录面：收/发批次历史（谁、何时、哪些素材、结局），与角标同源 |
+
+**技术选型（iroh 底座，四钉子）**：
+1. **直接采用 iroh，`RelayMode::Disabled` 钉死**（既不听也不拨中继）。连带：中继关闭后自址发现需配第三方 STUN/QAD（实现期核 API，必要时自定义 lookup 喂 STUN 结果）；iroh 版本钉死（API 改名频繁，discovery→address_lookup 有前科）。
+2. **端口映射用 iroh 内建 portmapper**：编译树实勘发现 iroh 1.1 自带 `portmapper` 组件（UPnP/PCP/NAT-PMP 三协议，`Builder::portmapper_config`，**默认 `PortmapperConfig::Enabled`**）——D80 讨论时设想的「自研 igd-next/NAT-PMP lookup」整体不需要，改为「确认默认启用不被关闭 + M1 真机验证映射地址被当作可拨直连地址发布」。这是 iroh 路线上把直连成功率顶过其公开口径 88% 的关键增量，且零自研代码。
+3. **契约层 + 独立引擎进程**：`crates/share` = 清单/记录纯模型（零 IO）；`tools/share-worker` = iroh 引擎按需进程（**iroh 与 tokio 只进这一个编译单元**，主程序 std::thread 风格与 UI 构建树不被波及）；ui-viewmodels 共享 VM 只吃 crates/share 类型；deps_guard 扩展禁令：app-ui/ui-viewmodels 不得依赖 iroh/tokio。M2 若换 quinn 自建打洞，替换被进程边界锁住。
+4. **脏活四件套与 iroh 无关，照旧全做**：① Windows 防火墙 UDP 入站规则进 installer（缺规则 = 本机全通、用户全挂；走 D57 包管线）；② 成功率归因遥测第一天上线（每次连接记「死在哪一档」，本地日志起步，M1 再议上报）；③ 真机矩阵分期验证（家宽路由器/手机热点 CGNAT/企业网）；④ 信令载荷端到端加密 + 对端指纹绑定（第三方信令 = 不可信信道）。
+
+**分期**：
+- **M0 局域网推送闭环**：mDNS 发现在线设备 → 选中集显式推送 → iroh 直连（LAN 地址）→ 清单先行（TransferManifest）→ 接收双重确认 → 导入管线入库。零 STUN、零打洞、零信令服务器。
+- **M1 远程直连**：第三方信令（pkarr 公共 relay/DNS 或自选）+ STUN/QAD 自址 + iroh 打洞（relay disabled）+ 内建 portmapper（确认启用）+ 设备配对码（指纹绑定；与 D70 后置的 ed25519 签名工程合流评估）。
+- **M2（数据驱动，默认不做）**：遥测若显示「对称+端口受限」「双对称可预测」两格死区显著，才评估换 quinn 自建打洞梯子补生日攻击——iroh 架构下不可插（punched socket 无法成为其 QUIC 传输），换底座是唯一路径。
+
+**取舍记录**：
+- **iroh vs 自建 quinn 梯子**：曾倾向自建（v6→UPnP→同时对发→生日攻击），被成本账劝退——脏活四件套两者同样要做，自建还多写 2~3k 行打洞状态机；iroh 公开口径 88% 直连成功率是遥测长尾磨出来的，机制可复制、数字不可「照抄」（首版预期 75~85%）。iroh 白送的恰是最贵的部分：NAT 状态机、net-report 多网卡枚举、双栈 quirk、连接愈合。
+- **生日攻击正式放弃**：救的两格（对称+端口受限、双对称可预测）合计占比小且持续萎缩（RFC 4787 REQ-1 推 CGNAT 走 EIM + IPv6 普及）；无中继下用户对后台等待的容忍度虽高，收益仍不抵换底座。除非 M2 遥测翻案。
+- **88% 口径诚实声明**：n0 公开数字含「先走 relay 再愈合直连」的连接；纯直连模式实测以自己遥测为准，预期略低于 88%、UPnP 补回——**88% 是参照系，不是承诺值**。
+- **推送 vs 授权**：完整 OneDrive 授权语义（远端浏览/撤销/持续同步）需要常驻接收面 + 权限面 + 远端浏览 UI，v1 心智成本反而最高；推送模型从构造上不可能静默共享（红线 1 自动成立）。**iroh-blobs 不用**（BLAKE3 体系与库内 SHA-256 content_hash，D61/D65，不同源），传输走裸 QUIC 流自跑清单，链路统一。
+- **许可证**：iroh/tokio/noq/portmapper 等 = MIT|Apache-2.0、rustls/ring = ISC|Apache|MIT|OpenSSL 派生宽松系，与 A1（Slint GPLv3 商业化未决）不冲突；cargo-deny 门禁照常覆盖新依赖树（新增 unmaintained 传递依赖按 D57 作用域策略处置）。
+
+**落点**：crates/share（manifest/record 纯模型 + 校验守卫，本批）；tools/share-worker（iroh 引擎按需进程 + gnu 编译探针，本批起）；ui-viewmodels 共享 VM、appwindow.slint 共享入口/角标/记录面（后续批次）；installer 防火墙规则（M1）。
+
+**守卫计划**：①「默认零共享」——worker 无指令不监听不发包（探针级测试）；② deps_guard 扩展：app-ui/ui-viewmodels 禁依赖 iroh/tokio；③ 接收路径复用导入管线去重测试面（D65）；④ 清单校验表驱动纯函数；⑤ 内存：worker 按需退出，空闲零进程。
+
 ### 未来规划（用户已拍板纳入，未排期）
 
 - **提权注入 broker（D79 评审的方案二）**：主程序保持普通权限，单独一个一次 UAC 授权常驻的提权小进程，经命名管道接收「hwnd + 点击点」代跑 HTCLIENT 守卫与点击链，用于向提权目标注入。主程序从此不需要提权（拖入/UAC 问题同时消失），提权面收窄到一个只做点击的哑执行器。**前置条件**：提权 IPC 服务必须校验客户端 + ACL 收紧（否则任何中完整性进程都能指挥一支"幽灵鼠标"）；工程量 = 新进程 + IPC 协议 + 生命周期管理，v2 评估。

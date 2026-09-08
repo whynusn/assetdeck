@@ -1,0 +1,16 @@
+[package]
+name = "share"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 架构边界方向（D80）：纯模型零 IO；iroh/tokio 只进 tools/share-worker，
+# ui-viewmodels 的共享 VM 只吃本 crate 类型。
+domain = { path = "../domain" }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

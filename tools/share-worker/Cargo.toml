@@ -1,0 +1,11 @@
+[package]
+name = "share-worker"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+iroh = "1.1.0"
+# D80 钉子 3：iroh/tokio 只进这一个编译单元；契约类型走 crates/share。
+share = { path = "../../crates/share" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
