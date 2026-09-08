@@ -9,6 +9,7 @@ mod thumbs;
 mod ui_enums;
 
 use std::cell::{Cell, RefCell};
+use std::io::Write as IoWrite;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,12 +21,13 @@ use ui_viewmodels::classify::{
 };
 use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
+use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
     AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, DarkThemeProvider,
     FacetIndex, Filter, InputPointOverride, LightThemeProvider, RealAssetResolver, SearchProvider,
-    SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot,
-    TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
-    ThemeTokens, TuningTarget,
+    SendItem, ShareAction, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId,
+    TargetBarMode, TargetBarSnapshot, TargetHealth, TargetNoticeTone, TargetRoutingRuntime,
+    TargetRuntimeDeps, ThemeProvider, ThemeTokens, TuningTarget,
 };
 
 use task_runner::ChildTask;
@@ -57,6 +59,26 @@ struct UpdateWiring {
     cancel: Arc<AtomicBool>,
     settings: Rc<RefCell<AppSettings>>,
     settings_path: Rc<std::path::PathBuf>,
+}
+
+thread_local! {
+    /// D80 共享状态机（UI 线程唯一实例）。worker 读线程经 invoke_from_event_loop
+    /// 弹回 UI 线程后从这里取（Rc 非 Send，不能跨线程携带，同 UPDATE_WIRING 模式）。
+    static SHARE_VM: Rc<RefCell<ShareVm>> = Rc::new(RefCell::new(ShareVm::new()));
+    /// share-worker 子进程 stdin（UI 线程独占写）。None = worker 未起/已退。
+    static SHARE_STDIN: RefCell<Option<std::process::ChildStdin>> = const { RefCell::new(None) };
+    /// 共享接线的 UI 线程侧装配件：角标定向刷新与导入移交要用。
+    static SHARE_WIRING: RefCell<Option<ShareWiring>> = const { RefCell::new(None) };
+    /// 设备选择弹窗等待发送的素材（弹窗确认时取走；取消即弃）。
+    static SHARE_PENDING: RefCell<Vec<SendItem>> = const { RefCell::new(Vec::new()) };
+}
+
+/// D80 共享接线的 UI 线程侧装配件（见 [`SHARE_WIRING`]）。
+#[derive(Clone)]
+struct ShareWiring {
+    import_flow: Rc<ImportFlow>,
+    resolver: Rc<RefCell<Option<RealAssetResolver>>>,
+    devices: Rc<VecModel<ShareDeviceData>>,
 }
 
 /// 演示数据规模：无真实库环境时的合成资产。
@@ -526,6 +548,9 @@ struct ImportFlow {
     categories: Rc<RefCell<Vec<String>>>,
     importing: Arc<AtomicBool>,
     library_root: Option<String>,
+    /// D80 共享导入的批次号：ImportStaged 动作置位 → do_import 据此装
+    /// post_phase1 钩子回 ACK/NACK。每次 open() 先清空，普通导入不受影响。
+    share_batch: Rc<Cell<Option<Uuid>>>,
 }
 
 /// 归入候选封顶（弹窗列表限高，超出部分靠继续输入收窄）。
@@ -554,6 +579,8 @@ impl ImportFlow {
             }
             return;
         }
+        // 每次入流都重置共享批次标记：普通导入绝不误发 ACK/NACK。
+        self.share_batch.set(None);
         let entries: Vec<ImportEntry> = paths
             .into_iter()
             .map(|path| {
@@ -907,6 +934,20 @@ impl ImportFlow {
             "--mode".to_string(),
             mode_arg.to_string(),
         ];
+        // D80 共享导入：批次在途时把导入成败回执挂进 post_phase1（UI 线程回调，
+        // 在成败回显前触发）→ 状态机攒 ACK/NACK 行 → 写 worker stdin。worker
+        // 收到回执才算批次完结并清暂存；失败走 NACK（暂存被 worker 清掉）。
+        let post_phase1: Option<Arc<dyn Fn(bool) + Send + Sync>> =
+            self.share_batch.get().map(|batch| {
+                Arc::new(move |ok: bool| {
+                    let reason = if ok { "" } else { "导入管线失败" };
+                    SHARE_VM.with(|vm| vm.borrow_mut().import_completed(batch, ok, reason));
+                    let writes = SHARE_VM.with(|vm| vm.borrow_mut().take_pending_writes());
+                    for line in writes {
+                        share_write_line(&line);
+                    }
+                }) as Arc<dyn Fn(bool) + Send + Sync>
+            });
         spawn_import_pipeline(
             self.ui.clone(),
             args,
@@ -914,9 +955,189 @@ impl ImportFlow {
             self.importing.clone(),
             format!("{total} 项素材"),
             self.settings.borrow().fast_import_mode,
-            None,
+            post_phase1,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// D80 共享通道装配：worker 子进程生命周期 + 状态机事件分发 + UI 回填。
+// ---------------------------------------------------------------------------
+
+/// 启动 share-worker 子进程。UI 主进程永不碰网络栈（iroh/tokio 只活在那一个
+/// 编译单元里）；生命周期 = 主进程：stdin 管道随本进程退出关闭 → worker 自退，
+/// 无系统服务无常驻（D80 守卫①）。启动失败只留痕不弹窗：共享是旁路功能，
+/// 不能在启动瞬间用弹窗打扰主链路。
+fn spawn_share_worker(ui: slint::Weak<AppWindow>) {
+    let exe = helper_exe("share-worker.exe");
+    if !exe.is_file() {
+        logging::warn!("未找到共享引擎 {}，共享功能不可用", exe.display());
+        return;
+    }
+    // 暂存根按进程号隔离：同机多开互不踩，进程退出后目录随 worker 清理。
+    let staging = std::env::temp_dir().join(format!("asset-manager-share-{}", std::process::id()));
+    let mut command = std::process::Command::new(&exe);
+    command.arg("--staging-root").arg(&staging);
+    if let Some(dir) = logging::logs_dir() {
+        command
+            .env("DSH_LOG_DIR", dir.to_string_lossy().into_owned())
+            .env("DSH_LOG_LEVEL", logging::current_level().as_str());
+    }
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(mut child) = command.spawn() else {
+        logging::error!("share-worker 启动失败，共享功能不可用");
+        return;
+    };
+    let stdin = child.stdin.take().expect("已声明 piped stdin");
+    let stdout = child.stdout.take().expect("已声明 piped stdout");
+    SHARE_STDIN.with(|slot| *slot.borrow_mut() = Some(stdin));
+    logging::info!("share-worker 已启动: {}", exe.display());
+
+    let weak = ui.clone();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        for line in std::io::BufRead::lines(&mut reader) {
+            let Ok(line) = line else { break };
+            let weak = weak.clone();
+            // 子进程线程只许 Weak<AppWindow>（Send 纪律）；Rc 状态机在
+            // UI 线程经 SHARE_STDIN/SHARE_VM 线程局部取回。
+            let _ = slint::invoke_from_event_loop(move || {
+                let actions = SHARE_VM.with(|vm| vm.borrow_mut().handle_line(&line));
+                dispatch_share_actions(&weak, actions);
+            });
+        }
+        // EOF = worker 退出（父进程退 / EXIT / 崩溃）。收割并清空 stdin 句柄。
+        let _ = child.wait();
+        SHARE_STDIN.with(|slot| *slot.borrow_mut() = None);
+        logging::warn!("share-worker 已退出");
+    });
+}
+
+/// 往 worker stdin 写一行协议命令（UI 线程独占写）。
+fn share_write_line(line: &str) {
+    SHARE_STDIN.with(|slot| {
+        let mut guard = slot.borrow_mut();
+        match guard.as_mut() {
+            Some(stdin) => {
+                if let Err(error) = writeln!(stdin, "{line}").and_then(|()| stdin.flush()) {
+                    logging::error!("共享通道写入失败: {error}");
+                }
+            }
+            None => logging::warn!("共享通道未就绪，丢弃命令: {line}"),
+        }
+    });
+}
+
+/// 把状态机产出的副作用落到 UI / 管道（UI 线程调用）。
+fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareAction>) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    for action in actions {
+        match action {
+            ShareAction::Send(line) => share_write_line(&line),
+            ShareAction::OpenOfferDialog | ShareAction::CloseOfferDialog | ShareAction::Refresh => {
+                sync_share_ui(&ui);
+            }
+            ShareAction::ImportStaged { batch, paths } => {
+                let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
+                if let Some(wiring) = wiring {
+                    wiring.import_flow.share_batch.set(Some(batch));
+                    wiring.import_flow.open(paths);
+                }
+            }
+            ShareAction::Notice(tone, text) => show_notice(&ui, tone, text),
+            ShareAction::BadgesChanged(uuids) => refresh_share_badges(&ui, &uuids),
+        }
+    }
+}
+
+/// 按 VM 真值回填共享相关 UI 属性（设备表/单选/扫描态/报价/摘要/弹窗开合）。
+fn sync_share_ui(ui: &AppWindow) {
+    let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
+    SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        ui.set_share_devices_open(vm.is_picker_open());
+        ui.set_share_scan_busy(vm.is_scanning());
+        ui.set_share_selected_device(vm.picker_selected().map(|i| i as i32).unwrap_or(-1));
+        ui.set_share_offer_text(vm.offer_text().unwrap_or_default().into());
+        ui.set_share_summary_text(vm.active_summary().unwrap_or_default().into());
+        if let Some(wiring) = wiring {
+            let rows: Vec<ShareDeviceData> = vm
+                .devices()
+                .iter()
+                .enumerate()
+                .map(|(i, device)| ShareDeviceData {
+                    name: device.name.as_str().into(),
+                    detail: device
+                        .addrs
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or_default()
+                        .into(),
+                    selected: vm.picker_selected() == Some(i),
+                })
+                .collect();
+            wiring.devices.set_vec(rows);
+        }
+    });
+}
+
+/// 定向刷新可见瓦片的共享角标（BadgesChanged 用；窗外瓦片随下次 sync 自然更新）。
+fn refresh_share_badges(ui: &AppWindow, uuids: &[Uuid]) {
+    let changed: std::collections::HashSet<Uuid> = uuids.iter().copied().collect();
+    let Some(wiring) = SHARE_WIRING.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let resolver = wiring.resolver.borrow();
+    let Some(resolver) = resolver.as_ref() else {
+        return;
+    };
+    SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        let model = ui.get_tiles();
+        for row in 0..model.row_count() {
+            let Some(mut tile) = model.row_data(row) else {
+                continue;
+            };
+            let Some(uuid) = resolver
+                .uuid_of(AssetId(tile.asset_id.max(0) as u32))
+                .and_then(|raw| raw.parse::<Uuid>().ok())
+            else {
+                continue;
+            };
+            if !changed.contains(&uuid) {
+                continue;
+            }
+            tile.share_badge = ui_enums::share_badge(vm.badge(uuid));
+            model.set_row_data(row, tile);
+        }
+    });
+}
+
+/// 选区 → 可发送清单：逐张 share_candidate（库内真实文件；回收站墓碑 /
+/// 解析失败的素材自然排除）。演示库（无 resolver）返回空。
+fn collect_share_items(
+    resolver: &Rc<RefCell<Option<RealAssetResolver>>>,
+    targets: &[AssetId],
+) -> Vec<SendItem> {
+    let binding = resolver.borrow();
+    let Some(resolver) = binding.as_ref() else {
+        return Vec::new();
+    };
+    targets
+        .iter()
+        .filter_map(|id| resolver.share_candidate(*id))
+        .collect()
 }
 
 /// 属性弹窗的字段组装（R13：尺寸/大小/导入时间/绝对路径）。
@@ -1896,6 +2117,12 @@ fn main() {
     // 避免删到正在写入的文件。提前到这里声明是因为 CrudCtx 要捕获它。
     let importing = Arc::new(AtomicBool::new(false));
 
+    // D80 共享通道：UI 线程唯一状态机实例（worker 读线程经线程局部取回）+
+    // 设备表模型。GridCtx 铺瓦片时按素材 uuid 现查角标。
+    let share_vm = SHARE_VM.with(|vm| vm.clone());
+    let share_devices_model: Rc<VecModel<ShareDeviceData>> = Rc::new(VecModel::default());
+    app.set_share_devices(ModelRc::from(share_devices_model.clone()));
+
     // 网格同步上下文：滚动/过滤/库重载共用的唯一刷新入口。
     let grid = Rc::new(GridCtx::new(
         app.as_weak(),
@@ -1903,6 +2130,7 @@ fn main() {
         tiles_model.clone(),
         real_resolver.clone(),
         thumb_cache.clone(),
+        share_vm.clone(),
     ));
 
     // 用户画像损坏不得拖垮主程序：退回内置画像并留痕（内置画像有编译期测试兜底）。
@@ -1995,7 +2223,19 @@ fn main() {
         categories: filter_categories.clone(),
         importing: importing.clone(),
         library_root: library_root.clone(),
+        share_batch: Rc::new(Cell::new(None)),
     });
+    // D80 共享接线装配件：事件分发（含 worker 读线程弹回路径）与导入移交
+    // 都从这里取 UI 线程专属 Rc。
+    SHARE_WIRING.with(|slot| {
+        *slot.borrow_mut() = Some(ShareWiring {
+            import_flow: import_flow.clone(),
+            resolver: real_resolver.clone(),
+            devices: share_devices_model.clone(),
+        });
+    });
+    // D80 共享引擎子进程：装配完成后启动（READY 前发起的共享会被状态机挡下）。
+    spawn_share_worker(app.as_weak());
     // 最近一次动作目标（右键命中的那张 / 重命名与属性打开的那张）。菜单收起
     // 不清它——下一次菜单或操作条动作会重新设定，读侧只在弹窗里回显。
     let menu_target: Rc<RefCell<Option<AssetId>>> = Rc::new(RefCell::new(None));
@@ -2246,6 +2486,19 @@ fn main() {
         let pending_target_rename = pending_target_rename.clone();
         app.on_escape_pressed(move || {
             let Some(ui) = crud.ui.upgrade() else { return };
+            // D80 共享报价弹窗在最上层：Esc = 拒收（必须回 worker 一个裁决，
+            // 静默关窗会让发送侧干等到超时）。
+            if ui.get_share_offer_open() {
+                let actions = SHARE_VM.with(|vm| vm.borrow_mut().offer_reject("用户取消"));
+                dispatch_share_actions(&crud.ui, actions);
+                return;
+            }
+            if ui.get_share_devices_open() {
+                SHARE_PENDING.with(|slot| slot.borrow_mut().clear());
+                SHARE_VM.with(|vm| vm.borrow_mut().close_picker());
+                sync_share_ui(&ui);
+                return;
+            }
             // 归类弹窗是模态最上层，Esc = 取消本次导入。
             if ui.get_classify_open() {
                 import_flow.close();
@@ -2399,6 +2652,33 @@ fn main() {
                     let uuids = crud.uuids_of(&targets);
                     crud.spawn_lib_cmd("trash", &uuids, None, "删除");
                 }
+                MenuAction::Share => {
+                    // D80 共享入口：回收站禁发；无可发素材（演示库/墓碑/解析失败）明说。
+                    if crud.is_trash_view() {
+                        if let Some(ui) = crud.ui.upgrade() {
+                            show_notice(
+                                &ui,
+                                TargetNoticeTone::Warning,
+                                "回收站里的素材不能共享".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    let items = collect_share_items(&crud.resolver, &targets);
+                    if items.is_empty() {
+                        if let Some(ui) = crud.ui.upgrade() {
+                            show_notice(
+                                &ui,
+                                TargetNoticeTone::Warning,
+                                "选中的素材没有可共享的文件".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    SHARE_PENDING.with(|slot| *slot.borrow_mut() = items);
+                    let actions = SHARE_VM.with(|vm| vm.borrow_mut().open_picker());
+                    dispatch_share_actions(&crud.ui, actions);
+                }
             }
         });
     }
@@ -2415,6 +2695,90 @@ fn main() {
             let Some(ui) = crud.ui.upgrade() else { return };
             ui.set_move_menu_open(true);
             ui.set_move_error("".into());
+        });
+    }
+
+    // —— D80 共享通道回调 ——
+    // 多选操作条「共享」：与右键菜单 menu-action(5) 同一装配（选区∪右键命中）。
+    {
+        let crud = crud.clone();
+        app.on_share_selection_requested(move || {
+            if crud.is_trash_view() {
+                if let Some(ui) = crud.ui.upgrade() {
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        "回收站里的素材不能共享".to_string(),
+                    );
+                }
+                return;
+            }
+            let targets = crud.action_targets(None);
+            let items = collect_share_items(&crud.resolver, &targets);
+            if items.is_empty() {
+                if let Some(ui) = crud.ui.upgrade() {
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        "选中的素材没有可共享的文件".to_string(),
+                    );
+                }
+                return;
+            }
+            SHARE_PENDING.with(|slot| *slot.borrow_mut() = items);
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().open_picker());
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_devices_closed(move || {
+            SHARE_PENDING.with(|slot| slot.borrow_mut().clear());
+            SHARE_VM.with(|vm| vm.borrow_mut().close_picker());
+            if let Some(ui) = crud.ui.upgrade() {
+                sync_share_ui(&ui);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_scan_requested(move || {
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().start_scan());
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_device_picked(move |index| {
+            SHARE_VM.with(|vm| vm.borrow_mut().select_device(index.max(0) as usize));
+            if let Some(ui) = crud.ui.upgrade() {
+                sync_share_ui(&ui);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_confirm_requested(move || {
+            let items = SHARE_PENDING.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+            if items.is_empty() {
+                return;
+            }
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().start_share(items));
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_offer_accept(move || {
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().offer_accept());
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_offer_reject(move || {
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().offer_reject("用户拒收"));
+            dispatch_share_actions(&crud.ui, actions);
         });
     }
 

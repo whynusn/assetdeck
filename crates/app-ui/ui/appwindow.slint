@@ -52,6 +52,11 @@ export global UiEnums {
     out property <int> classify-hint-new: 2;
     out property <int> classify-confirm-resolve: 0;
     out property <int> classify-confirm-inbox: 1;
+    // D80 共享角标三态（与 ui_viewmodels::ShareBadge 对齐）：无/在途/已送达/失败。
+    out property <int> share-badge-none: 0;
+    out property <int> share-badge-busy: 1;
+    out property <int> share-badge-done: 2;
+    out property <int> share-badge-failed: 3;
 }
 
 export struct TileData {
@@ -73,6 +78,8 @@ export struct TileData {
     preview: string,
     // D47 选中标记：勾选角标 + accent 描边由它驱动。
     selected: bool,
+    // D80 共享角标（UiEnums.share-badge-*）：右上类型徽标下方一枚状态点。
+    share-badge: int,
 }
 
 export struct SettingRowData {
@@ -113,6 +120,13 @@ export struct ImportResultRowData {
     source: string,
     existing: string,
     distance: int,
+}
+
+// D80 设备选择弹窗行：name = mDNS 主机名；detail = 首个可达地址；selected = 单选高亮。
+export struct ShareDeviceData {
+    name: string,
+    detail: string,
+    selected: bool,
 }
 
 export component AppWindow inherits Window {
@@ -241,6 +255,27 @@ export component AppWindow inherits Window {
     in property <string> import-result-summary: "";
     in property <[ImportResultRowData]> import-result-rows;
     callback import-result-closed();
+
+    // —— D80 P2P 素材共享（M0：局域网 mDNS 发现 + 显式推送 + 双确认）——
+    // 设备选择弹窗：列表 + 单选 + 扫描态。open 由壳层管理，关闭走显式
+    // 按钮与 Esc（不吃 overlay-dismissed——D67 分级：弹窗不因误触背景丢输入）。
+    in property <bool> share-devices-open: false;
+    in property <[ShareDeviceData]> share-devices;
+    in property <int> share-selected-device: -1;
+    in property <bool> share-scan-busy: false;
+    callback share-devices-closed();
+    callback share-scan-requested();
+    callback share-device-picked(int);
+    callback share-confirm-requested();
+    // 首连确认弹窗（接收侧第一道门）：正文由壳层从 VM 报价生成。
+    in property <bool> share-offer-open: false;
+    in property <string> share-offer-text: "";
+    callback share-offer-accept();
+    callback share-offer-reject();
+    // 多选操作条「共享」入口（右键菜单走 menu-action(5)）。
+    callback share-selection-requested();
+    // 在途批次摘要条（多批并发「；」连接；空串 = 不渲染）。
+    in property <string> share-summary-text: "";
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
@@ -1342,6 +1377,21 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // D80 共享角标：右上类型徽标正下方一枚状态点（在途=accent
+                            // /已送达=绿/失败=红），白描边保证在缩略图上可辨。
+                            if tile.share-badge != UiEnums.share-badge-none: Rectangle {
+                                x: parent.width - self.width - 8px;
+                                y: 32px;
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                border-width: 2px;
+                                border-color: #ffffffcc;
+                                background: tile.share-badge == UiEnums.share-badge-busy ? Theme.accent
+                                    : tile.share-badge == UiEnums.share-badge-done ? #5ac18e
+                                    : Theme.danger;
+                            }
+
                             tile-touch := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 // D47：按下的那一刻就按住修饰键 → 本次抬笔的
@@ -1440,6 +1490,7 @@ export component AppWindow inherits Window {
             || root.scope-menu-open || root.classify-open
             || root.target-rename-open
             || root.tuning-open
+            || root.share-devices-open || root.share-offer-open
             || root.update-open: TouchArea {
             width: 100%;
             height: 100%;
@@ -2031,9 +2082,10 @@ export component AppWindow inherits Window {
         }
 
         // —— D48 右键菜单浮层：锚右键命中点，坐标由壳层夹取（贴边不越窗）——
+        // 夹取高度随菜单行数：6 行（D80 追加共享后）约 310px。
         if root.context-menu-open: Rectangle {
             x: Math.min(root.context-menu-x, root.width - 220px);
-            y: Math.min(root.context-menu-y, root.height - 260px);
+            y: Math.min(root.context-menu-y, root.height - 310px);
             width: 220px;
             height: menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2092,6 +2144,15 @@ export component AppWindow inherits Window {
                     detail: "进回收站，可恢复";
                     clicked => {
                         root.menu-action(4);
+                    }
+                }
+                // D80 共享入口（id=5 追加在删除之后：既有 id 0–4 语义不变）。
+                MenuItem {
+                    glyph: Glyph.share;
+                    text: "共享到设备…";
+                    detail: "局域网直传";
+                    clicked => {
+                        root.menu-action(5);
                     }
                 }
             }
@@ -2199,7 +2260,8 @@ export component AppWindow inherits Window {
         if root.selection-bar != UiEnums.bar-hidden: Rectangle {
             y: root.height - self.height - 16px;
             x: (root.width - self.width) / 2;
-            width: Math.min(560px, root.width - 32px);
+            // D80 追加「共享」后 560px 装不下五个按钮，上限放宽到 620px。
+            width: Math.min(620px, root.width - 32px);
             height: 48px;
             border-radius: Theme.radius-lg;
             border-width: 1px;
@@ -2242,6 +2304,13 @@ export component AppWindow inherits Window {
                     text: "移动到分类";
                     clicked => { root.move-selection-requested(); }
                 }
+                // D80 共享入口：与右键菜单 menu-action(5) 殊途同归（壳层同函数）。
+                if root.selection-bar == UiEnums.bar-multi: Button {
+                    height: 30px;
+                    enabled: root.selection-count > 0;
+                    text: "共享";
+                    clicked => { root.share-selection-requested(); }
+                }
                 if root.selection-bar == UiEnums.bar-multi: DangerButton {
                     height: 30px;
                     enabled: root.selection-count > 0;
@@ -2276,6 +2345,186 @@ export component AppWindow inherits Window {
                     text: root.empty-trash-text;
                     armed: root.empty-trash-armed;
                     clicked => { root.empty-trash-requested(); }
+                }
+            }
+        }
+
+        // —— D80 共享摘要条：在途/刚完结批次一句话列出（悬于操作条上方；——
+        // 无操作条时也停在同位，不随 bar 形态跳位）。空串 = 无批次不渲染。
+        if root.share-summary-text != "": Rectangle {
+            property <length> text-max: 480px;
+            y: root.height - self.height - 74px;
+            x: (root.width - self.width) / 2;
+            width: Math.min(summary-text.preferred-width + 24px, text-max + 24px);
+            height: 28px;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 3px;
+            drop-shadow-color: Theme.scrim;
+
+            summary-text := Text {
+                x: 12px;
+                width: parent.width - 24px;
+                text: root.share-summary-text;
+                color: Theme.text-2;
+                font-size: 11px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // —— D80 设备选择弹窗（共享发送入口）：mDNS 扫描 + 单选 + 发送 ——
+        if root.share-devices-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: share-picker-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            share-picker-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "共享到设备";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                // 设备列表：空态/扫描态文案，有设备逐行单选。
+                if root.share-devices.length == 0: Text {
+                    text: root.share-scan-busy ? "正在扫描局域网设备…" : "未发现设备——确认对方已打开本程序并接入同一局域网";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                for device[i] in root.share-devices: Rectangle {
+                    height: 40px;
+                    border-radius: Theme.radius;
+                    border-width: device.selected ? 1px : 0px;
+                    border-color: Theme.accent;
+                    background: device.selected ? Theme.accent-soft : Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+
+                            Text {
+                                text: device.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: device.detail;
+                                color: Theme.text-3;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.share-device-picked(i);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Button {
+                        height: 30px;
+                        text: "刷新";
+                        enabled: !root.share-scan-busy;
+                        clicked => { root.share-scan-requested(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        height: 30px;
+                        text: "取消";
+                        clicked => { root.share-devices-closed(); }
+                    }
+                    Button {
+                        height: 30px;
+                        primary: true;
+                        enabled: root.share-selected-device >= 0;
+                        text: "共享";
+                        clicked => { root.share-confirm-requested(); }
+                    }
+                }
+            }
+        }
+
+        // —— D80 首连确认弹窗（接收侧第一道门：确认后才暂存+导入）——
+        if root.share-offer-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: share-offer-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            share-offer-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "收到共享";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.share-offer-text;
+                    color: Theme.text-2;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "接收后素材将进入导入归类流程；数据经局域网点对点直传，不经任何中转服务器。";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        height: 30px;
+                        text: "拒收";
+                        clicked => { root.share-offer-reject(); }
+                    }
+                    Button {
+                        height: 30px;
+                        primary: true;
+                        text: "接收";
+                        clicked => { root.share-offer-accept(); }
+                    }
                 }
             }
         }

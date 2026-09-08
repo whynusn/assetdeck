@@ -221,16 +221,23 @@ fn select_all_covers_current_view() {
     assert_eq!(vm.selected_count(), 0, "退出清空语义不变");
 }
 
-// ---------- 右键菜单（D48/R10）：五项穷举 ----------
+// ---------- 右键菜单（D48/R10 + D80）：六项穷举 ----------
 
 #[test]
-fn context_menu_items_are_exactly_five() {
+fn context_menu_items_are_exactly_six() {
     use ui_viewmodels::selection::MENU_ITEMS;
     let labels: Vec<&str> = MENU_ITEMS.iter().map(|&(_, l)| l).collect();
     assert_eq!(
         labels,
-        vec!["复制", "移动到分类", "重命名", "属性", "删除"],
-        "CONTEXT.md/D48 用语穷举：不得多一项少一项或换词"
+        vec![
+            "复制",
+            "移动到分类",
+            "重命名",
+            "属性",
+            "删除",
+            "共享到设备…"
+        ],
+        "CONTEXT.md/D48 用语穷举 + D80 追加共享：不得多一项少一项或换词"
     );
     let ids: Vec<MenuAction> = MENU_ITEMS.iter().map(|(a, _)| *a).collect();
     assert_eq!(
@@ -241,6 +248,7 @@ fn context_menu_items_are_exactly_five() {
             MenuAction::Rename,
             MenuAction::Properties,
             MenuAction::Delete,
+            MenuAction::Share,
         ]
     );
 }
@@ -251,7 +259,7 @@ fn context_menu_targets_selection_or_hit_tile() {
     // 无选区：作用于右键命中瓦片（R11 后半句）。
     let menu = vm.context_menu(AssetId(3));
     assert_eq!(menu.targets, vec![AssetId(3)]);
-    assert_eq!(menu.items.len(), 5);
+    assert_eq!(menu.items.len(), 6, "菜单六项（D80 追加共享后）");
     assert!(menu.items.iter().all(|i| i.enabled));
     // 有选区且命中瓦片在选区内：作用于整个选区（R11 前半句）。
     vm.enter_multi();

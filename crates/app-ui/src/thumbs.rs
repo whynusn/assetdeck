@@ -30,7 +30,8 @@ use lru::LruCache;
 use slint::{Model, Timer, TimerMode, VecModel};
 
 use ui_viewmodels::grid_vm::{LibraryGridVm, MAX_VISIBLE};
-use ui_viewmodels::{AssetId, RealAssetResolver};
+use ui_viewmodels::uuid::Uuid;
+use ui_viewmodels::{AssetId, RealAssetResolver, ShareVm};
 
 use crate::cards::{ResolverCardProvider, TileCardData, TileCardDataProvider};
 use crate::ui_enums;
@@ -125,6 +126,10 @@ pub(crate) struct GridCtx {
     tiles: Rc<VecModel<TileData>>,
     thumbs: ThumbSource,
     cache: Rc<RefCell<ThumbCache>>,
+    /// D80 共享状态机（UI 线程唯一实例，与 main.rs 的接线共享同一 Rc）：
+    /// build_rows 铺瓦片时按素材 uuid 现查角标，不缓存（角标变化走
+    /// BadgesChanged 定向 set_row_data，滚动/切分类重建时自然取到新值）。
+    share_vm: Rc<RefCell<ShareVm>>,
     /// 上一轮填充 pass 的滚动位置（D54 几何稳定判据：相邻两轮 <0.5px 视为静止）。
     last_fill_y: Cell<f32>,
 }
@@ -136,6 +141,7 @@ impl GridCtx {
         tiles: Rc<VecModel<TileData>>,
         thumbs: ThumbSource,
         cache: Rc<RefCell<ThumbCache>>,
+        share_vm: Rc<RefCell<ShareVm>>,
     ) -> Self {
         Self {
             ui,
@@ -143,6 +149,7 @@ impl GridCtx {
             tiles,
             thumbs,
             cache,
+            share_vm,
             last_fill_y: Cell::new(f32::NAN),
         }
     }
@@ -161,7 +168,8 @@ impl GridCtx {
             let (first, end) = vm.visible_range(scroll_top, viewport_height);
             vm.ensure_window(first, end.saturating_sub(first));
             let mut cache = self.cache.borrow_mut();
-            let built = build_rows(&vm, &self.thumbs, &mut cache, first, end);
+            let share_vm = self.share_vm.borrow();
+            let built = build_rows(&vm, &self.thumbs, &mut cache, &share_vm, first, end);
             cache.retain_window(&built.window);
             built
         };
@@ -187,7 +195,8 @@ impl GridCtx {
             let vm = self.vm.borrow_mut();
             let (first, end) = vm.visible_range(scroll_top, viewport_height);
             let mut cache = self.cache.borrow_mut();
-            let built = build_rows(&vm, &self.thumbs, &mut cache, first, end);
+            let share_vm = self.share_vm.borrow();
+            let built = build_rows(&vm, &self.thumbs, &mut cache, &share_vm, first, end);
             cache.retain_window(&built.window);
             built
         };
@@ -255,6 +264,7 @@ fn build_rows(
     vm: &LibraryGridVm,
     thumbs: &ThumbSource,
     cache: &mut ThumbCache,
+    share_vm: &ShareVm,
     first: usize,
     end: usize,
 ) -> WindowBuild {
@@ -330,6 +340,13 @@ fn build_rows(
                 // D47 勾选态：瓦片重绘时从选区状态机现取（sync 由壳层在
                 // 选区变化后统一触发，这里不缓存）。
                 selected: vm.is_selected(id),
+                // D80 共享角标：现查现取（uuid 查不到 = 演示库/未共享 = 无角标）。
+                share_badge: thumbs_guard
+                    .as_ref()
+                    .and_then(|resolver| resolver.uuid_of(id))
+                    .and_then(|uuid| uuid.parse::<Uuid>().ok())
+                    .map(|uuid| ui_enums::share_badge(share_vm.badge(uuid)))
+                    .unwrap_or(ui_enums::SHARE_BADGE_NONE),
             };
             if loaded_real {
                 updates.push((i, tile.clone()));

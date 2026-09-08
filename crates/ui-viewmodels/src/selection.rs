@@ -28,7 +28,7 @@ pub enum Mode {
     Multi,
 }
 
-/// 右键菜单动作 id（D48 五项，穷举测试锁死）。壳层回传 menu-action(id)。
+/// 右键菜单动作 id（D48 五项 + D80 共享，穷举测试锁死）。壳层回传 menu-action(id)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     /// 素材进剪贴板 = 上框语义止步处，绝不合成回车（D13）。
@@ -38,16 +38,20 @@ pub enum MenuAction {
     Properties,
     /// 进回收站（D46 软删），非彻底删除。
     Delete,
+    /// 共享到设备（D80）：弹设备选择器，显式推送、零默认共享。
+    Share,
 }
 
-/// 菜单五项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除）。
-/// 顺序即渲染顺序；`LibraryGridVm::context_menu` 据此组装。
+/// 菜单六项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除，
+/// 再加 D80 追加的「共享到设备…」）。顺序即渲染顺序；`LibraryGridVm::context_menu`
+/// 据此组装。Share 追加在尾：不动既有五项的 id 编码，回归面最小。
 pub const MENU_ITEMS: &[(MenuAction, &str)] = &[
     (MenuAction::Copy, "复制"),
     (MenuAction::MoveToCategory, "移动到分类"),
     (MenuAction::Rename, "重命名"),
     (MenuAction::Properties, "属性"),
     (MenuAction::Delete, "删除"),
+    (MenuAction::Share, "共享到设备…"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

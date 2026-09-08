@@ -293,6 +293,30 @@ impl RealAssetResolver {
         path.is_file().then_some(path)
     }
 
+    /// 共享入口的发送条目（D80）：uuid/文件名/类目/大小取自库内元数据，
+    /// kind 以现路径现场判定（media 口径只在本层出现，app-ui 够不着 media）。
+    ///
+    /// 返回 None 的情形 = 不该出现在共享对话框里：行已彻底删除、meta 读取
+    /// 失败、或正本文件物理缺失（例如外部清理过库目录——宁可不发也不发半句
+    /// 谎话）。回收站里的素材不在 `uuids` 索引（装载只取 deleted=0），天然
+    /// 排除；不额外查回收站。
+    pub fn share_candidate(&self, id: AssetId) -> Option<share::SendItem> {
+        let uuid = self.uuid_of(id)?;
+        let meta = self.store.get_asset(uuid).ok().flatten()?;
+        let path = self.absolute_path(id)?;
+        if !path.is_file() {
+            return None;
+        }
+        Some(share::SendItem {
+            asset_uuid: uuid.parse().ok()?,
+            file_name: meta.file_name,
+            kind: media::kind_of(&path),
+            size_bytes: meta.size_bytes.max(0) as u64,
+            category_hint: meta.category,
+            path,
+        })
+    }
+
     /// 真实宽高比表（`AssetId → w/h`），供 [`crate::LibraryGridVm::set_aspects`] 驱动版式。
     ///
     /// 遍历顺序与 [`load_real_library`] 分配 id 的顺序一致（同一 `for_each_asset`

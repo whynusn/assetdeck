@@ -115,6 +115,32 @@ fn deny_toml_bans_required_vector_entries() {
     }
 }
 
+/// D80 共享通道依赖红线：iroh（P2P 传输栈）、tokio（其异步运行时）、mdns-sd
+/// （设备发现）只许活在 tools/share-worker 这一个编译单元里——UI 进程永不碰
+/// 网络栈。app-ui 的 Cargo.toml 白名单本身已挡（EXACT 纪律）；这里对
+/// ui-viewmodels 的 Cargo.toml 再扫一遍禁令，防装配层经「转发 crate」走私。
+/// share 类型经 ui-viewmodels re-export 进入 app-ui（share 是零 IO 纯模型，
+/// 不在禁令内）。
+#[test]
+fn d80_network_stack_confined_to_share_worker() {
+    for rel in ["Cargo.toml", "../ui-viewmodels/Cargo.toml"] {
+        let toml = read_repo_file(rel);
+        for banned in ["iroh", "tokio", "mdns-sd"] {
+            let violated = toml.lines().any(|line| {
+                let t = line.trim_start();
+                // 依赖键形如 `iroh =` / `iroh.`（workspace 继承）；注释行不算。
+                !t.starts_with('#')
+                    && (t.starts_with(&format!("{banned} ="))
+                        || t.starts_with(&format!("{banned}.")))
+            });
+            assert!(
+                !violated,
+                "红线违规：{rel} 禁止依赖网络栈 crate `{banned}`（D80：iroh/tokio/mdns-sd 只进 tools/share-worker）"
+            );
+        }
+    }
+}
+
 /// D48 卡退回归守卫：`apply_filter` 内部对 current_filter/filter_label 做
 /// `borrow_mut`。若调用方把 `.borrow().clone()` **内联进实参**，Ref 卫队会
 /// 活到整条语句结束、横跨整个调用 → BorrowMutError panic。实测后果：移动/

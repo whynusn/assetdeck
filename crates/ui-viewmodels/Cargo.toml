@@ -14,6 +14,9 @@ store = { path = "../store" }
 targets = { path = "../targets" }
 pipeline = { path = "../pipeline" }
 platform = { path = "../platform" }
+# D80 共享 VM：只吃 share 的纯类型/事件，iroh/tokio 永不经此泄漏到 app-ui。
+share = { path = "../share" }
+uuid = { version = "1", features = ["v4"] }
 lru = "0.18"
 serde = { version = "1", features = ["derive"] }
 toml = "1"

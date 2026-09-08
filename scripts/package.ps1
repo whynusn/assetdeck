@@ -8,8 +8,8 @@
 
       portable（便携版）
         1. cargo build --release：主程序(app-ui→asset-manager)、worker(decode-worker)、
-           sample-library、derive-thumbs
-        2. 重建 dist/：拷贝 4 个 exe（不带任何素材库——8-29 覆盖事故的根治，D61）
+           sample-library、derive-thumbs、share-worker（D80 共享引擎）
+        2. 重建 dist/：拷贝 5 个 exe（不带任何素材库——8-29 覆盖事故的根治，D61）
         3. 校验必需文件齐全后打成 artifacts/素材管理器-便携版-<ver>.zip
 
       installer（安装版，依赖 portable 产出的 dist/）
@@ -88,11 +88,11 @@ function Assert-LastExitCode {
 
 # ---------- 阶段一：便携版 ----------
 function Step-Portable {
-    Write-Host "==> [portable] 编译 release 产物（app-ui / worker / sample-library / derive-thumbs）"
+    Write-Host "==> [portable] 编译 release 产物（app-ui / worker / sample-library / derive-thumbs / share-worker）"
     if (-not $SkipBuild) {
         Push-Location $RepoRoot
         try {
-            & cargo build --release -p app-ui -p worker -p sample-library -p derive-thumbs
+            & cargo build --release -p app-ui -p worker -p sample-library -p derive-thumbs -p share-worker
             Assert-LastExitCode "cargo build"
         } finally {
             Pop-Location
@@ -103,7 +103,9 @@ function Step-Portable {
     if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 
-    $required = @("asset-manager.exe", "decode-worker.exe", "sample-library.exe", "derive-thumbs.exe")
+    # D80：share-worker.exe 是共享通道的传输引擎子进程（UI 主进程永不碰网络栈），
+    # 缺它共享功能静默不可用（主程序只留日志），必须随包分发。
+    $required = @("asset-manager.exe", "decode-worker.exe", "sample-library.exe", "derive-thumbs.exe", "share-worker.exe")
     foreach ($name in $required) {
         $src = Join-Path $RepoRoot "target\release\$name"
         if (-not (Test-Path $src)) {
@@ -171,10 +173,10 @@ function Step-Installer {
     }
     if (-not $tarOk) { throw "打 tar 连续失败：$Payload" }
 
-    # payload 完整性快检：4 个 exe 必须出现在归档根
+    # payload 完整性快检：5 个 exe 必须出现在归档根
     $entries = & tar.exe -tf $Payload
     Assert-LastExitCode "tar 校验"
-    foreach ($name in @("asset-manager.exe", "decode-worker.exe", "sample-library.exe", "derive-thumbs.exe")) {
+    foreach ($name in @("asset-manager.exe", "decode-worker.exe", "sample-library.exe", "derive-thumbs.exe", "share-worker.exe")) {
         if ($entries -notcontains "./$name") {
             throw "tar payload 缺少 $name"
         }

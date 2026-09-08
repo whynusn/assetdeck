@@ -8,6 +8,7 @@ pub mod legacy_migration;
 pub mod search;
 pub mod selection;
 pub mod settings;
+pub mod share_vm;
 pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
 pub mod target_runtime;
@@ -26,6 +27,12 @@ pub use settings::{
     settings_path, AppSettings, InputPointOverride, SettingKind, SettingSpec, SettingView,
     SETTING_SPECS, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
 };
+pub use share_vm::{
+    human_size, ShareAction, ShareBadge, ShareBatch, ShareFinal, SharePhase, ShareVm,
+};
+// D80 共享通道装配所需的传输类型：app-ui 依赖白名单不含 share（deps_guard
+// EXACT 纪律），SendItem/DeviceEntry 经此转发；uuid 同理（角标键与批次 id）。
+pub use share::{DeviceEntry, SendItem};
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,
@@ -41,6 +48,7 @@ pub use update_check::{
     ReleaseAsset, ReleaseInfo, UpdateCheckVm, UpdateUiAction, CHECK_INTERVAL_SECS, DEFAULT_FEEDS,
     FETCH_TIMEOUT_MS,
 };
+pub use uuid;
 
 pub use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps};
 pub use target_runtime::{TargetRoutingRuntime, TargetRuntimeDeps};

@@ -1047,6 +1047,12 @@ if (click_count % 2) == 1 {
 
 **守卫计划**：①「默认零共享」——worker 无指令不监听不发包（探针级测试）；② deps_guard 扩展：app-ui/ui-viewmodels 禁依赖 iroh/tokio；③ 接收路径复用导入管线去重测试面（D65）；④ 清单校验表驱动纯函数；⑤ 内存：worker 按需退出，空闲零进程。
 
+**M0 落地（2026-09-08）**：闭环全链就位——`tools/share-worker`（iroh 引擎 + mDNS 发现 + stdin/stdout 行协议，iroh/tokio 只进此编译单元；`presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在配置层，零信令/零打洞/零中继）；`crates/share`（清单/请求/设备纯模型 + worker 事件行解析端 `events`）；ui-viewmodels `share_vm`（批次/报价/角标状态机，纯逻辑零 IO，事件流进 → `ShareAction` 副作用出）；app-ui 接线（worker 生命周期 = 主进程 stdin 管道，右键菜单「共享到设备…」id=5 追加尾 + 多选操作条「共享」→ 设备选择弹窗 → 显式推送；接收侧首连确认弹窗 → 复用 D66 归类弹窗导入流，`ImportFlow.post_phase1` 钩子回 ACK/NACK，导入成败即 worker 收尾信号）；角标真源 = VM `badge_overrides` HashMap（状态迁移点写、O(1) 查、批次 evict 不回滚），`BadgesChanged` 定向刷瓦片不整表重建；deps_guard 新增 `d80_network_stack_confined_to_share_worker`（app-ui/ui-viewmodels Cargo.toml 禁 iroh/tokio/mdns-sd）；打包 5 exe（share-worker.exe 随包）。
+
+**M0 实测要害（回环 E2E 逼出来的 QUIC 收发时序纪律）**：① 连接句柄 drop 即拆链——`finish()` 后还躺在本端发送队列里的字节会随 drop 丢失；终行（REJECT/DELIVERED/NACK）写出必须 `finish()` + 显式冲刷窗（`FLUSH_GRACE` 300ms）再返回，DELIVERED 路径此前全靠 remove_dir_all 的偶然 await 才赶上冲刷；② 未 finish 的 SendStream 被 drop = 流 RESET，在途字节同灭；③ `conn.closed()` 与 drain-to-EOF 在快退路径上均不可靠，终行投递的唯一可信模式 = finish + 有界冲刷窗 + 只许最后一个读者关连接。④ 扫描收口走 `SCAN_DONE` 事件行（UI 撤扫描态靠事件不靠定时器）。⑤ mDNS 起不来降级不致命（本机仍可被直连），SCAN 回警示行。
+
+**M0 留给 M1 的口子**：installer 防火墙 UDP 入站规则（同网段收推送依赖；M0 先手测放行）；遥测归因档位字段已埋（engine 事件流），上报通道 M1 再议；pkarr 信令/portmapper 启用/配对码按分期计划。
+
 ### 未来规划（用户已拍板纳入，未排期）
 
 - **提权注入 broker（D79 评审的方案二）**：主程序保持普通权限，单独一个一次 UAC 授权常驻的提权小进程，经命名管道接收「hwnd + 点击点」代跑 HTCLIENT 守卫与点击链，用于向提权目标注入。主程序从此不需要提权（拖入/UAC 问题同时消失），提权面收窄到一个只做点击的哑执行器。**前置条件**：提权 IPC 服务必须校验客户端 + ACL 收紧（否则任何中完整性进程都能指挥一支"幽灵鼠标"）；工程量 = 新进程 + IPC 协议 + 生命周期管理，v2 评估。

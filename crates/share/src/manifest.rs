@@ -96,7 +96,7 @@ impl ManifestItem {
 
 /// 展示文件名安全校验：拒绝路径分隔符、盘符、Windows 保留字符、控制字符
 /// 与尾随点/空格（Windows shell 语义会把尾随点/空格静默剥掉）。
-fn is_safe_display_name(name: &str) -> bool {
+pub fn is_safe_display_name(name: &str) -> bool {
     if name.is_empty() || name.chars().count() > FILE_NAME_MAX_CHARS {
         return false;
     }
@@ -115,6 +115,16 @@ fn is_safe_display_name(name: &str) -> bool {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 展示名中的对象扩展名（接收侧暂存命名用）：取最后一个 '.' 之后的部分，
+/// 仅接受 1..=8 位 ASCII 字母/数字；无后缀或含其它字符 = None（调用方落
+/// 中性后缀）。file_name 已过 [`is_safe_display_name`]，这里只是防扩展名
+/// 本身伪装（如 `foo.;exe`、超长后缀）。
+pub fn safe_ext(file_name: &str) -> Option<String> {
+    let (_, ext) = file_name.rsplit_once('.')?;
+    let ok = !ext.is_empty() && ext.len() <= 8 && ext.bytes().all(|b| b.is_ascii_alphanumeric());
+    ok.then(|| ext.to_ascii_lowercase())
 }
 
 #[cfg(test)]

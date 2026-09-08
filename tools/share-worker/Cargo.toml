@@ -5,7 +5,16 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+domain = { version = "0.1.5", path = "../../crates/domain" }
 iroh = "1.1.0"
+logging = { version = "0.1.5", path = "../../crates/logging" }
+mdns-sd = "0.21.2"
+serde_json = "1.0.151"
+sha2 = "0.10"
 # D80 钉子 3：iroh/tokio 只进这一个编译单元；契约类型走 crates/share。
 share = { path = "../../crates/share" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
+uuid = "1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

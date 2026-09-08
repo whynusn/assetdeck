@@ -44,7 +44,24 @@ pub fn menu_action(id: i32) -> Option<MenuAction> {
         2 => Some(MenuAction::Rename),
         3 => Some(MenuAction::Properties),
         4 => Some(MenuAction::Delete),
+        // D80 追加在尾，不动既有五项编码。
+        5 => Some(MenuAction::Share),
         _ => None,
+    }
+}
+
+/// D80 共享角标 → UiEnums.share-badge-*（无/在途/已送达/失败）。
+pub const SHARE_BADGE_NONE: i32 = 0;
+pub const SHARE_BADGE_BUSY: i32 = 1;
+pub const SHARE_BADGE_DONE: i32 = 2;
+pub const SHARE_BADGE_FAILED: i32 = 3;
+
+pub fn share_badge(badge: Option<ui_viewmodels::ShareBadge>) -> i32 {
+    match badge {
+        None => SHARE_BADGE_NONE,
+        Some(ui_viewmodels::ShareBadge::Busy) => SHARE_BADGE_BUSY,
+        Some(ui_viewmodels::ShareBadge::Done) => SHARE_BADGE_DONE,
+        Some(ui_viewmodels::ShareBadge::Failed) => SHARE_BADGE_FAILED,
     }
 }
 
