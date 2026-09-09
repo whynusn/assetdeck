@@ -27,6 +27,9 @@ jobs:
           git ls-files | ForEach-Object {
             $f = $_
             if ($binExts -contains [IO.Path]::GetExtension($f).ToLowerInvariant()) { return }
+            # vendor/ 第三方 vendored 原件（iroh 等）保持上游原样——.cargo-ok 等元数据
+            # 上游本就无 EOF 换行，改写会破坏与上游 diff 对齐，扫描跳过。
+            if ($f.StartsWith('vendor/')) { return }
             $b = [IO.File]::ReadAllBytes($f)
             if ($b.Length -gt 0 -and $b[$b.Length - 1] -ne 10) { $bad += $f }
           }

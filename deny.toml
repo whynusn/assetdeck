@@ -43,4 +43,10 @@ allow = [
     "GPL-3.0-or-later",
     "GPL-2.0-only",
     "LGPL-3.0-only",
+    # iroh 传递树（D80）：Unlicense = ws_stream_wasm/pharos/async_io_stream（wasm 侧）；
+    # MPL-2.0 = attohttpc；CDLA-Permissive-2.0 = webpki-roots 根证书集（数据许可）。
+    # 全是宽松许可，与上方 GPL 系放行立场一致。
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
