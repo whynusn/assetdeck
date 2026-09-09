@@ -37,7 +37,7 @@ pub enum DomainError {
     BadMember {
         index: usize,
     },
-    /// 成员数不符合域形态（个人域必须恰 1，群组域至少 1）。
+    /// 成员数不符合域形态（个人域必须恰 1；群组域任意，含 0 = 草稿）。
     BadMembership {
         kind: DomainKind,
         count: usize,
@@ -60,7 +60,7 @@ impl core::fmt::Display for DomainError {
                 },
                 match kind {
                     DomainKind::Personal => "恰 1 名",
-                    DomainKind::Group => "至少 1 名",
+                    DomainKind::Group => "0 名（草稿）或任意名",
                 }
             ),
         }
@@ -79,7 +79,9 @@ impl ShareDomain {
         }
         let expected: std::ops::RangeInclusive<usize> = match self.kind {
             DomainKind::Personal => 1..=1,
-            DomainKind::Group => 1..=usize::MAX,
+            // 空群组 = 草稿态：零成员对任何人都不可见（fail-closed），
+            // UI 允许先建组再勾成员。个人域恒单成员，无草稿态。
+            DomainKind::Group => 0..=usize::MAX,
         };
         if !expected.contains(&self.members.len()) {
             return Err(DomainError::BadMembership {
@@ -232,23 +234,38 @@ mod tests {
             })
         );
 
-        // 群组域零成员 → 拒绝。
-        let mut group = ShareDomain {
+        // 个人域零成员 → 拒绝（个人域无草稿态）。
+        let empty_personal = ShareDomain {
             id: Uuid::new_v4(),
-            name: "空组".to_string(),
-            kind: DomainKind::Group,
+            name: "空个人域".to_string(),
+            kind: DomainKind::Personal,
             members: Vec::new(),
         };
         assert_eq!(
-            group.validate(),
+            empty_personal.validate(),
             Err(DomainError::BadMembership {
-                kind: DomainKind::Group,
+                kind: DomainKind::Personal,
                 count: 0
             })
         );
 
+        // 空群组 = 草稿态，合法（零成员零可见）。
+        ShareDomain {
+            id: Uuid::new_v4(),
+            name: "空组草稿".to_string(),
+            kind: DomainKind::Group,
+            members: Vec::new(),
+        }
+        .validate()
+        .unwrap();
+
         // 成员 id 非 z32 形状 → 拒绝并指位。
-        group.members = vec!["short-id".to_string()];
+        let group = ShareDomain {
+            id: Uuid::new_v4(),
+            name: "形状坏组".to_string(),
+            kind: DomainKind::Group,
+            members: vec!["short-id".to_string()],
+        };
         assert_eq!(group.validate(), Err(DomainError::BadMember { index: 0 }));
     }
 

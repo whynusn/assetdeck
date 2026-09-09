@@ -23,11 +23,12 @@ use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
-    AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, DarkThemeProvider,
-    FacetIndex, Filter, InputPointOverride, LightThemeProvider, RealAssetResolver, SearchProvider,
-    SendItem, ShareAction, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId,
-    TargetBarMode, TargetBarSnapshot, TargetHealth, TargetNoticeTone, TargetRoutingRuntime,
-    TargetRuntimeDeps, ThemeProvider, ThemeTokens, TuningTarget,
+    AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, ControlError,
+    DarkThemeProvider, DomainKind, FacetIndex, Filter, InputPointOverride, LightThemeProvider,
+    RealAssetResolver, SearchProvider, SendItem, ShareAction, ShareControlVm, ShareRegistry,
+    ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot,
+    TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
+    ThemeTokens, TuningTarget,
 };
 
 use task_runner::ChildTask;
@@ -71,6 +72,12 @@ thread_local! {
     static SHARE_WIRING: RefCell<Option<ShareWiring>> = const { RefCell::new(None) };
     /// 设备选择弹窗等待发送的素材（弹窗确认时取走；取消即弃）。
     static SHARE_PENDING: RefCell<Vec<SendItem>> = const { RefCell::new(Vec::new()) };
+    /// D80-M1 共享控制面（配对册/域册/共享态，UI 线程唯一实例）。
+    static SHARE_CONTROL: RefCell<ShareControlVm> = RefCell::new(ShareControlVm::new());
+    /// share_registry.json 落盘路径（启动时定，None = 未初始化不落盘）。
+    static SHARE_CONTROL_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+    /// 「共享到域…」弹窗待处理的素材 uuid 文本（uuids_of 产物；关闭即弃）。
+    static SHARE_DOMAIN_PENDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// D80 共享接线的 UI 线程侧装配件（见 [`SHARE_WIRING`]）。
@@ -1140,6 +1147,122 @@ fn collect_share_items(
         .collect()
 }
 
+/// D80-M1 控制面落盘：dirty 读后即清（事件驱动保存，零定时器）。
+/// 路径未初始化（演示态）跳过。
+fn persist_share_control() {
+    let Some(path) = SHARE_CONTROL_PATH.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let payload = SHARE_CONTROL.with(|control| {
+        let mut control = control.borrow_mut();
+        if !control.take_dirty() {
+            return None;
+        }
+        Some(control.registry().to_json())
+    });
+    if let Some(json) = payload {
+        if let Err(error) = atomic_write(&path, &json) {
+            logging::warn!("共享注册表落盘失败: {error}");
+        }
+    }
+}
+
+/// D80-M1 控制面管理弹窗数据回填：设备册 / 域册 / 选中域的成员勾选集。
+fn sync_share_ctl_ui(ui: &AppWindow) {
+    SHARE_CONTROL.with(|control| {
+        let control = control.borrow();
+        let devices: Vec<ShareCtlDeviceData> = control
+            .devices()
+            .iter()
+            .map(|device| ShareCtlDeviceData {
+                id: device.id.clone().into(),
+                name: device.name.clone().into(),
+                detail: format!("{}…", &device.id[..device.id.len().min(12)]).into(),
+            })
+            .collect();
+        ui.set_share_ctl_devices(ModelRc::from(Rc::new(VecModel::from(devices))));
+
+        let selected = ui.get_share_ctl_selected_domain();
+        let domains: Vec<ShareCtlDomainData> = control
+            .domains()
+            .iter()
+            .enumerate()
+            .map(|(index, domain)| ShareCtlDomainData {
+                id: domain.id.to_string().into(),
+                name: domain.name.clone().into(),
+                member_count: domain.members.len() as i32,
+                shared: false,
+                selected: index as i32 == selected,
+            })
+            .collect();
+        ui.set_share_ctl_domains(ModelRc::from(Rc::new(VecModel::from(domains.clone()))));
+
+        // 成员勾选回调按 id 定位域：选中态的 uuid 文本一并回填。
+        let selected_id = usize::try_from(selected)
+            .ok()
+            .and_then(|index| domains.get(index).map(|d| d.id.clone()))
+            .unwrap_or_default();
+        ui.set_share_ctl_selected_domain_id(selected_id);
+
+        // 选中域的成员勾选集：全部已配对设备 × 该域成员册。
+        let members: Vec<ShareCtlMemberData> = match selected_domain_members(&control, selected) {
+            Some(member_ids) => control
+                .devices()
+                .iter()
+                .map(|device| ShareCtlMemberData {
+                    id: device.id.clone().into(),
+                    name: device.name.clone().into(),
+                    checked: member_ids.contains(&device.id),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        ui.set_share_ctl_members(ModelRc::from(Rc::new(VecModel::from(members))));
+    });
+}
+
+/// 选中域下标的成员 id 集合（越界/未选中 = None）。
+fn selected_domain_members(control: &ShareControlVm, selected: i32) -> Option<Vec<String>> {
+    let index = usize::try_from(selected).ok()?;
+    control.domains().get(index).map(|d| d.members.clone())
+}
+
+/// D80-M1 共享态弹窗数据回填：待处理素材对每个域的「共享中」标志。
+fn sync_share_asset_domains(ui: &AppWindow) {
+    let asset = SHARE_DOMAIN_PENDING.with(|slot| slot.borrow().first().cloned());
+    let Some(asset) = asset else {
+        ui.set_share_asset_domains(ModelRc::from(Rc::new(VecModel::from(Vec::<
+            ShareCtlDomainData,
+        >::new()))));
+        return;
+    };
+    // 待处理素材是 uuid 文本（uuids_of 产物）；解析失败的悬空项直接空列表。
+    let Ok(asset) = Uuid::parse_str(asset.as_str()) else {
+        ui.set_share_asset_domains(ModelRc::from(Rc::new(VecModel::from(Vec::<
+            ShareCtlDomainData,
+        >::new()))));
+        return;
+    };
+    SHARE_CONTROL.with(|control| {
+        let control = control.borrow();
+        let domains: Vec<ShareCtlDomainData> = control
+            .domains()
+            .iter()
+            .map(|domain| ShareCtlDomainData {
+                id: domain.id.to_string().into(),
+                name: domain.name.clone().into(),
+                member_count: domain.members.len() as i32,
+                shared: control
+                    .shared_entries()
+                    .iter()
+                    .any(|e| e.asset_uuid == asset && e.domain_id == domain.id),
+                selected: false,
+            })
+            .collect();
+        ui.set_share_asset_domains(ModelRc::from(Rc::new(VecModel::from(domains))));
+    });
+}
+
 /// 属性弹窗的字段组装（R13：尺寸/大小/导入时间/绝对路径）。
 fn fill_properties(ui: &AppWindow, resolver: &RealAssetResolver, id: AssetId) -> bool {
     let Ok(Some(meta)) = resolver.meta_of(id) else {
@@ -1998,6 +2121,17 @@ fn main() {
     // 缺省用内置 GitHub 主源；国内镜像顺序回落经此文件配置。
     let feeds_path = target_config_dir.join("update_feeds.toml");
 
+    // D80-M1 共享注册表：与 targets.json 同目录。损坏/缺失 = 空册起步
+    // （默认零共享不变量：没有配对/域/共享事实，任何人都看不到任何素材）。
+    let share_registry_path = target_config_dir.join("share_registry.json");
+    let share_registry = std::fs::read_to_string(&share_registry_path)
+        .ok()
+        .and_then(|text| ShareRegistry::from_json(&text))
+        .unwrap_or_default();
+    SHARE_CONTROL_PATH.with(|slot| *slot.borrow_mut() = Some(share_registry_path));
+    SHARE_CONTROL
+        .with(|control| *control.borrow_mut() = ShareControlVm::from_registry(share_registry));
+
     // 渲染后端选择：ASSETDECK_FORCE_SOFTWARE > SLINT_BACKEND > gpu_rendering > 软件渲染。
     // 关键：BackendSelector 的 backend 与 renderer 必须分开传——"winit-femtovg" 这种
     // 连写名字不会按连字符拆分（select() 只做整名匹配），实测会静默回落默认渲染器，
@@ -2499,6 +2633,17 @@ fn main() {
                 sync_share_ui(&ui);
                 return;
             }
+            // D80-M1 控制面两弹窗：Esc 逐层退出，共享态弹窗丢弃待处理素材。
+            if ui.get_share_ctl_open() {
+                ui.set_share_ctl_open(false);
+                sync_share_ctl_ui(&ui);
+                return;
+            }
+            if ui.get_share_domains_open() {
+                SHARE_DOMAIN_PENDING.with(|slot| slot.borrow_mut().clear());
+                ui.set_share_domains_open(false);
+                return;
+            }
             // 归类弹窗是模态最上层，Esc = 取消本次导入。
             if ui.get_classify_open() {
                 import_flow.close();
@@ -2679,6 +2824,36 @@ fn main() {
                     let actions = SHARE_VM.with(|vm| vm.borrow_mut().open_picker());
                     dispatch_share_actions(&crud.ui, actions);
                 }
+                MenuAction::ShareToDomain => {
+                    // D80-M1 共享态入口：只改可获得性事实，不触发任何传输。
+                    // 回收站与演示库同样拒绝（与推送入口同规）。
+                    if crud.is_trash_view() {
+                        if let Some(ui) = crud.ui.upgrade() {
+                            show_notice(
+                                &ui,
+                                TargetNoticeTone::Warning,
+                                "回收站里的素材不能设置共享".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    let uuids = crud.uuids_of(&targets);
+                    if uuids.is_empty() {
+                        if let Some(ui) = crud.ui.upgrade() {
+                            show_notice(
+                                &ui,
+                                TargetNoticeTone::Warning,
+                                "选中的素材没有可共享的文件".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    SHARE_DOMAIN_PENDING.with(|slot| *slot.borrow_mut() = uuids);
+                    if let Some(ui) = crud.ui.upgrade() {
+                        ui.set_share_domains_open(true);
+                        sync_share_asset_domains(&ui);
+                    }
+                }
             }
         });
     }
@@ -2779,6 +2954,191 @@ fn main() {
         app.on_share_offer_reject(move || {
             let actions = SHARE_VM.with(|vm| vm.borrow_mut().offer_reject("用户拒收"));
             dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+
+    // —— D80-M1 共享控制面回调（共享态弹窗 + 域册/配对册管理弹窗）——
+    {
+        let crud = crud.clone();
+        app.on_share_domains_closed(move || {
+            SHARE_DOMAIN_PENDING.with(|slot| slot.borrow_mut().clear());
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_share_domains_open(false);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_domain_toggled(move |domain_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let Ok(domain) = Uuid::parse_str(domain_id.as_str()) else {
+                return;
+            };
+            let Some(asset) = SHARE_DOMAIN_PENDING.with(|slot| slot.borrow().first().cloned())
+            else {
+                return;
+            };
+            let Ok(asset) = Uuid::parse_str(asset.as_str()) else {
+                return;
+            };
+            // 切换语义：已共享 = 撤销，未共享 = 标记。错误（未知域等）仅
+            // 提示，不打断弹窗。时间戳仅展示用，不参与判定。
+            let outcome = SHARE_CONTROL.with(|control| {
+                let mut control = control.borrow_mut();
+                let already = control
+                    .shared_entries()
+                    .iter()
+                    .any(|e| e.asset_uuid == asset && e.domain_id == domain);
+                if already {
+                    control.revoke_shared(asset, domain);
+                    None
+                } else {
+                    control
+                        .mark_shared(asset, domain, ui_viewmodels::unix_now_secs() as i64)
+                        .err()
+                }
+            });
+            if let Some(error) = outcome {
+                show_notice(&ui, TargetNoticeTone::Warning, error.to_string());
+            }
+            persist_share_control();
+            sync_share_asset_domains(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_open_requested(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_share_ctl_open(true);
+                ui.set_share_ctl_selected_domain(-1);
+                sync_share_ctl_ui(&ui);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_closed(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_share_ctl_open(false);
+                sync_share_ctl_ui(&ui);
+                // 从共享态弹窗进来的路径：域册可能在管理弹窗里被增删，
+                // 底下的共享态列表一并刷新（成员数/域集可能已变）。
+                if ui.get_share_domains_open() {
+                    sync_share_asset_domains(&ui);
+                }
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_device_add(move |name, id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let outcome = SHARE_CONTROL.with(|control| {
+                control
+                    .borrow_mut()
+                    .pair(
+                        id.trim(),
+                        name.trim(),
+                        ui_viewmodels::unix_now_secs() as i64,
+                    )
+                    .map(|_| ())
+                    .err()
+            });
+            match outcome {
+                Some(error) => show_notice(&ui, TargetNoticeTone::Warning, error.to_string()),
+                None => {
+                    ui.set_share_ctl_device_name("".into());
+                    ui.set_share_ctl_device_id("".into());
+                }
+            }
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_device_remove(move |device_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            // 级联（逐出域册/变空域撤销共享）在 VM 内完成。
+            SHARE_CONTROL.with(|control| control.borrow_mut().unpair(device_id.as_str()));
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_domain_selected(move |index| {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_share_ctl_selected_domain(index);
+                sync_share_ctl_ui(&ui);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_domain_create(move |name| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let outcome = SHARE_CONTROL.with(|control| {
+                control
+                    .borrow_mut()
+                    .create_domain(name.trim(), DomainKind::Group, vec![])
+                    .err()
+            });
+            match outcome {
+                Some(error) => show_notice(&ui, TargetNoticeTone::Warning, error.to_string()),
+                None => ui.set_share_ctl_new_domain_name("".into()),
+            }
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_domain_remove(move |domain_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let removed = SHARE_CONTROL.with(|control| match Uuid::parse_str(domain_id.as_str()) {
+                Ok(id) => control.borrow_mut().remove_domain(id),
+                Err(_) => false,
+            });
+            if removed {
+                ui.set_share_ctl_selected_domain(-1);
+            }
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_member_toggled(move |device_id, checked| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let selected = ui.get_share_ctl_selected_domain_id();
+            // 先验后写：整体替换成员册（VM 端复跑配对核对 + 形态校验）。
+            let outcome = SHARE_CONTROL.with(|control| {
+                let mut control = control.borrow_mut();
+                let Ok(domain) = Uuid::parse_str(selected.as_str()) else {
+                    return Some(ControlError::UnknownDomain);
+                };
+                let mut members = control
+                    .domains()
+                    .iter()
+                    .find(|d| d.id == domain)
+                    .map(|d| d.members.clone())
+                    .unwrap_or_default();
+                if checked {
+                    if !members.iter().any(|m| m == device_id.as_str()) {
+                        members.push(device_id.to_string());
+                    }
+                } else {
+                    let target = device_id.as_str();
+                    members.retain(|m| m.as_str() != target);
+                }
+                control.set_domain_members(domain, members).err()
+            });
+            if let Some(error) = outcome {
+                show_notice(&ui, TargetNoticeTone::Warning, error.to_string());
+            }
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
         });
     }
 

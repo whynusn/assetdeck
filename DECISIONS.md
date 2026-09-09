@@ -1063,6 +1063,13 @@ if (click_count % 2) == 1 {
 - **M1-c 远程直连**（D80 原分期不变）：pkarr 信令 + 内建 portmapper 确认启用 + 打洞（relay disabled）+ 设备配对码交互（指纹绑定；与 D70 后置的 ed25519 签名工程合流）。
 - **M1-d 运维**：installer 防火墙 UDP 入站规则（D57 包管线）+ 遥测归因上报通道。
 
+**M1-a 落地（2026-09-09，三批全绿）**：
+- 批1 纯模型（share crate）：`domain`（ShareDomain/DomainKind/PairedDevice(s)，域成员册永不出本机）+ `sharing`（SharedState：mark/revoke/revoke_asset/revoke_domain 全幂等、rev 单调、digest 只绑内容不绑 rev 作拉取后漂移比对）+ `sync`（Delta 表达 (from_rev,to_rev] 区间、Pull{since_rev}、Snapshot{rev,offers}；serde tag="kind" snake_case；ShareOffer 只含可得元数据不含域定义不含路径）+ z32/安全标签校验收口 `is_device_id`/`is_safe_label`。
+- 批2 控制面 VM（ui-viewmodels `share_control`）：ShareControlVm 持 ShareRegistry（devices+domains+shared 一个 JSON 文档）+ dirty 读后即清（app-ui 事件驱动落盘，零定时器）；信任语义比纯模型更严——域成员必须已配对、解除配对级联逐出域册且变空域共享事实全撤销（fail-closed：重配对不复活旧共享）、拆域级联撤销。
+- 批3 UI 接线（app-ui）：菜单第七项「共享到域…」（id=6 追加尾）→ 共享态弹窗逐域切换「共享中」；「共享域管理」弹窗 = 配对册（手贴 52 位标识 + 备注名配对，移除级联）+ 域册（新建群组域/删除/点选后勾成员，成员整体替换先验后写）；`share_registry.json` 与 targets.json 同目录 atomic_write，损坏/缺失按空册起步（默认零共享）。
+- **模型修订（批3 期间）**：空群组 = 草稿态合法（0 成员 0 可见，UI 先建组后勾成员）；unpair 只对「因本次解配而变空」的域动手，且个人域变空才删壳、群组域保留空壳。
+- **显式延期**：个人域创建与配对码 → M1-c（配对交互时自然出现）；瓦片「共享中」角标 → M1-b 发现面（与发送角标区分）；新弹窗 slint-viewer 渲染冒烟归入 M1-a 后真机批次（本批弹窗 1:1 复用已验证的设备选择器 chrome/布局，slint 编译门禁通过；本机 crates CDN 超时致 viewer 装不上，不阻塞）。
+
 **M0 冒烟风险记档（用户拍板：不等）**：M0 传输闭环代码绿（回环 E2E）但真机双机未验证、CI MSVC 首编 vendored iroh 待观察；M1 模型层与传输解耦（契约层先行），不阻塞。双机冒烟（桥接 VM 或 Termux 对端）并入 M1-a 完成后的真机批次，Termux 发现段受 Android 组播锁/路由器 AP 隔离制约的结论届时如实记录。
 
 **M0 落地（2026-09-08）**：闭环全链就位——`tools/share-worker`（iroh 引擎 + mDNS 发现 + stdin/stdout 行协议，iroh/tokio 只进此编译单元；`presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在配置层，零信令/零打洞/零中继）；`crates/share`（清单/请求/设备纯模型 + worker 事件行解析端 `events`）；ui-viewmodels `share_vm`（批次/报价/角标状态机，纯逻辑零 IO，事件流进 → `ShareAction` 副作用出）；app-ui 接线（worker 生命周期 = 主进程 stdin 管道，右键菜单「共享到设备…」id=5 追加尾 + 多选操作条「共享」→ 设备选择弹窗 → 显式推送；接收侧首连确认弹窗 → 复用 D66 归类弹窗导入流，`ImportFlow.post_phase1` 钩子回 ACK/NACK，导入成败即 worker 收尾信号）；角标真源 = VM `badge_overrides` HashMap（状态迁移点写、O(1) 查、批次 evict 不回滚），`BadgesChanged` 定向刷瓦片不整表重建；deps_guard 新增 `d80_network_stack_confined_to_share_worker`（app-ui/ui-viewmodels Cargo.toml 禁 iroh/tokio/mdns-sd）；打包 5 exe（share-worker.exe 随包）。

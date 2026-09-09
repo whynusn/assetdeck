@@ -31,8 +31,9 @@ pub use settings::{
 pub use share_vm::{
     human_size, ShareAction, ShareBadge, ShareBatch, ShareFinal, SharePhase, ShareVm,
 };
-// D80-M1-a 控制面：持久化契约（ShareRegistry）与域类型经 share 转发；
-// app-ui 依赖白名单不含 share（deps_guard EXACT 纪律），一律走本 crate。
+// D80-M1-a 控制面：持久化契约与域形态枚举经 share 转发；app-ui 依赖白名单
+// 不含 share（deps_guard EXACT 纪律），一律走本 crate。
+pub use share::{DomainKind, ShareRegistry};
 pub use share_control::{ControlError, ShareControlVm};
 // D80 共享通道装配所需的传输类型：app-ui 依赖白名单不含 share（deps_guard
 // EXACT 纪律），SendItem/DeviceEntry 经此转发；uuid 同理（角标键与批次 id）。

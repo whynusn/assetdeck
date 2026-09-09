@@ -121,25 +121,28 @@ impl ShareControlVm {
         Ok(added)
     }
 
-    /// 解除配对（级联）：先从设备册移除，再把设备逐出所有域成员册；
-    /// 因此变空的域删除并撤销其全部共享事实。返回是否真的解除了配对。
+    /// 解除配对（级联）：先从设备册移除，再把设备逐出所有域成员册。
+    /// 因此变空的域：共享事实全部撤销（成员再出现时旧共享不得静默复活）；
+    /// 个人域变空（恒单成员）连壳删除，群组域保留空壳（草稿态，零成员
+    /// 零可见）。只动真正因本次解配而变空的域。返回是否真的解除了配对。
     pub fn unpair(&mut self, device_id: &str) -> bool {
         if !self.registry.devices.unpair(device_id) {
             return false;
         }
-        for domain in &mut self.registry.domains {
-            domain.members.retain(|m| m != device_id);
-        }
         let mut emptied: Vec<Uuid> = Vec::new();
-        self.registry.domains.retain(|d| {
-            let keep = !d.members.is_empty();
-            if !keep {
-                emptied.push(d.id);
+        for domain in &mut self.registry.domains {
+            let had_member = domain.members.iter().any(|m| m == device_id);
+            domain.members.retain(|m| m != device_id);
+            if had_member && domain.members.is_empty() {
+                emptied.push(domain.id);
             }
-            keep
+        }
+        self.registry.domains.retain(|d| {
+            // 只有变空的个人域删壳；空群组壳保留（草稿态）。
+            !(d.members.is_empty() && emptied.contains(&d.id) && d.kind == DomainKind::Personal)
         });
-        for id in emptied {
-            self.registry.shared.revoke_domain(id);
+        for id in &emptied {
+            self.registry.shared.revoke_domain(*id);
         }
         self.dirty = true;
         true
@@ -362,6 +365,10 @@ mod tests {
     #[test]
     fn unpair_cascades_trust_removal() {
         let (mut vm, phone, living, group, personal) = vm_with_fixtures();
+        // 空群组草稿（从未有成员）与手机无关，解配不得误删。
+        let draft = vm
+            .create_domain("空组草稿", DomainKind::Group, vec![])
+            .unwrap();
         let asset = Uuid::new_v4();
         vm.mark_shared(asset, group, 1).unwrap();
         vm.mark_shared(asset, personal, 1).unwrap();
@@ -386,6 +393,10 @@ mod tests {
         assert!(
             vm.shared_entries().iter().any(|e| e.domain_id == group),
             "群组域仍有成员，共享事实保留"
+        );
+        assert!(
+            vm.domains().iter().any(|d| d.id == draft),
+            "无关的空群组草稿不被解配级联误删"
         );
         // fail-closed：重新配对不复活旧共享。
         vm.pair(&phone, "手机", 300).unwrap();
@@ -418,20 +429,19 @@ mod tests {
                 count: 2
             }))
         );
-        // 空成员群组域拒绝。
-        assert_eq!(
-            vm.create_domain("空组", DomainKind::Group, vec![]),
-            Err(ControlError::Domain(DomainError::BadMembership {
-                kind: DomainKind::Group,
-                count: 0
-            }))
-        );
+        // 空群组 = 草稿态，直接可建（UI 先建组后勾成员的流）。
+        let draft = vm
+            .create_domain("新组草稿", DomainKind::Group, vec![])
+            .unwrap();
+        assert_eq!(vm.domains().len(), 1);
+        assert_eq!(vm.domains()[0].id, draft);
+        assert_eq!(vm.domains()[0].members.len(), 0);
 
         let id = vm
             .create_domain("家庭组", DomainKind::Group, vec![device_id(1)])
             .unwrap();
-        assert_eq!(vm.domains().len(), 1);
-        assert_eq!(vm.domains()[0].id, id);
+        assert_eq!(vm.domains().len(), 2);
+        assert!(vm.domains().iter().any(|d| d.id == id));
     }
 
     #[test]

@@ -23,6 +23,16 @@ impl ShareRegistry {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// 序列化为落盘文本（同 alias 册的 to_json 模式：壳层只管原子写）。
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// 从落盘文本恢复；解析失败 = None（调用方按空册起步，不 panic 不半载）。
+    pub fn from_json(text: &str) -> Option<Self> {
+        serde_json::from_str(text).ok()
+    }
 }
 
 #[cfg(test)]

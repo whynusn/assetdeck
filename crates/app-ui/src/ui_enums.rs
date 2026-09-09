@@ -46,6 +46,8 @@ pub fn menu_action(id: i32) -> Option<MenuAction> {
         4 => Some(MenuAction::Delete),
         // D80 追加在尾，不动既有五项编码。
         5 => Some(MenuAction::Share),
+        // D80-M1 共享态入口（同追加在尾纪律）。
+        6 => Some(MenuAction::ShareToDomain),
         _ => None,
     }
 }

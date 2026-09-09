@@ -40,11 +40,15 @@ pub enum MenuAction {
     Delete,
     /// 共享到设备（D80）：弹设备选择器，显式推送、零默认共享。
     Share,
+    /// 共享态管理（D80-M1）：弹共享域勾选弹窗，标记/撤销某素材的
+    /// 「对某域共享中」事实。只改共享态，不触发任何传输。
+    ShareToDomain,
 }
 
-/// 菜单六项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除，
-/// 再加 D80 追加的「共享到设备…」）。顺序即渲染顺序；`LibraryGridVm::context_menu`
-/// 据此组装。Share 追加在尾：不动既有五项的 id 编码，回归面最小。
+/// 菜单七项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除，
+/// 再加 D80 追加的「共享到设备…」与 D80-M1 追加的「共享到域…」）。
+/// 顺序即渲染顺序；`LibraryGridVm::context_menu` 据此组装。追加项一律在尾：
+/// 不动既有项的 id 编码，回归面最小。
 pub const MENU_ITEMS: &[(MenuAction, &str)] = &[
     (MenuAction::Copy, "复制"),
     (MenuAction::MoveToCategory, "移动到分类"),
@@ -52,6 +56,7 @@ pub const MENU_ITEMS: &[(MenuAction, &str)] = &[
     (MenuAction::Properties, "属性"),
     (MenuAction::Delete, "删除"),
     (MenuAction::Share, "共享到设备…"),
+    (MenuAction::ShareToDomain, "共享到域…"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

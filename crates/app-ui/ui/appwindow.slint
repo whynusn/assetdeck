@@ -3,7 +3,7 @@
 // 配色/圆角/图标一律走 theme.slint 的令牌与字形表；输入框、按钮、进度条用内置
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
-import { Button, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
 import { Theme, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
@@ -127,6 +127,28 @@ export struct ShareDeviceData {
     name: string,
     detail: string,
     selected: bool,
+}
+
+// D80-M1 控制面行：设备册（id 供移除回调回传）/ 域册（shared = 当前素材对
+// 该域共享中；selected = 管理弹窗选中高亮）/ 域成员勾选行。
+export struct ShareCtlDeviceData {
+    id: string,
+    name: string,
+    detail: string,
+}
+
+export struct ShareCtlDomainData {
+    id: string,
+    name: string,
+    member-count: int,
+    shared: bool,
+    selected: bool,
+}
+
+export struct ShareCtlMemberData {
+    id: string,
+    name: string,
+    checked: bool,
 }
 
 export component AppWindow inherits Window {
@@ -275,7 +297,33 @@ export component AppWindow inherits Window {
     // 多选操作条「共享」入口（右键菜单走 menu-action(5)）。
     callback share-selection-requested();
     // 在途批次摘要条（多批并发「；」连接；空串 = 不渲染）。
-    in property <string> share-summary-text: "";
+        in property <string> share-summary-text: "";
+
+        // —— D80-M1 共享控制面：共享态勾选弹窗 + 配对册/域册管理弹窗 ——
+        // 共享态弹窗：右键「共享到域…」逐域标记/撤销「对该域共享中」。
+        in property <bool> share-domains-open: false;
+        in property <[ShareCtlDomainData]> share-asset-domains;
+        in property <string> share-domains-hint: "";
+        callback share-domains-closed();
+        callback share-domain-toggled(string);
+        callback share-ctl-open-requested();
+        // 管理弹窗：设备册增删 + 域册增删删选 + 选中域成员勾选。
+        in property <bool> share-ctl-open: false;
+        in property <[ShareCtlDeviceData]> share-ctl-devices;
+        in property <[ShareCtlDomainData]> share-ctl-domains;
+        in property <int> share-ctl-selected-domain: -1;
+        in property <string> share-ctl-selected-domain-id: "";
+        in property <[ShareCtlMemberData]> share-ctl-members;
+        in-out property <string> share-ctl-device-name: "";
+        in-out property <string> share-ctl-device-id: "";
+        in-out property <string> share-ctl-new-domain-name: "";
+        callback share-ctl-closed();
+        callback share-ctl-device-add(string, string);
+        callback share-ctl-device-remove(string);
+        callback share-ctl-domain-selected(int);
+        callback share-ctl-domain-create(string);
+        callback share-ctl-domain-remove(string);
+        callback share-ctl-member-toggled(string, bool);
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
@@ -1491,6 +1539,7 @@ export component AppWindow inherits Window {
             || root.target-rename-open
             || root.tuning-open
             || root.share-devices-open || root.share-offer-open
+            || root.share-domains-open || root.share-ctl-open
             || root.update-open: TouchArea {
             width: 100%;
             height: 100%;
@@ -2155,6 +2204,16 @@ export component AppWindow inherits Window {
                         root.menu-action(5);
                     }
                 }
+                // D80-M1 共享态入口（id=6）：标记/撤销对某域的「共享中」，
+                // 只改可获得性，不触发任何传输。
+                MenuItem {
+                    glyph: Glyph.share;
+                    text: "共享到域…";
+                    detail: "标记可获得性";
+                    clicked => {
+                        root.menu-action(6);
+                    }
+                }
             }
         }
 
@@ -2439,7 +2498,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    touch := TouchArea {
+                    TouchArea {
                         mouse-cursor: MouseCursor.pointer;
                         clicked => {
                             root.share-device-picked(i);
@@ -2524,6 +2583,287 @@ export component AppWindow inherits Window {
                         primary: true;
                         text: "接收";
                         clicked => { root.share-offer-accept(); }
+                    }
+                }
+            }
+        }
+
+        // —— D80-M1 共享态弹窗：逐域勾选（只改可获得性，不触发传输）——
+        if root.share-domains-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: share-domains-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            share-domains-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "共享态";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "共享 = 让域内设备知道这些素材可得；对方点开仍需确认接收，不会自动送达。";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                if root.share-asset-domains.length == 0: Text {
+                    text: root.share-domains-hint;
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                for domain[i] in root.share-asset-domains: Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius;
+                    background: Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            Text {
+                                text: domain.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: domain.shared ? "共享中" : "未共享";
+                            color: domain.shared ? #5ac18e : Theme.text-3;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.share-domain-toggled(domain.id);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Button {
+                        height: 30px;
+                        text: "管理共享域…";
+                        clicked => { root.share-ctl-open-requested(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        height: 30px;
+                        text: "关闭";
+                        clicked => { root.share-domains-closed(); }
+                    }
+                }
+            }
+        }
+
+        // —— D80-M1 共享域管理弹窗：配对册 + 域册 + 成员勾选 ——
+        if root.share-ctl-open: Rectangle {
+            x: (root.width - 420px) / 2;
+            y: 96px;
+            width: 420px;
+            height: share-ctl-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            share-ctl-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "共享域管理";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "已配对设备（粘贴对方设备标识完成配对）";
+                    color: Theme.text-2;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                if root.share-ctl-devices.length == 0: Text {
+                    text: "还没有配对设备。对方可在「共享 → 管理共享域」里查看自己的 52 位设备标识。";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                for device[i] in root.share-ctl-devices: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius;
+                    background: Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 6px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+
+                            Text {
+                                text: device.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
+                        Text {
+                            text: device.detail;
+                            color: Theme.text-3;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            height: 24px;
+                            text: "移除";
+                            clicked => { root.share-ctl-device-remove(device.id); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.share-ctl-device-name;
+                        placeholder-text: "备注名";
+                        horizontal-stretch: 1;
+                    }
+                    LineEdit {
+                        text <=> root.share-ctl-device-id;
+                        placeholder-text: "52 位设备标识";
+                        horizontal-stretch: 2;
+                    }
+                    Button {
+                        height: 30px;
+                        text: "配对";
+                        clicked => {
+                            root.share-ctl-device-add(root.share-ctl-device-name, root.share-ctl-device-id);
+                        }
+                    }
+                }
+
+                Text {
+                    text: "共享域（点选一行后勾成员）";
+                    color: Theme.text-2;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                if root.share-ctl-domains.length == 0: Text {
+                    text: "还没有共享域——先新建一个群组域，再勾选成员。";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                }
+                for domain[i] in root.share-ctl-domains: Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius;
+                    border-width: domain.selected ? 1px : 0px;
+                    border-color: Theme.accent;
+                    background: domain.selected ? Theme.accent-soft : Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 6px;
+                        spacing: 8px;
+
+                        Text {
+                            text: domain.name;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: domain.member-count + " 成员";
+                            color: Theme.text-3;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            height: 24px;
+                            text: "删除";
+                            clicked => { root.share-ctl-domain-remove(domain.id); }
+                        }
+                    }
+
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.share-ctl-domain-selected(i);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.share-ctl-new-domain-name;
+                        placeholder-text: "新域名称";
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        height: 30px;
+                        text: "新建群组域";
+                        clicked => {
+                            root.share-ctl-domain-create(root.share-ctl-new-domain-name);
+                        }
+                    }
+                }
+
+                if root.share-ctl-selected-domain >= 0 && root.share-ctl-members.length > 0: Text {
+                    text: "勾选成员（个人域至多 1 名）";
+                    color: Theme.text-2;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                for member[j] in root.share-ctl-members: CheckBox {
+                    text: member.name;
+                    checked: member.checked;
+                    toggled => {
+                        root.share-ctl-member-toggled(member.id, self.checked);
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        height: 30px;
+                        text: "关闭";
+                        clicked => { root.share-ctl-closed(); }
                     }
                 }
             }
