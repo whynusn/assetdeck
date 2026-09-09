@@ -94,6 +94,17 @@ impl SharedState {
         removed
     }
 
+    /// 撤销某域的全部共享事实（拆域/域变空时调用）；返回实际撤销的条数。
+    pub fn revoke_domain(&mut self, domain_id: Uuid) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.domain_id != domain_id);
+        let removed = before - self.entries.len();
+        if removed > 0 {
+            self.rev += 1;
+        }
+        removed
+    }
+
     /// 接收方视角投影：该设备经域成员册过滤后可见的素材集合。
     /// 去重升序——同一素材经多个域可达时只出现一次，顺序稳定可比较。
     pub fn visible_to(&self, device_id: &str, domains: &[ShareDomain]) -> Vec<Uuid> {
@@ -207,6 +218,21 @@ mod tests {
 
         assert_eq!(state.revoke_asset(asset), 0);
         assert_eq!(state.rev(), rev + 1);
+    }
+
+    #[test]
+    fn revoke_domain_sweeps_domain_entries() {
+        let mut state = SharedState::new();
+        let dom = Uuid::new_v4();
+        state.mark(Uuid::new_v4(), dom, 1);
+        state.mark(Uuid::new_v4(), dom, 2);
+        state.mark(Uuid::new_v4(), Uuid::new_v4(), 3);
+        let rev = state.rev();
+
+        assert_eq!(state.revoke_domain(dom), 2);
+        assert_eq!(state.rev(), rev + 1);
+        assert_eq!(state.entries().len(), 1);
+        assert!(state.entries().iter().all(|e| e.domain_id != dom));
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod domain;
 pub mod events;
 pub mod manifest;
 pub mod record;
+pub mod registry;
 pub mod request;
 pub mod sharing;
 pub mod sync;
@@ -18,6 +19,7 @@ pub use manifest::{
     MANIFEST_MAX_ITEMS,
 };
 pub use record::{ShareDirection, ShareOutcome, ShareRecord};
+pub use registry::ShareRegistry;
 pub use request::{
     is_device_id, is_safe_label, DeviceEntry, RequestError, SendItem, SendRequest, ALPN,
     MDNS_SERVICE,
