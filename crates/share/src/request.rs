@@ -76,6 +76,25 @@ impl core::fmt::Display for RequestError {
     }
 }
 
+/// 设备标识形状校验：z32（base32 小写字母数字表）编码 32 字节恒为 52 字符。
+/// 身份 = iroh EndpointId（ed25519 公钥），推送与共享域成员册共用这一形状。
+pub fn is_device_id(id: &str) -> bool {
+    id.len() == 52
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// 用户可读短标签（设备名/域名共用）：非空、≤64 字符、无控制字符与制表换行
+/// （行协议与清单都以 \t\n 分隔，控制字符进载荷就是协议注入面）。
+pub fn is_safe_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 64
+        && name
+            .chars()
+            .all(|c| !c.is_control() && c != '\t' && c != '\n')
+}
+
 impl SendRequest {
     /// 结构性守卫：条数复用清单上限（MANIFEST_MAX_ITEMS，D80 红线 1 的
     /// 「不能整库静默倒灌」在上游入口同样成立）；对端 id/地址与对象路径
@@ -89,22 +108,10 @@ impl SendRequest {
                 count: self.items.len(),
             });
         }
-        let name_ok = !self.sender_name.is_empty()
-            && self.sender_name.chars().count() <= 64
-            && self
-                .sender_name
-                .chars()
-                .all(|c| !c.is_control() && c != '\t' && c != '\n');
-        if !name_ok {
+        if !is_safe_label(&self.sender_name) {
             return Err(RequestError::BadSenderName);
         }
-        // z32（base32 小写字母数字表）编码 32 字节恒为 52 字符。
-        let id_ok = self.receiver_id.len() == 52
-            && self
-                .receiver_id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-        if !id_ok {
+        if !is_device_id(&self.receiver_id) {
             return Err(RequestError::BadPeerId);
         }
         for value in &self.receiver_addrs {
@@ -136,21 +143,10 @@ pub struct DeviceEntry {
 
 impl DeviceEntry {
     pub fn validate(&self) -> Result<(), RequestError> {
-        let name_ok = !self.name.is_empty()
-            && self.name.chars().count() <= 64
-            && self
-                .name
-                .chars()
-                .all(|c| !c.is_control() && c != '\t' && c != '\n');
-        if !name_ok {
+        if !is_safe_label(&self.name) {
             return Err(RequestError::BadSenderName);
         }
-        let id_ok = self.id.len() == 52
-            && self
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-        if !id_ok {
+        if !is_device_id(&self.id) {
             return Err(RequestError::BadPeerId);
         }
         for value in &self.addrs {

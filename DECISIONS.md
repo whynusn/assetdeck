@@ -1047,6 +1047,24 @@ if (click_count % 2) == 1 {
 
 **守卫计划**：①「默认零共享」——worker 无指令不监听不发包（探针级测试）；② deps_guard 扩展：app-ui/ui-viewmodels 禁依赖 iroh/tokio；③ 接收路径复用导入管线去重测试面（D65）；④ 清单校验表驱动纯函数；⑤ 内存：worker 按需退出，空闲零进程。
 
+### D80-M1 扩展：共享域控制面 + push/pull 混合同步（2026-09-09 定稿）
+
+用户复盘 M0「主动推送给特定人」模型后提出，经评审收敛为 M1 的共享模型层，与 D80 原分期 M1（远程直连）合流推进。
+
+**模型**：把「共享」从一次性动作升级为**可同步的状态**，但同步机制守住两条性质：
+1. **共享域 = 控制面**（组/个人）：资源标记到某个域（个人域=单设备、群组域=多设备），域内设备可见。「默认零共享」不变量保持——未标记 = 对任何人都不可见；域定义（成员册）**不进同步载荷**，接收方只见「来自谁的、什么素材」，不见域的完整成员列表（泄漏面最小）。
+2. **push/pull 混合同步**（用户提出，评审确认为标准「在线订阅者收增量 + 加入时拉快照」形态）：设置共享态 → 在线设备收增量通知（NOTIFY）；离线设备上线时主动拉全量（PULL/SNAPSHOT，已按接收方域过滤）。两条腿各堵对方的洞：推送丢失由下次上线拉取自愈，冷启动（先设共享后上线）由拉取覆盖。
+3. **两个补丁**：①撤销/变更与设置对称走推送（长在线会话漏一条推送会一直带旧状态，撤销也推送 + 可选在其他协议流量上捎带共享态摘要校验，对不上触发补拉——有界校验非轮询）；②全部事件驱动（变更事件/上线事件），我方代码零 Timer 轮询。
+4. **不变量（D80 安全性质得以保住的前提）**：共享态只广播**可获得性**，永远不自动投递；素材移动原语仍然是推送 + 接收侧双确认（首连确认 + D66 归类弹窗）。
+
+**M1 分期（修订）**：
+- **M1-a 信任与控制面**：设备配对册（身份 = iroh EndpointId/公钥，z32 文本；配对 = 显式添加，配对码交互 M1-c）+ 共享域册 + 共享态存储 + 同步消息契约（share crate 纯模型先行，本批）；随后 VM/UI 接线与持久化。
+- **M1-b 同步协议落地**：worker QUIC 通道扩展三类消息（NOTIFY/PULL/SNAPSHOT）+ 接收侧「发现面」UI（我能看到谁共享了什么，点开仍走推送+双确认）。
+- **M1-c 远程直连**（D80 原分期不变）：pkarr 信令 + 内建 portmapper 确认启用 + 打洞（relay disabled）+ 设备配对码交互（指纹绑定；与 D70 后置的 ed25519 签名工程合流）。
+- **M1-d 运维**：installer 防火墙 UDP 入站规则（D57 包管线）+ 遥测归因上报通道。
+
+**M0 冒烟风险记档（用户拍板：不等）**：M0 传输闭环代码绿（回环 E2E）但真机双机未验证、CI MSVC 首编 vendored iroh 待观察；M1 模型层与传输解耦（契约层先行），不阻塞。双机冒烟（桥接 VM 或 Termux 对端）并入 M1-a 完成后的真机批次，Termux 发现段受 Android 组播锁/路由器 AP 隔离制约的结论届时如实记录。
+
 **M0 落地（2026-09-08）**：闭环全链就位——`tools/share-worker`（iroh 引擎 + mDNS 发现 + stdin/stdout 行协议，iroh/tokio 只进此编译单元；`presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在配置层，零信令/零打洞/零中继）；`crates/share`（清单/请求/设备纯模型 + worker 事件行解析端 `events`）；ui-viewmodels `share_vm`（批次/报价/角标状态机，纯逻辑零 IO，事件流进 → `ShareAction` 副作用出）；app-ui 接线（worker 生命周期 = 主进程 stdin 管道，右键菜单「共享到设备…」id=5 追加尾 + 多选操作条「共享」→ 设备选择弹窗 → 显式推送；接收侧首连确认弹窗 → 复用 D66 归类弹窗导入流，`ImportFlow.post_phase1` 钩子回 ACK/NACK，导入成败即 worker 收尾信号）；角标真源 = VM `badge_overrides` HashMap（状态迁移点写、O(1) 查、批次 evict 不回滚），`BadgesChanged` 定向刷瓦片不整表重建；deps_guard 新增 `d80_network_stack_confined_to_share_worker`（app-ui/ui-viewmodels Cargo.toml 禁 iroh/tokio/mdns-sd）；打包 5 exe（share-worker.exe 随包）。
 
 **M0 实测要害（回环 E2E 逼出来的 QUIC 收发时序纪律）**：① 连接句柄 drop 即拆链——`finish()` 后还躺在本端发送队列里的字节会随 drop 丢失；终行（REJECT/DELIVERED/NACK）写出必须 `finish()` + 显式冲刷窗（`FLUSH_GRACE` 300ms）再返回，DELIVERED 路径此前全靠 remove_dir_all 的偶然 await 才赶上冲刷；② 未 finish 的 SendStream 被 drop = 流 RESET，在途字节同灭；③ `conn.closed()` 与 drain-to-EOF 在快退路径上均不可靠，终行投递的唯一可信模式 = finish + 有界冲刷窗 + 只许最后一个读者关连接。④ 扫描收口走 `SCAN_DONE` 事件行（UI 撤扫描态靠事件不靠定时器）。⑤ mDNS 起不来降级不致命（本机仍可被直连），SCAN 回警示行。
