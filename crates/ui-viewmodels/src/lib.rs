@@ -29,15 +29,16 @@ pub use settings::{
     SETTING_SPECS, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 pub use share_vm::{
-    human_size, ShareAction, ShareBadge, ShareBatch, ShareFinal, SharePhase, ShareVm,
+    delta_sync_lines, human_size, sync_state_line, PendingRequest, ShareAction, ShareBadge,
+    ShareBatch, ShareFinal, SharePhase, ShareVm,
 };
 // D80-M1-a 控制面：持久化契约与域形态枚举经 share 转发；app-ui 依赖白名单
 // 不含 share（deps_guard EXACT 纪律），一律走本 crate。
 pub use share::{DomainKind, ShareRegistry};
 pub use share_control::{ControlError, ShareControlVm};
 // D80 共享通道装配所需的传输类型：app-ui 依赖白名单不含 share（deps_guard
-// EXACT 纪律），SendItem/DeviceEntry 经此转发；uuid 同理（角标键与批次 id）。
-pub use share::{DeviceEntry, SendItem};
+// EXACT 纪律），SendItem/DeviceEntry/ShareOffer 经此转发；uuid 同理（角标键与批次 id）。
+pub use share::{DeviceEntry, SendItem, ShareOffer};
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,

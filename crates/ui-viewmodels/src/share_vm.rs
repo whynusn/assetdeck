@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use share::{
-    DeviceEntry, DoneState, PeerSyncState, SendItem, SendRequest, ShareDirection, SyncMessage,
-    WorkerEvent,
+    DeviceEntry, DoneState, PeerSyncState, SendItem, SendRequest, ShareDirection, ShareOffer,
+    SyncBookState, SyncMessage, WorkerEvent,
 };
 
+use crate::share_control::ShareControlVm;
 use crate::target_bar_vm::TargetNoticeTone;
 
 /// 批次在途阶段（仅活跃期有意义；终结后 phase=None、final 就位）。
@@ -122,6 +123,9 @@ pub enum ShareAction {
     OpenOfferDialog,
     /// 关确认框（裁决完成/超时撤单）。
     CloseOfferDialog,
+    /// 弹索取审批框（发现面 Request 到达）。审批后的投递走 M0 直发，
+    /// 索取本身不自动投递任何字节。
+    OpenRequestDialog,
     /// 暂存完成 → 走 D66 归类弹窗导入流（完成后 app-ui 回调 import_completed）。
     ImportStaged {
         batch: Uuid,
@@ -132,6 +136,9 @@ pub enum ShareAction {
     BadgesChanged(Vec<Uuid>),
     /// 设备表/进度/角标有变化，UI 拉取刷新。
     Refresh,
+    /// 把控制面注册表整册推给 worker（SYNC_STATE；引擎册整体替换）。
+    /// READY 时发一次，之后随控制面变更（app-ui 侧）重推。
+    PushSyncState,
 }
 
 /// 入口报价（待确认的来件）。
@@ -141,6 +148,13 @@ pub struct PendingOffer {
     pub sender_name: String,
     pub items_total: usize,
     pub total_bytes: u64,
+}
+
+/// 索取审批（待处理的来件索取）。素材名由 UI 层经 catalog 解析后展示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRequest {
+    pub peer_id: String,
+    pub asset_uuid: Uuid,
 }
 
 pub struct ShareVm {
@@ -154,6 +168,8 @@ pub struct ShareVm {
     picker_open: bool,
     /// 待确认来件队列（并发推送按先到先弹）。
     offers: Vec<PendingOffer>,
+    /// 待审批索取队列（并发索取按先到先弹）。
+    requests: Vec<PendingRequest>,
     batches: Vec<ShareBatch>,
     /// 角标真源：资产 uuid → 最近共享状态。批次的在途/终态每次迁移都
     /// 写这里（含 Busy），badge() 查询 O(1)；批次被 evict 不回滚角标
@@ -192,6 +208,7 @@ impl ShareVm {
             picker_selected: None,
             picker_open: false,
             offers: Vec::new(),
+            requests: Vec::new(),
             batches: Vec::new(),
             badge_overrides: HashMap::new(),
             pending_writes: Vec::new(),
@@ -223,6 +240,20 @@ impl ShareVm {
 
     pub fn current_offer(&self) -> Option<&PendingOffer> {
         self.offers.first()
+    }
+
+    /// 待审批索取（先到先弹）。
+    pub fn current_request(&self) -> Option<&PendingRequest> {
+        self.requests.first()
+    }
+
+    /// 索取裁决完成（审批发送或拒绝）后从队列移除；返回是否真有队列项。
+    pub fn request_dismiss(&mut self) -> bool {
+        if self.requests.is_empty() {
+            return false;
+        }
+        self.requests.remove(0);
+        true
     }
 
     pub fn batches(&self) -> &[ShareBatch] {
@@ -273,6 +304,18 @@ impl ShareVm {
         let Some(device) = self.devices.get(index).cloned() else {
             return Vec::new();
         };
+        self.direct_send(&device.id, items)
+    }
+
+    /// 按设备 id 直发（M0 推送通道）。右键共享与发现面索取审批后的投递
+    /// 共用此路径——两条入口都终止于同一 SEND 行，双确认语义不变。
+    pub fn direct_send(&mut self, device_id: &str, items: Vec<SendItem>) -> Vec<ShareAction> {
+        let Some(device) = self.devices.iter().find(|d| d.id == device_id).cloned() else {
+            return vec![ShareAction::Notice(
+                TargetNoticeTone::Warning,
+                "设备不在线，稍后再试".into(),
+            )];
+        };
         let (Some(self_name), Some(_self_id)) = (self.self_name.clone(), self.self_id.clone())
         else {
             return vec![ShareAction::Notice(
@@ -321,6 +364,36 @@ impl ShareVm {
         }
         actions.push(ShareAction::Refresh);
         actions
+    }
+
+    /// 发现面索取（M1-b）：向对端发 Request，走同步通道。对端 UI 显式审批
+    /// 后才会以 M0 直发投递——索取不自动投递任何字节（素材移动原语不变量）。
+    pub fn request_asset(&mut self, peer_id: &str, asset_uuid: Uuid) -> Vec<ShareAction> {
+        if !self.trusted_peers.contains(peer_id) {
+            return vec![ShareAction::Notice(
+                TargetNoticeTone::Warning,
+                "对端未配对，不能索取".into(),
+            )];
+        }
+        let Some(device) = self.devices.iter().find(|d| d.id == peer_id) else {
+            return vec![ShareAction::Notice(
+                TargetNoticeTone::Warning,
+                "对端不在线，稍后再试".into(),
+            )];
+        };
+        let json = match serde_json::to_string(&SyncMessage::Request { asset_uuid }) {
+            Ok(json) => json,
+            Err(e) => {
+                return vec![ShareAction::Notice(
+                    TargetNoticeTone::Error,
+                    format!("索取请求构造失败：{e}"),
+                )]
+            }
+        };
+        vec![ShareAction::Send(format!(
+            "SYNC_SEND\t{peer_id}\t{}\t{json}",
+            device.addrs.join(";")
+        ))]
     }
 
     /// 首连确认「接收」。
@@ -393,7 +466,10 @@ impl ShareVm {
             WorkerEvent::Ready { id_z32, name } => {
                 self.self_id = Some(id_z32);
                 self.self_name = Some(name);
-                vec![]
+                // 通道就绪：把控制面整册推给 worker（引擎册替换），对端
+                // 上线拉取才拿得到本机共享态。app-ui 侧的查表闭包在
+                // dispatch_share_actions 里组装（VM 零 IO）。
+                vec![ShareAction::PushSyncState]
             }
             WorkerEvent::Device(entry) => {
                 let id = entry.id.clone();
@@ -657,6 +733,21 @@ impl ShareVm {
         match message {
             // PULL 由 worker 在引擎内应答，不该到 UI：防御性忽略。
             SyncMessage::Pull { .. } => Vec::new(),
+            SyncMessage::Request { asset_uuid } => {
+                // 索取审批队列：并发索取按先到先弹。信任收口已在函数头部
+                // 完成（未配对对端的索取绝不进审批框）。
+                let first = self.requests.is_empty();
+                self.requests.push(PendingRequest {
+                    peer_id,
+                    asset_uuid,
+                });
+                let mut actions = Vec::new();
+                if first {
+                    actions.push(ShareAction::OpenRequestDialog);
+                }
+                actions.push(ShareAction::Refresh);
+                actions
+            }
             SyncMessage::Snapshot { rev, offers } => {
                 self.peer_views
                     .insert(peer_id, PeerSyncState { rev, offers });
@@ -731,7 +822,6 @@ impl ShareVm {
             device.addrs.join(";")
         ))
     }
-
     fn find_batch(&self, id: Uuid) -> Option<&ShareBatch> {
         self.batches.iter().find(|b| b.id == id)
     }
@@ -783,6 +873,76 @@ impl ShareVm {
             self.batches.remove(index);
         }
     }
+}
+
+/// D80-M1-b SYNC_STATE 行：控制面整册按设备过滤后的引擎册载荷（worker
+/// 整体替换，应答 Pull 的唯一来源）。序列化失败返回空行，调用方丢弃。
+/// lookup 按引用传（闭包捕获目录句柄，不可 Copy；快照与 Delta 复用同一份）。
+pub fn sync_state_line(
+    control: &ShareControlVm,
+    lookup: &impl Fn(Uuid) -> Option<ShareOffer>,
+) -> String {
+    let mut peers = BTreeMap::new();
+    for device in control.devices().iter() {
+        let (rev, offers) = control.snapshot_offers(&device.id, lookup);
+        peers.insert(device.id.clone(), PeerSyncState { rev, offers });
+    }
+    let state = SyncBookState { peers };
+    match serde_json::to_string(&state) {
+        Ok(json) => format!("SYNC_STATE\t{json}"),
+        Err(_) => String::new(),
+    }
+}
+
+/// D80-M1-b 逐动作 Delta 行：逐接收方 diff before/after 可见集组 Delta，
+/// 只发给本会话已发现的设备（`devices` 里没有的已配对设备 = 离线，跳过——
+/// 断档守卫让下次 Delta / 补拉自愈）。rev 未推进（如成员册调整，不动 rev）
+/// 返回空——接收方经 Pull / 发现面打开全量补拉。
+pub fn delta_sync_lines(
+    control: &ShareControlVm,
+    devices: &[DeviceEntry],
+    prev_rev: u64,
+    before: &[(String, Vec<Uuid>)],
+    lookup: &impl Fn(Uuid) -> Option<ShareOffer>,
+) -> Vec<String> {
+    let new_rev = control.rev();
+    if new_rev == prev_rev {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for (device_id, prev) in before {
+        // 动作期间被解配 / 本会话未发现的设备：统一跳过（信任已收口或
+        // 无地址可发），靠断档守卫自愈。
+        let Some(device) = devices.iter().find(|d| d.id == *device_id) else {
+            continue;
+        };
+        let after: HashSet<Uuid> = control.visible_to(device_id).into_iter().collect();
+        let prev_set: HashSet<Uuid> = prev.iter().copied().collect();
+        let added: Vec<ShareOffer> = after
+            .difference(&prev_set)
+            .copied()
+            .filter_map(lookup)
+            .collect();
+        let removed: Vec<Uuid> = prev_set.difference(&after).copied().collect();
+        if added.is_empty() && removed.is_empty() {
+            continue;
+        }
+        let message = SyncMessage::Delta {
+            from_rev: prev_rev,
+            to_rev: new_rev,
+            added,
+            removed,
+        };
+        let Ok(json) = serde_json::to_string(&message) else {
+            continue;
+        };
+        lines.push(format!(
+            "SYNC_SEND\t{}\t{}\t{json}",
+            device_id,
+            device.addrs.join(";")
+        ));
+    }
+    lines
 }
 
 /// 人话字节数（弹窗摘要/进度行共用）。
@@ -1202,5 +1362,115 @@ mod tests {
             &actions[0],
             ShareAction::Notice(TargetNoticeTone::Warning, t) if t.contains("连接超时")
         ));
+    }
+
+    #[test]
+    fn request_asset_builds_sync_send_line() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        vm.handle_line(&device_line());
+        let asset = Uuid::new_v4();
+        // 未配对：不发线，明确提示。
+        let actions = vm.request_asset(&peer, asset);
+        assert!(matches!(
+            &actions[0],
+            ShareAction::Notice(TargetNoticeTone::Warning, _)
+        ));
+        vm.set_trusted_peers(vec![peer.clone()]);
+        let actions = vm.request_asset(&peer, asset);
+        match &actions[0] {
+            ShareAction::Send(l) => {
+                assert!(l.starts_with(&format!("SYNC_SEND\t{peer}\t")));
+                assert!(l.contains(r#""kind":"request""#));
+                assert!(l.contains(&asset.to_string()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn incoming_request_queues_and_direct_send_by_id() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        vm.set_trusted_peers(vec![peer.clone()]);
+        vm.handle_line(&device_line());
+        let asset = Uuid::new_v4();
+        let request = SyncMessage::Request { asset_uuid: asset };
+        let actions = vm.handle_line(&format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&request).unwrap()
+        ));
+        assert!(actions.contains(&ShareAction::OpenRequestDialog));
+        assert_eq!(vm.current_request().unwrap().peer_id, peer);
+        assert_eq!(vm.current_request().unwrap().asset_uuid, asset);
+
+        // 审批发送：按 id 直发（不经设备选择弹窗），双确认语义不变。
+        let actions = vm.direct_send(&peer, vec![item(asset)]);
+        assert!(matches!(&actions[0], ShareAction::Send(l) if l.starts_with("SEND\t")));
+        assert_eq!(vm.badge(asset), Some(ShareBadge::Busy));
+        assert!(vm.request_dismiss());
+        assert!(vm.current_request().is_none());
+        assert!(!vm.request_dismiss(), "空队列 dismiss 返回 false");
+    }
+
+    #[test]
+    fn sync_state_line_and_delta_lines_are_receiver_filtered() {
+        use crate::share_control::ShareControlVm;
+        let mut control = ShareControlVm::new();
+        let peer = "d".repeat(52);
+        control.pair(&peer, "小李", 1).unwrap();
+        let domain = control
+            .create_domain("家庭组", share::DomainKind::Group, vec![peer.clone()])
+            .unwrap();
+        let asset = Uuid::new_v4();
+        control.mark_shared(asset, domain, 1).unwrap();
+        let prev_rev = control.rev();
+
+        let lookup = |uuid: Uuid| -> Option<ShareOffer> {
+            (uuid == asset).then(|| ShareOffer {
+                asset_uuid: uuid,
+                file_name: "a.png".into(),
+                kind: AssetKind::Image,
+                size_bytes: 8,
+            })
+        };
+
+        // SYNC_STATE：按设备过滤的整册，行首是协议头。
+        let line = super::sync_state_line(&control, &lookup);
+        assert!(line.starts_with("SYNC_STATE\t"));
+        assert!(line.contains("a.png"));
+
+        // 动作前基线：设备可见集为 [asset]；再标一条 → 对端视角 +1 新增。
+        let before = vec![(peer.clone(), control.visible_to(&peer))];
+        let asset2 = Uuid::new_v4();
+        control.mark_shared(asset2, domain, 2).unwrap();
+        let devices = vec![DeviceEntry {
+            id: peer.clone(),
+            name: "小李".into(),
+            addrs: vec!["192.168.1.8:4433".into()],
+        }];
+        // 两条素材都能物化成可得行（库里真实存在的语义）。
+        let lookup = |uuid: Uuid| -> Option<ShareOffer> {
+            (uuid == asset || uuid == asset2).then(|| ShareOffer {
+                asset_uuid: uuid,
+                file_name: "a.png".into(),
+                kind: AssetKind::Image,
+                size_bytes: 8,
+            })
+        };
+        let lines = super::delta_sync_lines(&control, &devices, prev_rev, &before, &lookup);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with(&format!("SYNC_SEND\t{peer}\t192.168.1.8:4433")));
+        assert!(lines[0].contains(r#""kind":"delta""#));
+        assert!(lines[0].contains(&asset2.to_string()));
+
+        // rev 未推进（幂等 mark）不发 Delta。
+        assert!(!control.mark_shared(asset, domain, 3).unwrap());
+        let lines = super::delta_sync_lines(&control, &devices, control.rev(), &before, &lookup);
+        assert!(lines.is_empty());
+
+        // 离线设备（不在 devices）跳过——断档守卫自愈。
+        let lines = super::delta_sync_lines(&control, &[], prev_rev, &before, &lookup);
+        assert!(lines.is_empty());
     }
 }

@@ -72,8 +72,9 @@ thread_local! {
     static SHARE_WIRING: RefCell<Option<ShareWiring>> = const { RefCell::new(None) };
     /// 设备选择弹窗等待发送的素材（弹窗确认时取走；取消即弃）。
     static SHARE_PENDING: RefCell<Vec<SendItem>> = const { RefCell::new(Vec::new()) };
-    /// D80-M1 共享控制面（配对册/域册/共享态，UI 线程唯一实例）。
-    static SHARE_CONTROL: RefCell<ShareControlVm> = RefCell::new(ShareControlVm::new());
+    /// D80-M1 共享控制面（配对册/域册/共享态，UI 线程唯一实例）。thumbs.rs
+    /// 铺瓦片时现查「共享中」uuid 集（pub(crate)：跨模块只读）。
+    pub(crate) static SHARE_CONTROL: RefCell<ShareControlVm> = RefCell::new(ShareControlVm::new());
     /// share_registry.json 落盘路径（启动时定，None = 未初始化不落盘）。
     static SHARE_CONTROL_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     /// 「共享到域…」弹窗待处理的素材 uuid 文本（uuids_of 产物；关闭即弃）。
@@ -1052,8 +1053,13 @@ fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareActio
     for action in actions {
         match action {
             ShareAction::Send(line) => share_write_line(&line),
+            ShareAction::PushSyncState => push_share_sync_state(),
             ShareAction::OpenOfferDialog | ShareAction::CloseOfferDialog | ShareAction::Refresh => {
                 sync_share_ui(&ui);
+            }
+            ShareAction::OpenRequestDialog => {
+                ui.set_share_request_open(true);
+                sync_share_request_ui(&ui);
             }
             ShareAction::ImportStaged { batch, paths } => {
                 let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
@@ -1148,10 +1154,11 @@ fn collect_share_items(
 }
 
 /// D80-M1 控制面落盘：dirty 读后即清（事件驱动保存，零定时器）。
-/// 路径未初始化（演示态）跳过。
-fn persist_share_control() {
+/// 路径未初始化（演示态）跳过。返回是否真的推进了状态（调用方据此决定
+/// 是否重推 SYNC_STATE / 广播 Delta）。
+fn persist_share_control() -> bool {
     let Some(path) = SHARE_CONTROL_PATH.with(|slot| slot.borrow().clone()) else {
-        return;
+        return false;
     };
     let payload = SHARE_CONTROL.with(|control| {
         let mut control = control.borrow_mut();
@@ -1160,10 +1167,94 @@ fn persist_share_control() {
         }
         Some(control.registry().to_json())
     });
-    if let Some(json) = payload {
-        if let Err(error) = atomic_write(&path, &json) {
-            logging::warn!("共享注册表落盘失败: {error}");
+    match payload {
+        Some(json) => {
+            if let Err(error) = atomic_write(&path, &json) {
+                logging::warn!("共享注册表落盘失败: {error}");
+            }
+            true
         }
+        None => false,
+    }
+}
+
+/// D80-M1-b uuid → 可得行（ShareOffer）的目录物化闭包：SYNC_STATE 快照与
+/// Delta 的 added 集共用。库内已不存在的素材返回 None（不广播悬空可得）；
+/// 无 wiring/resolver（演示态）恒 None。
+fn share_offer_lookup() -> impl Fn(Uuid) -> Option<ui_viewmodels::ShareOffer> {
+    let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
+    move |uuid| {
+        let wiring = wiring.as_ref()?;
+        let resolver = wiring.resolver.borrow();
+        let resolver = resolver.as_ref()?;
+        let rank = resolver.uuid_rank(&uuid.to_string())?;
+        let item = resolver.share_candidate(AssetId(rank))?;
+        Some(ui_viewmodels::ShareOffer {
+            asset_uuid: item.asset_uuid,
+            file_name: item.file_name,
+            kind: item.kind,
+            size_bytes: item.size_bytes,
+        })
+    }
+}
+
+/// D80-M1-b SYNC_STATE 推送：控制面整册按设备过滤后推给 worker（引擎册
+/// 整体替换，应答 Pull 的唯一来源）。READY 后推一次，控制面每次真实变更
+/// 后重推——推送对象是本机 worker，不涉及网络。
+fn push_share_sync_state() {
+    let line = SHARE_CONTROL.with(|control| {
+        ui_viewmodels::share_vm::sync_state_line(&control.borrow(), &share_offer_lookup())
+    });
+    if !line.is_empty() {
+        share_write_line(&line);
+    }
+}
+
+/// D80-M1-b 同步信任册刷新：信任 = 已配对（fail-closed 的唯一事实来源是
+/// 配对册）。启动装载后调一次，配对/解配后随回调刷新。
+fn sync_share_trusted_peers() {
+    let ids = SHARE_CONTROL.with(|control| {
+        control
+            .borrow()
+            .devices()
+            .iter()
+            .map(|d| d.id.clone())
+            .collect()
+    });
+    SHARE_VM.with(|vm| vm.borrow_mut().set_trusted_peers(ids));
+}
+
+/// D80-M1-b 逐动作 Delta 的 before 基线：每个已配对设备的可见 uuid 集
+/// （必须在控制面动作前取）。
+fn share_visibility_snapshot(control: &ui_viewmodels::ShareControlVm) -> Vec<(String, Vec<Uuid>)> {
+    control
+        .devices()
+        .iter()
+        .map(|d| {
+            let id = d.id.clone();
+            let uuids = control.visible_to(&id);
+            (id, uuids)
+        })
+        .collect()
+}
+
+/// D80-M1-b 逐动作 Delta：可见性变化的控制面动作后调用。逐接收方 diff
+/// before/after 可见集组 Delta 写同步通道（行构造收拢在 ui-viewmodels，
+/// 这里只编排两次查表）。rev 未推进（如成员册调整，不动 rev）时不发——
+/// 接收方经下次 Pull / 发现面打开全量补拉自愈。
+fn broadcast_share_delta(prev_rev: u64, before: &[(String, Vec<Uuid>)]) {
+    let devices = SHARE_VM.with(|vm| vm.borrow().devices().to_vec());
+    let lines = SHARE_CONTROL.with(|control| {
+        ui_viewmodels::share_vm::delta_sync_lines(
+            &control.borrow(),
+            &devices,
+            prev_rev,
+            before,
+            &share_offer_lookup(),
+        )
+    });
+    for line in lines {
+        share_write_line(&line);
     }
 }
 
@@ -1261,6 +1352,132 @@ fn sync_share_asset_domains(ui: &AppWindow) {
             .collect();
         ui.set_share_asset_domains(ModelRc::from(Rc::new(VecModel::from(domains))));
     });
+}
+
+/// D80-M1-b 发现面数据回填：peer_views ∩ 已发现设备 → 对端行 + 选中对端的
+/// 可得清单行。可得行经目录解析（uuid → 名字/大小）；发起方已按可得性过滤，
+/// 库内缺席的悬空可得跳过（不广播的内容不再重复展示）。
+fn sync_share_face_ui(ui: &AppWindow) {
+    let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
+    SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        let selected = ui.get_share_face_selected_peer();
+        // 对端行：peer_views 键 ∩ 已发现设备名（BTreeMap 序稳定，索取回调
+        // 按同序定位 peer id）。
+        let peers: Vec<ShareFacePeerData> = vm
+            .peer_views()
+            .iter()
+            .enumerate()
+            .map(|(index, (id, view))| {
+                let name = vm
+                    .devices()
+                    .iter()
+                    .find(|d| d.id == *id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| format!("{}…", &id[..id.len().min(12)]));
+                ShareFacePeerData {
+                    name: name.into(),
+                    detail: format!("{} 项可得", view.offers.len()).into(),
+                    offer_count: view.offers.len() as i32,
+                    selected: index as i32 == selected,
+                }
+            })
+            .collect();
+        ui.set_share_face_peers(ModelRc::from(Rc::new(VecModel::from(peers))));
+
+        let selected_id = vm
+            .peer_views()
+            .keys()
+            .nth(usize::try_from(selected).unwrap_or(usize::MAX))
+            .cloned();
+        let offers: Vec<ShareFaceOfferData> = match (selected_id, wiring.as_ref()) {
+            (Some(id), Some(wiring)) => {
+                let view = vm.peer_views().get(&id);
+                let resolver = wiring.resolver.borrow();
+                match (view, resolver.as_ref()) {
+                    (Some(view), Some(resolver)) => view
+                        .offers
+                        .iter()
+                        .filter_map(|offer| {
+                            let rank = resolver.uuid_rank(&offer.asset_uuid.to_string())?;
+                            let meta = resolver.meta_of(AssetId(rank)).ok()??;
+                            Some(ShareFaceOfferData {
+                                asset_id: offer.asset_uuid.to_string().into(),
+                                name: meta.file_name.into(),
+                                kind: ui_enums::card_kind(offer.kind),
+                                size: ui_viewmodels::human_size(offer.size_bytes).into(),
+                            })
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        ui.set_share_face_offers(ModelRc::from(Rc::new(VecModel::from(offers))));
+    });
+    ui.set_share_face_hint(
+        "对端共享给我的可得清单；点「索取」后由对端确认发送，不会自动送达。".into(),
+    );
+}
+
+/// D80-M1-b 索取审批弹窗正文：当前队列头（对端名 + 目录解析的素材名/大小）。
+/// 解析失败（素材已不在库）回落 uuid 前缀——仍可拒绝，不盲发。
+fn sync_share_request_ui(ui: &AppWindow) {
+    let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
+    let (peer_name, asset_uuid) = SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        match vm.current_request() {
+            Some(request) => {
+                let peer_name = vm
+                    .devices()
+                    .iter()
+                    .find(|d| d.id == request.peer_id)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_else(|| {
+                        format!("{}…", &request.peer_id[..request.peer_id.len().min(12)])
+                    });
+                (peer_name, Some(request.asset_uuid))
+            }
+            None => (String::new(), None),
+        }
+    });
+    let Some(asset_uuid) = asset_uuid else {
+        ui.set_share_request_text("".into());
+        return;
+    };
+    let detail = wiring
+        .as_ref()
+        .and_then(|wiring| {
+            let resolver = wiring.resolver.borrow();
+            let resolver = resolver.as_ref()?;
+            let rank = resolver.uuid_rank(&asset_uuid.to_string())?;
+            let meta = resolver.meta_of(AssetId(rank)).ok()??;
+            Some(format!(
+                "{} · {}",
+                meta.file_name,
+                human_size(meta.size_bytes)
+            ))
+        })
+        .unwrap_or_else(|| format!("素材 {}", &asset_uuid.to_string()[..8]));
+    ui.set_share_request_text(format!("来自 {peer_name}：{detail}").into());
+}
+
+/// 索取裁决收尾：出队；队列还有后续 → 弹窗留在原地刷新正文，否则关闭。
+fn dismiss_request_dialog(ui_weak: &slint::Weak<AppWindow>) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    let more = SHARE_VM.with(|vm| {
+        let mut vm = vm.borrow_mut();
+        vm.request_dismiss();
+        vm.current_request().is_some()
+    });
+    if more {
+        sync_share_request_ui(&ui);
+    } else {
+        ui.set_share_request_open(false);
+    }
 }
 
 /// 属性弹窗的字段组装（R13：尺寸/大小/导入时间/绝对路径）。
@@ -2131,6 +2348,9 @@ fn main() {
     SHARE_CONTROL_PATH.with(|slot| *slot.borrow_mut() = Some(share_registry_path));
     SHARE_CONTROL
         .with(|control| *control.borrow_mut() = ShareControlVm::from_registry(share_registry));
+    // D80-M1-b 同步信任册 = 配对册（启动装载后立即同步；worker 未起时
+    // set_trusted_peers 仍生效，READY 前到达的报文本就无人处理）。
+    sync_share_trusted_peers();
 
     // 渲染后端选择：ASSETDECK_FORCE_SOFTWARE > SLINT_BACKEND > gpu_rendering > 软件渲染。
     // 关键：BackendSelector 的 backend 与 renderer 必须分开传——"winit-femtovg" 这种
@@ -2969,6 +3189,7 @@ fn main() {
     }
     {
         let crud = crud.clone();
+        let grid = grid.clone();
         app.on_share_domain_toggled(move |domain_id| {
             let Some(ui) = crud.ui.upgrade() else { return };
             let Ok(domain) = Uuid::parse_str(domain_id.as_str()) else {
@@ -2981,6 +3202,11 @@ fn main() {
             let Ok(asset) = Uuid::parse_str(asset.as_str()) else {
                 return;
             };
+            // D80-M1-b 逐动作 Delta 基线：动作前取 rev 与各设备可见集快照。
+            let (prev_rev, baseline) = SHARE_CONTROL.with(|control| {
+                let control = control.borrow();
+                (control.rev(), share_visibility_snapshot(&control))
+            });
             // 切换语义：已共享 = 撤销，未共享 = 标记。错误（未知域等）仅
             // 提示，不打断弹窗。时间戳仅展示用，不参与判定。
             let outcome = SHARE_CONTROL.with(|control| {
@@ -3001,8 +3227,14 @@ fn main() {
             if let Some(error) = outcome {
                 show_notice(&ui, TargetNoticeTone::Warning, error.to_string());
             }
-            persist_share_control();
+            if persist_share_control() {
+                push_share_sync_state();
+                broadcast_share_delta(prev_rev, &baseline);
+            }
             sync_share_asset_domains(&ui);
+            // D80-M1「共享中」角标刷新：标记/撤销改了共享态，可见瓦片整体重排
+            //（build_rows 现查控制面，重排即取到新值）。
+            grid.sync();
         });
     }
     {
@@ -3052,17 +3284,32 @@ fn main() {
                 }
             }
             persist_share_control();
+            // D80-M1-b：信任 = 已配对，配对变化即刷新同步信任册。
+            sync_share_trusted_peers();
             sync_share_ctl_ui(&ui);
         });
     }
     {
         let crud = crud.clone();
+        let grid = grid.clone();
         app.on_share_ctl_device_remove(move |device_id| {
             let Some(ui) = crud.ui.upgrade() else { return };
+            // D80-M1-b 逐动作 Delta 基线（解配级联撤销会推进 rev）。
+            let (prev_rev, baseline) = SHARE_CONTROL.with(|control| {
+                let control = control.borrow();
+                (control.rev(), share_visibility_snapshot(&control))
+            });
             // 级联（逐出域册/变空域撤销共享）在 VM 内完成。
             SHARE_CONTROL.with(|control| control.borrow_mut().unpair(device_id.as_str()));
-            persist_share_control();
+            if persist_share_control() {
+                push_share_sync_state();
+                broadcast_share_delta(prev_rev, &baseline);
+            }
+            // D80-M1-b：解配 = 收回信任，同步信任册立即刷新。
+            sync_share_trusted_peers();
             sync_share_ctl_ui(&ui);
+            // 解配级联撤销共享事实 →「共享中」角标随重排消失。
+            grid.sync();
         });
     }
     {
@@ -3094,8 +3341,14 @@ fn main() {
     }
     {
         let crud = crud.clone();
+        let grid = grid.clone();
         app.on_share_ctl_domain_remove(move |domain_id| {
             let Some(ui) = crud.ui.upgrade() else { return };
+            // D80-M1-b 逐动作 Delta 基线（拆域级联撤销推进 rev）。
+            let (prev_rev, baseline) = SHARE_CONTROL.with(|control| {
+                let control = control.borrow();
+                (control.rev(), share_visibility_snapshot(&control))
+            });
             let removed = SHARE_CONTROL.with(|control| match Uuid::parse_str(domain_id.as_str()) {
                 Ok(id) => control.borrow_mut().remove_domain(id),
                 Err(_) => false,
@@ -3103,8 +3356,13 @@ fn main() {
             if removed {
                 ui.set_share_ctl_selected_domain(-1);
             }
-            persist_share_control();
+            if persist_share_control() {
+                push_share_sync_state();
+                broadcast_share_delta(prev_rev, &baseline);
+            }
             sync_share_ctl_ui(&ui);
+            // 拆域级联撤销该域全部共享事实 →「共享中」角标随重排消失。
+            grid.sync();
         });
     }
     {
@@ -3137,8 +3395,126 @@ fn main() {
             if let Some(error) = outcome {
                 show_notice(&ui, TargetNoticeTone::Warning, error.to_string());
             }
-            persist_share_control();
+            if persist_share_control() {
+                // D80-M1-b：成员册调整不动 rev（无 Delta 可发），但引擎册的
+                // 按设备过滤快照已变——重推 SYNC_STATE 保 Pull 应答新鲜。
+                push_share_sync_state();
+            }
             sync_share_ctl_ui(&ui);
+        });
+    }
+
+    // —— D80-M1-b 发现面（接收侧）回调：视图 + 索取 + 审批 ——
+    {
+        let crud = crud.clone();
+        app.on_share_face_toggled(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            if ui.get_share_face_open() {
+                ui.set_share_face_open(false);
+                ui.set_share_face_selected_peer(-1);
+                return;
+            }
+            ui.set_share_face_open(true);
+            ui.set_share_face_selected_peer(-1);
+            sync_share_face_ui(&ui);
+            // 打开即全量补拉一轮（用户显式动作驱动，非定时器；断档自愈的
+            // 主动形态）。离线对端无地址跳过，等 DEVICE 命中补拉。
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().refresh_peer_views());
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_face_closed(move || {
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_share_face_open(false);
+                ui.set_share_face_selected_peer(-1);
+            }
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_face_refresh(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().refresh_peer_views());
+            dispatch_share_actions(&crud.ui, actions);
+            sync_share_face_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_face_peer_picked(move |index| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            ui.set_share_face_selected_peer(index);
+            sync_share_face_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_face_offer_requested(move |asset_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let Ok(asset) = Uuid::parse_str(asset_id.as_str()) else {
+                return;
+            };
+            // peer id 与 sync_share_face_ui 同序定位（BTreeMap 键序）。
+            let selected = ui.get_share_face_selected_peer();
+            let peer_id = SHARE_VM.with(|vm| {
+                vm.borrow()
+                    .peer_views()
+                    .keys()
+                    .nth(usize::try_from(selected).unwrap_or(usize::MAX))
+                    .cloned()
+            });
+            let Some(peer_id) = peer_id else {
+                return;
+            };
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().request_asset(&peer_id, asset));
+            dispatch_share_actions(&crud.ui, actions);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_request_accept(move || {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let (peer_id, asset_uuid) = SHARE_VM
+                .with(|vm| {
+                    vm.borrow()
+                        .current_request()
+                        .map(|r| (r.peer_id.clone(), r.asset_uuid))
+                })
+                .unzip();
+            let (Some(peer_id), Some(asset_uuid)) = (peer_id, asset_uuid) else {
+                ui.set_share_request_open(false);
+                return;
+            };
+            // 目录解析 → 按 id 直发（M0 推送通道，双确认语义的最后一环）。
+            let resolver = SHARE_WIRING
+                .with(|slot| slot.borrow().clone())
+                .map(|w| w.resolver);
+            let item = resolver.as_ref().and_then(|resolver| {
+                let binding = resolver.borrow();
+                let resolver = binding.as_ref()?;
+                let rank = resolver.uuid_rank(&asset_uuid.to_string())?;
+                resolver.share_candidate(AssetId(rank))
+            });
+            let Some(item) = item else {
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "素材已不在库中，无法发送".into(),
+                );
+                return;
+            };
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().direct_send(&peer_id, vec![item]));
+            dispatch_share_actions(&crud.ui, actions);
+            dismiss_request_dialog(&crud.ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_request_reject(move || {
+            // 拒绝 = 静默出队（不打扰请求方，无回执）。
+            dismiss_request_dialog(&crud.ui);
         });
     }
 

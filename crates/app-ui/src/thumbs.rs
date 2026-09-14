@@ -169,7 +169,16 @@ impl GridCtx {
             vm.ensure_window(first, end.saturating_sub(first));
             let mut cache = self.cache.borrow_mut();
             let share_vm = self.share_vm.borrow();
-            let built = build_rows(&vm, &self.thumbs, &mut cache, &share_vm, first, end);
+            let shared = shared_uuids();
+            let built = build_rows(
+                &vm,
+                &self.thumbs,
+                &mut cache,
+                &share_vm,
+                &shared,
+                first,
+                end,
+            );
             cache.retain_window(&built.window);
             built
         };
@@ -196,7 +205,16 @@ impl GridCtx {
             let (first, end) = vm.visible_range(scroll_top, viewport_height);
             let mut cache = self.cache.borrow_mut();
             let share_vm = self.share_vm.borrow();
-            let built = build_rows(&vm, &self.thumbs, &mut cache, &share_vm, first, end);
+            let shared = shared_uuids();
+            let built = build_rows(
+                &vm,
+                &self.thumbs,
+                &mut cache,
+                &share_vm,
+                &shared,
+                first,
+                end,
+            );
             cache.retain_window(&built.window);
             built
         };
@@ -243,6 +261,20 @@ fn fill_should_stop(missing: usize, y_new: f32, y_last: f32) -> bool {
 /// 几何稳定阈值（逻辑像素）。低于这个位移视为滚动已静止。
 const FILL_STABLE_EPSILON: f32 = 0.5;
 
+/// D80-M1「共享中」uuid 集：控制面共享态的现查快照（build_rows 铺瓦片时
+/// 定位共享中角标）。手工标记量级小，每次刷新现取不缓存；变化刷新点由
+/// main.rs 的控制面回调触发 grid.sync() 整体重排。
+fn shared_uuids() -> HashSet<Uuid> {
+    crate::SHARE_CONTROL.with(|control| {
+        control
+            .borrow()
+            .shared_entries()
+            .iter()
+            .map(|e| e.asset_uuid)
+            .collect()
+    })
+}
+
 /// 一次 build_rows 的产物。
 struct WindowBuild {
     /// 全窗口行（sync 用 set_vec 整体铺入）。
@@ -265,6 +297,7 @@ fn build_rows(
     thumbs: &ThumbSource,
     cache: &mut ThumbCache,
     share_vm: &ShareVm,
+    shared: &HashSet<Uuid>,
     first: usize,
     end: usize,
 ) -> WindowBuild {
@@ -347,6 +380,13 @@ fn build_rows(
                     .and_then(|uuid| uuid.parse::<Uuid>().ok())
                     .map(|uuid| ui_enums::share_badge(share_vm.badge(uuid)))
                     .unwrap_or(ui_enums::SHARE_BADGE_NONE),
+                // D80-M1「共享中」：控制面共享态现查（同一 uuid 键）。
+                shared: thumbs_guard
+                    .as_ref()
+                    .and_then(|resolver| resolver.uuid_of(id))
+                    .and_then(|uuid| uuid.parse::<Uuid>().ok())
+                    .map(|uuid| shared.contains(&uuid))
+                    .unwrap_or(false),
             };
             if loaded_real {
                 updates.push((i, tile.clone()));

@@ -118,7 +118,8 @@ fn check_offers(offers: &[ShareOffer]) -> Result<(), SyncError> {
 
 impl SyncMessage {
     /// 结构性守卫：Delta 区间必须非空且携带变更（含新增项文件名检查）；
-    /// Snapshot 的可得项文件名复用清单同名规则；册复用同一规则。Pull 恒合法。
+    /// Snapshot 的可得项文件名复用清单同名规则；册复用同一规则。
+    /// Pull/Request 恒合法。
     pub fn validate(&self) -> Result<(), SyncError> {
         match self {
             SyncMessage::Delta {
@@ -139,6 +140,7 @@ impl SyncMessage {
                 check_offers(added)
             }
             SyncMessage::Pull { .. } => Ok(()),
+            SyncMessage::Request { .. } => Ok(()),
             SyncMessage::Snapshot { offers, .. } => check_offers(offers),
         }
     }
@@ -159,6 +161,10 @@ pub enum SyncMessage {
     Pull { since_rev: u64 },
     /// 快照应答：服务端当前 rev + 已按拉取方过滤的可得清单（可为空）。
     Snapshot { rev: u64, offers: Vec<ShareOffer> },
+    /// 索取请求（M1-b 发现面）：请求方点开对端的可得项后发出。仍是
+    /// 「可获得性→传输」的原语边界：接收方 UI 显式审批后才发起 M0 推送
+    /// （素材移动原语 = 推送 + 接收侧双确认，索取本身不自动投递任何字节）。
+    Request { asset_uuid: Uuid },
 }
 
 #[cfg(test)]
@@ -187,8 +193,11 @@ mod tests {
             rev: 9,
             offers: vec![offer("photo.png")],
         };
+        let request = SyncMessage::Request {
+            asset_uuid: Uuid::new_v4(),
+        };
 
-        for message in [&delta, &pull, &snapshot] {
+        for message in [&delta, &pull, &snapshot, &request] {
             let json = serde_json::to_string(message).unwrap();
             let back: SyncMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(&back, message);
@@ -204,6 +213,9 @@ mod tests {
         assert!(serde_json::to_string(&snapshot)
             .unwrap()
             .contains(r#""kind":"snapshot""#));
+        assert!(serde_json::to_string(&request)
+            .unwrap()
+            .contains(r#""kind":"request""#));
     }
 
     #[test]
