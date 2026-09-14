@@ -167,60 +167,64 @@ fn enqueue_returns_only_after_bytes_and_meta_committed() {
 #[test]
 fn backpressure_rejects_beyond_capacity_under_concurrency() {
     // 同步拷贝下 backpressure 按「并发在途 enqueue 数」计：cap=1 且另一路
-    // 拷贝未完成时，后来的 enqueue 必须被拒。大文本素材拉长拷贝窗口。
-    // 竞态边界：worker 从 spawn 到在途入账（active+=1 在 sha256/查重之后）
-    // 有几十毫秒窗口，测试机高载时主循环可能在此之前冲完全部尝试——按
-    // 「轮」重试：每轮换一份新鲜大文件（上轮已入库的会 Duplicate 短路、
-    // 失去在途窗口）再冲一批新鲜尝试文件，任一轮观察到背压即通过。
+    // 拷贝未完成时，后来的 enqueue 必须被拒。大文本素材拉长在途窗口。
+    // 确定性结构：尝试文件先入库一次——此后连发的每次 enqueue 都命中
+    // Duplicate 短路（不进 active 计数、不等元数据提交，单次只剩「入口
+    // 检查 + sha256 + 查重」几百微秒）。连发在 worker 仍在途时不停，而
+    // worker 的在途窗口（7.9MB 拷贝 + 元数据确认，毫秒级）远大于连发
+    // 间隔，必然罩住至少一次入口检查。若连发的首次导入与 worker 并发
+    // （两路都等元数据提交），同一次攒批 flush 会把双方一起唤醒——
+    // worker 的整个在途窗口落在首次导入体内、背压永远观察不到，这正是
+    // 简单「spawn 后连发」版本竞态丢失的根源。worker 完成仍未见背压 =
+    // 竞态丢失（防御分支；固定次数上限防死循环）。
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("library");
     let lib = std::sync::Arc::new(Library::open_with_capacity(&lib_dir, 1).unwrap());
 
-    let mut saw_backpressure = false;
-    for round in 0..3 {
-        // 尝试文件预建（循环内不做任何文件 IO，第一次 enqueue 紧跟 spawn）。
-        let mut attempts: Vec<PathBuf> = Vec::new();
-        for i in 0..300 {
-            attempts.push(make_png(
-                dir.path(),
-                &format!("bp{round}_{i}.png"),
-                60 + (i % 30) as u8,
-            ));
-        }
+    let attempt = make_png(dir.path(), "bp.png", 60);
+    let pre = lib
+        .enqueue(ImportRequest {
+            source: attempt.clone(),
+            category: None,
+            tags: vec![],
+        })
+        .unwrap();
+    assert!(matches!(pre, EnqueueOutcome::Ticket { .. }));
 
-        // 7.9MB 文本（上限 8MB）：读 + 归一化 + 写盘，拉长在途窗口。
-        let big = dir.path().join(format!("big{round}.txt"));
-        std::fs::write(&big, vec![b'x'; 7936 * 1024]).unwrap();
-        let lib_for_worker = std::sync::Arc::clone(&lib);
-        let big_for_worker = big.clone();
-        let worker = std::thread::spawn(move || {
-            lib_for_worker
-                .enqueue(ImportRequest {
-                    source: big_for_worker,
-                    category: None,
-                    tags: vec![],
-                })
-                .unwrap()
+    // 7.9MB 文本（上限 8MB）：读 + 归一化 + 写盘，拉长在途窗口。
+    let big = dir.path().join("big.txt");
+    std::fs::write(&big, vec![b'x'; 7936 * 1024]).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let lib_for_worker = std::sync::Arc::clone(&lib);
+    let big_for_worker = big.clone();
+    let worker = thread::spawn(move || {
+        let outcome = lib_for_worker.enqueue(ImportRequest {
+            source: big_for_worker,
+            category: None,
+            tags: vec![],
         });
+        let _ = tx.send(outcome.is_ok());
+        outcome.unwrap()
+    });
 
-        for src in &attempts {
-            let outcome = lib
-                .enqueue(ImportRequest {
-                    source: src.clone(),
-                    category: None,
-                    tags: vec![],
-                })
-                .unwrap();
-            if matches!(outcome, EnqueueOutcome::Backpressure) {
-                saw_backpressure = true;
-                break;
-            }
+    let mut saw_backpressure = false;
+    'blast: for _ in 0..20_000 {
+        if rx.try_recv().is_ok() {
+            break 'blast;
         }
-        let _ = worker.join().unwrap();
-        if saw_backpressure {
-            break;
+        let outcome = lib
+            .enqueue(ImportRequest {
+                source: attempt.clone(),
+                category: None,
+                tags: vec![],
+            })
+            .unwrap();
+        if matches!(outcome, EnqueueOutcome::Backpressure) {
+            saw_backpressure = true;
+            break 'blast;
         }
     }
+    let _ = worker.join().unwrap();
     assert!(
         saw_backpressure,
         "cap=1 且大拷贝在途时必须观察到一次背压拒绝"
