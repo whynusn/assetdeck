@@ -6,3 +6,4 @@ pub mod engine;
 pub mod lines;
 pub mod mdns;
 pub mod proto;
+pub mod sync;

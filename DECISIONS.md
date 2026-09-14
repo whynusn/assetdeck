@@ -1070,6 +1070,11 @@ if (click_count % 2) == 1 {
 - **模型修订（批3 期间）**：空群组 = 草稿态合法（0 成员 0 可见，UI 先建组后勾成员）；unpair 只对「因本次解配而变空」的域动手，且个人域变空才删壳、群组域保留空壳。
 - **显式延期**：个人域创建与配对码 → M1-c（配对交互时自然出现）；瓦片「共享中」角标 → M1-b 发现面（与发送角标区分）；新弹窗 slint-viewer 渲染冒烟归入 M1-a 后真机批次（本批弹窗 1:1 复用已验证的设备选择器 chrome/布局，slint 编译门禁通过；本机 crates CDN 超时致 viewer 装不上，不阻塞）。
 
+**M1-b 批1 落地（2026-09-14，同步通道引擎）**：share-worker 新增 `sync` 模块——独立 ALPN `assetdeck-share-sync/1` 与推送通道并存注册（同一 endpoint 双 ALPN，入站按握手 ALPN 分流），会话 = 单 bi 流 + 一行 JSON。stdin 命令 `SYNC_STATE`（整册替换「我共享给谁什么」缓存）/ `SYNC_SEND`（Pull 等应答、Delta 即发即收）；stdout 事件 `SYNC_RECV` / `SYNC_SENT`。对端身份取自 QUIC 握手（`Connection::remote_id`，TLS 证书背书，报文不自报身份——发现面「来自谁」不可伪造）；入站 PULL 由引擎按 `SyncBook` 取该对端视角应答（册外对端 = 零可得，fail-closed），入站 Delta 上抛交 UI 依配对册采信（引擎不持信任状态）。
+- **契约修订（Delta 载荷按接收方视角）**：`Delta.added` 从 `Vec<SharingEntry>` 改为 `Vec<ShareOffer>`、`removed` 从 `Vec<RevokedEntry>` 改为 `Vec<Uuid>`——旧形接收方既无法展示（SharingEntry 不含元数据，素材在发送方库内）也无法套用（撤销按 (asset,domain) 计而成员册永不出本机）；新形只传「对该端新可得 / 不再可得」，连域 id 都不上线，泄漏面更小。rev 保持发送方全局单调计数，逐动作 +1。`RevokedEntry` 类型随之移除。
+- **漏收防御三分支（share_vm `apply_delta`）**：to_rev ≤ 缓存 = 重放丢弃；from_rev == 缓存 = 原位套用（同 uuid 替换、removed 移除）；from_rev > 缓存 = 断档（漏收过推送），丢弃并按缓存 rev 事件驱动补拉全量。冷启动由 Pull 全量覆盖——服务端恒以全量 Snapshot 应答，不做增量续传（册里无历史）。全部事件驱动（DEVICE 命中、SYNC_RECV 报文、发现面打开 `refresh_peer_views`），零 Timer；推送丢失不重试，靠补拉自愈。
+- **摘要比对补丁（扩展节补丁①的可选部分）本批不做**：以「断档即补拉」+ 发现面打开时全量补拉替代，有界且事件驱动；M1 真机批次后按需要再议。
+
 **M0 冒烟风险记档（用户拍板：不等）**：M0 传输闭环代码绿（回环 E2E）但真机双机未验证、CI MSVC 首编 vendored iroh 待观察；M1 模型层与传输解耦（契约层先行），不阻塞。双机冒烟（桥接 VM 或 Termux 对端）并入 M1-a 完成后的真机批次，Termux 发现段受 Android 组播锁/路由器 AP 隔离制约的结论届时如实记录。
 
 **M0 落地（2026-09-08）**：闭环全链就位——`tools/share-worker`（iroh 引擎 + mDNS 发现 + stdin/stdout 行协议，iroh/tokio 只进此编译单元；`presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在配置层，零信令/零打洞/零中继）；`crates/share`（清单/请求/设备纯模型 + worker 事件行解析端 `events`）；ui-viewmodels `share_vm`（批次/报价/角标状态机，纯逻辑零 IO，事件流进 → `ShareAction` 副作用出）；app-ui 接线（worker 生命周期 = 主进程 stdin 管道，右键菜单「共享到设备…」id=5 追加尾 + 多选操作条「共享」→ 设备选择弹窗 → 显式推送；接收侧首连确认弹窗 → 复用 D66 归类弹窗导入流，`ImportFlow.post_phase1` 钩子回 ACK/NACK，导入成败即 worker 收尾信号）；角标真源 = VM `badge_overrides` HashMap（状态迁移点写、O(1) 查、批次 evict 不回滚），`BadgesChanged` 定向刷瓦片不整表重建；deps_guard 新增 `d80_network_stack_confined_to_share_worker`（app-ui/ui-viewmodels Cargo.toml 禁 iroh/tokio/mdns-sd）；打包 5 exe（share-worker.exe 随包）。

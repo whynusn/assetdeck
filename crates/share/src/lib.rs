@@ -21,8 +21,8 @@ pub use manifest::{
 pub use record::{ShareDirection, ShareOutcome, ShareRecord};
 pub use registry::ShareRegistry;
 pub use request::{
-    is_device_id, is_safe_label, DeviceEntry, RequestError, SendItem, SendRequest, ALPN,
+    is_device_id, is_safe_label, DeviceEntry, RequestError, SendItem, SendRequest, ALPN, ALPN_SYNC,
     MDNS_SERVICE,
 };
 pub use sharing::{SharedState, SharingEntry};
-pub use sync::{RevokedEntry, ShareOffer, SyncError, SyncMessage};
+pub use sync::{PeerSyncState, ShareOffer, SyncBookState, SyncError, SyncMessage};

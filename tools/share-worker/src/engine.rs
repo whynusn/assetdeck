@@ -33,7 +33,7 @@ use share::{ManifestItem, SendRequest, TransferManifest};
 use crate::lines::LineReader;
 
 /// 清单 JSON 行上限：1000 项 × ~250B ≈ 250KB，8MB 是十倍余量。
-const MANIFEST_LINE_MAX: usize = 8 * 1024 * 1024;
+pub(crate) const MANIFEST_LINE_MAX: usize = 8 * 1024 * 1024;
 /// 首连确认等待上限（人离开电脑忘了点，连接不能无限挂着）。
 pub const OFFER_TIMEOUT: Duration = Duration::from_secs(120);
 /// 导入收尾等待上限（千项批量导入可能很久）。
@@ -77,14 +77,15 @@ impl From<io::Error> for EngineError {
 /// 冲刷。与其依赖那种巧合，不如显式给固定冲刷窗：局域网单帧 + 一次重传的
 /// 量级，300ms 足够封顶，远小于任何阶段超时；对端已读到时连接本会自然闲置
 /// 回收，这条 sleep 只影响本侧收尾时机，不在关键路径上。
-const FLUSH_GRACE: Duration = Duration::from_millis(300);
+pub(crate) const FLUSH_GRACE: Duration = Duration::from_millis(300);
 
-/// 写出终行（REJECT/DELIVERED/NACK）并 finish 本侧发送流。
+/// 写出终行（REJECT/DELIVERED/NACK，同步通道里是 JSON 报文行）并 finish
+/// 本侧发送流。pub(crate)：engine 与 sync 两个通道共用同一冲刷纪律。
 ///
 /// QUIC 纪律（回环实测换来的）：**绝不能**写完就 return——未 finish 的流
 /// drop 时直接 RESET，在途字节蒸发；即使 finish 了，句柄立刻 drop 同样把
 /// 还没上线的帧带走。写完必须 finish + 冲刷窗后再返回。
-async fn write_final_line(send: &mut SendStream, line: &str) {
+pub(crate) async fn write_final_line(send: &mut SendStream, line: &str) {
     let _ = send.write_all(format!("{line}\n").as_bytes()).await;
     let _ = send.finish();
     tokio::time::sleep(FLUSH_GRACE).await;

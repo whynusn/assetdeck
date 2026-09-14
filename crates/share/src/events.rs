@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::manifest::TransferManifest;
-use crate::request::DeviceEntry;
+use crate::request::{is_device_id, DeviceEntry};
+use crate::sync::SyncMessage;
 
 /// 逐项结果的方向标记（ITEM 行第三段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +65,19 @@ pub enum WorkerEvent {
     },
     /// NOTICE 行（D64 前缀约定由 worker 负责，此处只剥头）。
     Notice(String),
+    /// 同步通道（M1-b）：来自对端的报文（我方 Pull 的应答，或对端的在线增量）。
+    /// 发送方身份由 worker 从 QUIC 连接取（TLS 证书背书，非报文自报）。
+    SyncRecv {
+        peer_id: String,
+        message: SyncMessage,
+    },
+    /// 同步通道（M1-b）：我方发出的报文的结局（成功 detail 为空；失败仅
+    /// 知情——推送丢失由对端上线补拉自愈，不重试）。
+    SyncSent {
+        peer_id: String,
+        ok: bool,
+        detail: String,
+    },
     /// 空行以外的未知行：原文保留供日志。
     Unknown(String),
 }
@@ -216,6 +230,39 @@ pub fn parse_worker_line(line: &str) -> WorkerEvent {
             WorkerEvent::Notice(text)
         }
         "SCAN_DONE" => WorkerEvent::ScanDone,
+        "SYNC_RECV" => {
+            let (Some(peer_id), Some(json)) = (fields.next(), fields.next()) else {
+                return bad(line);
+            };
+            if !is_device_id(peer_id) {
+                return bad(line);
+            }
+            match serde_json::from_str::<SyncMessage>(json) {
+                Ok(message) if message.validate().is_ok() => WorkerEvent::SyncRecv {
+                    peer_id: peer_id.to_string(),
+                    message,
+                },
+                _ => bad(line),
+            }
+        }
+        "SYNC_SENT" => {
+            let (Some(peer_id), Some(ok)) = (fields.next(), fields.next()) else {
+                return bad(line);
+            };
+            if !is_device_id(peer_id) {
+                return bad(line);
+            }
+            let ok = match ok {
+                "ok" => true,
+                "failed" => false,
+                _ => return bad(line),
+            };
+            WorkerEvent::SyncSent {
+                peer_id: peer_id.to_string(),
+                ok,
+                detail: fields.next().unwrap_or_default().to_string(),
+            }
+        }
         _ => bad(line),
     }
 }
@@ -323,6 +370,55 @@ mod tests {
         assert!(matches!(parse_worker_line(""), WorkerEvent::Unknown(_)));
         assert!(matches!(
             parse_worker_line("PROGRESS\tx\ty"),
+            WorkerEvent::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn sync_lines_parse_and_reject_bad_shapes() {
+        let peer = "a".repeat(52);
+        let snapshot = SyncMessage::Snapshot {
+            rev: 6,
+            offers: vec![],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(
+            parse_worker_line(&format!("SYNC_RECV\t{peer}\t{json}")),
+            WorkerEvent::SyncRecv {
+                peer_id: peer.clone(),
+                message: snapshot
+            }
+        );
+        assert_eq!(
+            parse_worker_line(&format!("SYNC_SENT\t{peer}\tfailed\t连接超时")),
+            WorkerEvent::SyncSent {
+                peer_id: peer.clone(),
+                ok: false,
+                detail: "连接超时".into()
+            }
+        );
+        assert_eq!(
+            parse_worker_line(&format!("SYNC_SENT\t{peer}\tok\t")),
+            WorkerEvent::SyncSent {
+                peer_id: peer.clone(),
+                ok: true,
+                detail: String::new()
+            }
+        );
+
+        // 坏形状全落 Unknown：短 id、非法状态字、报文过不了契约校验。
+        assert!(matches!(
+            parse_worker_line("SYNC_RECV\tshort\t{\"kind\":\"pull\",\"since_rev\":0}"),
+            WorkerEvent::Unknown(_)
+        ));
+        assert!(matches!(
+            parse_worker_line(&format!("SYNC_SENT\t{peer}\tmaybe\tx")),
+            WorkerEvent::Unknown(_)
+        ));
+        assert!(matches!(
+            parse_worker_line(&format!(
+                "SYNC_RECV\t{peer}\t{{\"kind\":\"delta\",\"from_rev\":5,\"to_rev\":5,\"added\":[],\"removed\":[]}}"
+            )),
             WorkerEvent::Unknown(_)
         ));
     }

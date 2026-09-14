@@ -1,10 +1,14 @@
-//! stdin/stdout 行协议（D80 M0）：
+//! stdin/stdout 行协议（D80 / D80-M1）：
 //!
 //! stdin 命令（UI → worker）：
 //! - `SCAN` —— 触发一轮 mDNS 浏览，结果以 `DEVICE` 行回报
 //! - `SEND\t<SendRequest JSON>` —— 发起一次显式推送（JSON 单行）
 //! - `ACCEPT\t<batch_id>` / `REJECT\t<batch_id>\t<原因>` —— 接收侧首连确认
 //! - `ACK\t<batch_id>` / `NACK\t<batch_id>\t<原因>` —— 导入管线收尾回执
+//! - `SYNC_STATE\t<SyncBookState JSON>` —— 整册替换「我共享给谁什么」
+//!   （M1-b；worker 应答 PULL 的唯一数据源）
+//! - `SYNC_SEND\t<对端id>\t<addr;addr>\t<SyncMessage JSON>` —— 发出一条
+//!   同步报文（M1-b；Pull 等应答，Delta 即发即收）
 //! - `EXIT` —— 优雅退出（stdin 关闭/EOF 同效：父进程死则 worker 死）
 //!
 //! stdout 事件（worker → UI）：
@@ -16,13 +20,17 @@
 //! - `PROGRESS\t<batch_id>\t<已发>\t<总计>` —— 发送侧节流进度
 //! - `ITEM\t<batch_id>\t<send|recv>\t<uuid>\t<ok|failed>\t<明细>` —— 逐项结果
 //! - `done\t<batch_id>\t<transferred|delivered|rejected|failed>\t<明细>`
+//! - `SYNC_RECV\t<对端id>\t<SyncMessage JSON>` —— 同步报文到达（M1-b；
+//!   对端身份取自 QUIC 握手，非报文自报）
+//! - `SYNC_SENT\t<对端id>\t<ok|failed>\t<明细>` —— 我方同步报文结局
+//!   （M1-b；推送丢失由对端补拉自愈，仅知情不重试）
 //! - `NOTICE\t<提示：…|警示：…>` —— 用户知情消息（D64 前缀约定）
 //!
 //! stderr 归日志门面（D39），不承载协议。
 
 use uuid::Uuid;
 
-use share::SendRequest;
+use share::{is_device_id, SendRequest, SyncBookState, SyncMessage};
 
 /// stdin 一条命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +41,14 @@ pub enum Command {
     Reject(Uuid, String),
     Ack(Uuid),
     Nack(Uuid, String),
+    /// M1-b：整册替换「我共享给谁什么」。
+    SyncState(SyncBookState),
+    /// M1-b：发出一条同步报文。
+    SyncSend {
+        peer_id: String,
+        addrs: Vec<String>,
+        message: SyncMessage,
+    },
     Exit,
 }
 
@@ -85,6 +101,41 @@ pub fn parse_command(line: &str) -> Result<Command, CommandError> {
                 }
             }
         }
+        "SYNC_STATE" => {
+            let json = rest.ok_or(CommandError("SYNC_STATE 缺 JSON 载荷".into()))?;
+            let book: SyncBookState = serde_json::from_str(json)
+                .map_err(|e| CommandError(format!("SYNC_STATE JSON 解析失败: {e}")))?;
+            book.validate()
+                .map_err(|e| CommandError(format!("SYNC_STATE 册不合法: {e}")))?;
+            Ok(Command::SyncState(book))
+        }
+        "SYNC_SEND" => {
+            let rest = rest.ok_or(CommandError("SYNC_SEND 缺载荷".into()))?;
+            let (peer_id, rest) = rest
+                .split_once('\t')
+                .ok_or(CommandError("SYNC_SEND 缺地址段".into()))?;
+            if !is_device_id(peer_id) {
+                return Err(CommandError(format!("SYNC_SEND 设备标识不合法: {peer_id}")));
+            }
+            let (addr_text, json) = rest
+                .split_once('\t')
+                .ok_or(CommandError("SYNC_SEND 缺报文段".into()))?;
+            let addrs: Vec<String> = addr_text
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            let message: SyncMessage = serde_json::from_str(json)
+                .map_err(|e| CommandError(format!("SYNC_SEND 报文解析失败: {e}")))?;
+            message
+                .validate()
+                .map_err(|e| CommandError(format!("SYNC_SEND 报文不合法: {e}")))?;
+            Ok(Command::SyncSend {
+                peer_id: peer_id.to_string(),
+                addrs,
+                message,
+            })
+        }
         other => Err(CommandError(format!("未知命令: {other}"))),
     }
 }
@@ -130,6 +181,18 @@ pub mod out {
 
     pub fn notice(text: &str) -> String {
         format!("NOTICE\t{text}")
+    }
+
+    /// 同步报文到达（对端身份来自 QUIC 握手，worker 侧已核 z32 形状）。
+    pub fn sync_recv(peer_id: &str, message_json: &str) -> String {
+        format!("SYNC_RECV\t{peer_id}\t{message_json}")
+    }
+
+    pub fn sync_sent(peer_id: &str, ok: bool, detail: &str) -> String {
+        format!(
+            "SYNC_SENT\t{peer_id}\t{}\t{detail}",
+            if ok { "ok" } else { "failed" }
+        )
     }
 }
 
@@ -221,5 +284,74 @@ mod tests {
         assert!(out::item(id, "send", uuid, false, "io").contains("\tfailed\tio"));
         assert!(out::done(id, "delivered", "").starts_with("done\t"));
         assert!(out::notice("提示：hi").starts_with("NOTICE\t"));
+        let peer = "a".repeat(52);
+        assert!(out::sync_recv(&peer, "{}").starts_with(&format!("SYNC_RECV\t{peer}\t")));
+        assert_eq!(
+            out::sync_sent(&peer, false, "超时"),
+            format!("SYNC_SENT\t{peer}\tfailed\t超时")
+        );
+    }
+
+    #[test]
+    fn sync_commands_parse_and_validate() {
+        let peer = "a".repeat(52);
+        // SYNC_STATE：合法册整册通过；坏键/坏文件名被契约校验拦下。
+        let mut book = SyncBookState::default();
+        book.set(
+            peer.clone(),
+            share::PeerSyncState {
+                rev: 3,
+                offers: vec![share::ShareOffer {
+                    asset_uuid: Uuid::new_v4(),
+                    file_name: "a.png".into(),
+                    kind: domain::AssetKind::Image,
+                    size_bytes: 8,
+                }],
+            },
+        );
+        let line = format!("SYNC_STATE\t{}", serde_json::to_string(&book).unwrap());
+        assert_eq!(parse_command(&line), Ok(Command::SyncState(book)));
+        assert!(parse_command("SYNC_STATE\tnot-json").is_err());
+        assert!(parse_command("SYNC_STATE").is_err());
+        assert!(parse_command("SYNC_STATE\t{\"peers\":{\"short\":{}}}").is_err());
+
+        // SYNC_SEND：id/地址/报文三段齐备才通过；区间倒挂的报文被拦。
+        let message = SyncMessage::Delta {
+            from_rev: 4,
+            to_rev: 5,
+            added: vec![share::ShareOffer {
+                asset_uuid: Uuid::new_v4(),
+                file_name: "b.png".into(),
+                kind: domain::AssetKind::Video,
+                size_bytes: 16,
+            }],
+            removed: vec![Uuid::new_v4()],
+        };
+        let line = format!(
+            "SYNC_SEND\t{peer}\t192.168.1.8:4433;[::1]:4433\t{}",
+            serde_json::to_string(&message).unwrap()
+        );
+        assert_eq!(
+            parse_command(&line),
+            Ok(Command::SyncSend {
+                peer_id: peer.clone(),
+                addrs: vec!["192.168.1.8:4433".into(), "[::1]:4433".into()],
+                message
+            })
+        );
+        let bad = SyncMessage::Delta {
+            from_rev: 5,
+            to_rev: 4,
+            added: vec![],
+            removed: vec![],
+        };
+        let line = format!(
+            "SYNC_SEND\t{peer}\t192.168.1.8:4433\t{}",
+            serde_json::to_string(&bad).unwrap()
+        );
+        assert!(parse_command(&line).is_err());
+        assert!(parse_command("SYNC_SEND\tshort\t1.2.3.4:5\t{}").is_err());
+        assert!(parse_command(&format!("SYNC_SEND\t{peer}\t1.2.3.4:5")).is_err());
+        assert!(parse_command("SYNC_SEND").is_err());
     }
 }

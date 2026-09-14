@@ -20,7 +20,8 @@ use iroh::endpoint::presets;
 use iroh::endpoint::PortmapperConfig;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use mdns_sd::ServiceDaemon;
-use share_worker::{engine, mdns, proto};
+use share_worker::sync::SyncInbound;
+use share_worker::{engine, mdns, proto, sync};
 
 use engine::{BatchOutcome, Decision, DecisionHub, IncomingEvent, ReceiveState, SendEvent};
 
@@ -81,7 +82,10 @@ async fn main() {
     }
 
     let endpoint = match Endpoint::builder(presets::Minimal)
-        .alpns(vec![share::ALPN.as_bytes().to_vec()])
+        .alpns(vec![
+            share::ALPN.as_bytes().to_vec(),
+            share::ALPN_SYNC.as_bytes().to_vec(),
+        ])
         .portmapper_config(PortmapperConfig::Disabled)
         .bind()
         .await
@@ -124,6 +128,7 @@ async fn main() {
     run(
         endpoint,
         DecisionHub::new(),
+        sync::SyncBook::new(),
         staging_root,
         mdns_state,
         id_z32,
@@ -134,6 +139,7 @@ async fn main() {
 async fn run(
     endpoint: Endpoint,
     hub: Arc<DecisionHub>,
+    book: Arc<sync::SyncBook>,
     staging_root: PathBuf,
     mdns_state: Option<(ServiceDaemon, Option<mdns::Announcer>)>,
     self_id: String,
@@ -218,12 +224,46 @@ async fn run(
                             logging::warn!("NACK 无等待批次: {batch_id}");
                         }
                     }
+                    Some(proto::Command::SyncState(state)) => {
+                        book.replace(state);
+                    }
+                    Some(proto::Command::SyncSend {
+                        peer_id,
+                        addrs,
+                        message,
+                    }) => {
+                        let Some(target) = target_addr(&peer_id, &addrs) else {
+                            emit(proto::out::sync_sent(&peer_id, false, "目标设备地址不合法"));
+                            continue;
+                        };
+                        let endpoint = endpoint.clone();
+                        tokio::spawn(async move {
+                            match sync::send_sync_message(&endpoint, target, message).await {
+                                Ok(None) => emit(proto::out::sync_sent(&peer_id, true, "")),
+                                Ok(Some(reply)) => {
+                                    match serde_json::to_string(&reply) {
+                                        Ok(json) => {
+                                            emit(proto::out::sync_recv(&peer_id, &json))
+                                        }
+                                        Err(error) => {
+                                            logging::error!("同步应答序列化失败: {error}")
+                                        }
+                                    }
+                                    emit(proto::out::sync_sent(&peer_id, true, ""));
+                                }
+                                Err(error) => {
+                                    emit(proto::out::sync_sent(&peer_id, false, &error.to_string()))
+                                }
+                            }
+                        });
+                    }
                 }
             }
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
                 let hub = hub.clone();
                 let staging = staging_root.clone();
+                let book = book.clone();
                 tokio::spawn(async move {
                     let conn = match incoming.await {
                         Ok(conn) => conn,
@@ -232,24 +272,43 @@ async fn run(
                             return;
                         }
                     };
-                    let result = engine::handle_connection(conn, &staging, &hub, emit_incoming).await;
-                    match result {
-                        Ok(outcome) => {
-                            let (state, detail) = match &outcome.state {
-                                ReceiveState::Transferred => ("transferred", ""),
-                                ReceiveState::Rejected(reason) => ("rejected", reason.as_str()),
-                                ReceiveState::Failed(reason) => ("failed", reason.as_str()),
-                            };
-                            emit(proto::out::done(outcome.batch_id, state, detail));
+                    // ALPN 分流：推送通道走 engine 全流程（清单+双确认+裸流）；
+                    // 同步通道走 M1-b 轻会话（一行报文，Pull 在引擎内应答）。
+                    if conn.alpn() == share::ALPN.as_bytes() {
+                        let result =
+                            engine::handle_connection(conn, &staging, &hub, emit_incoming).await;
+                        match result {
+                            Ok(outcome) => {
+                                let (state, detail) = match &outcome.state {
+                                    ReceiveState::Transferred => ("transferred", ""),
+                                    ReceiveState::Rejected(reason) => ("rejected", reason.as_str()),
+                                    ReceiveState::Failed(reason) => ("failed", reason.as_str()),
+                                };
+                                emit(proto::out::done(outcome.batch_id, state, detail));
+                            }
+                            Err(error) => {
+                                // 清单都没解析成功 = 无批次可归位：知情消息即可，
+                                // 不伪造 done 行（UI 侧 done 必须带真实 batch）。
+                                logging::warn!("入站处理失败: {error}");
+                                emit(proto::out::notice(&format!(
+                                    "警示：收到无效共享请求：{error}"
+                                )));
+                            }
                         }
-                        Err(error) => {
-                            // 清单都没解析成功 = 无批次可归位：知情消息即可，
-                            // 不伪造 done 行（UI 侧 done 必须带真实 batch）。
-                            logging::warn!("入站处理失败: {error}");
-                            emit(proto::out::notice(&format!(
-                                "警示：收到无效共享请求：{error}"
-                            )));
+                    } else if conn.alpn() == share::ALPN_SYNC.as_bytes() {
+                        let result = sync::handle_sync_connection(conn, &book, |event| {
+                            let SyncInbound::Message { peer_id, message } = event;
+                            match serde_json::to_string(&message) {
+                                Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
+                                Err(error) => logging::error!("同步报文序列化失败: {error}"),
+                            }
+                        })
+                        .await;
+                        if let Err(error) = result {
+                            logging::warn!("同步连接处理失败: {error}");
                         }
+                    } else {
+                        logging::warn!("未知 ALPN 的入站连接，忽略");
                     }
                 });
             }

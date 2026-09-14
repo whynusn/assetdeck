@@ -5,12 +5,15 @@
 //! 副作用：往 worker 写行、开弹窗、喂导入管线、toast）。状态不设第二真源：
 //! 角标/进度/确认队列全部由事件流推导。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use share::{DeviceEntry, DoneState, SendItem, SendRequest, ShareDirection, WorkerEvent};
+use share::{
+    DeviceEntry, DoneState, PeerSyncState, SendItem, SendRequest, ShareDirection, SyncMessage,
+    WorkerEvent,
+};
 
 use crate::target_bar_vm::TargetNoticeTone;
 
@@ -160,6 +163,14 @@ pub struct ShareVm {
     pending_writes: Vec<String>,
     /// 已完结批次保留最近这么多条供摘要行/记录回放（超出静默丢弃旧的）。
     final_keep: usize,
+    /// 远端可得视图（M1-b 发现面数据源）：对端 id → 该对端当前共享给我的
+    /// 可得清单。会话期有效（重启后靠发现面/扫描触发补拉重建），只进不推——
+    /// 本机共享态的真源在 ShareControlVm，这里只存「别人给我的视角」。
+    peer_views: BTreeMap<String, PeerSyncState>,
+    /// 已配对对端集（app-ui 随配对册变化调用 set_trusted_peers）。
+    /// 未配对对端的同步报文一律丢弃（fail-closed：陌生人发来的「可得清单」
+    /// 绝不进发现面）。
+    trusted_peers: HashSet<String>,
 }
 
 /// 已完结批次的保留上限（够看最近几次；再往后的历史属于记录面，M1 落库）。
@@ -185,6 +196,8 @@ impl ShareVm {
             badge_overrides: HashMap::new(),
             pending_writes: Vec::new(),
             final_keep: FINAL_KEEP,
+            peer_views: BTreeMap::new(),
+            trusted_peers: HashSet::new(),
         }
     }
 
@@ -383,8 +396,21 @@ impl ShareVm {
                 vec![]
             }
             WorkerEvent::Device(entry) => {
+                let id = entry.id.clone();
+                let is_self = self.self_id.as_deref() == Some(id.as_str());
                 self.merge_device(entry);
-                vec![ShareAction::Refresh]
+                let mut actions = vec![ShareAction::Refresh];
+                // M1-b：命中已配对且尚无视图的对端 → 立即补拉全量（事件驱动，
+                // 每会话每对端至多一次；之后靠 Delta 推送与发现面刷新保鲜）。
+                if !is_self
+                    && self.trusted_peers.contains(&id)
+                    && !self.peer_views.contains_key(&id)
+                {
+                    if let Some(line) = self.pull_line(&id, 0) {
+                        actions.push(ShareAction::Send(line));
+                    }
+                }
+                actions
             }
             WorkerEvent::ScanDone => self.scan_finished(),
             WorkerEvent::Incoming(manifest) => {
@@ -539,6 +565,23 @@ impl ShareVm {
                 };
                 vec![ShareAction::Notice(tone, text)]
             }
+            WorkerEvent::SyncRecv { peer_id, message } => self.apply_sync(peer_id, message),
+            WorkerEvent::SyncSent {
+                peer_id,
+                ok,
+                detail,
+            } => {
+                if ok {
+                    // 成功静默：同步是后台事件，不抢焦点。
+                    vec![]
+                } else {
+                    let short = &peer_id[..peer_id.len().min(12)];
+                    vec![ShareAction::Notice(
+                        TargetNoticeTone::Warning,
+                        format!("警示：与 {short}… 的共享态同步失败：{detail}"),
+                    )]
+                }
+            }
             WorkerEvent::Unknown(raw) => {
                 if raw.is_empty() {
                     vec![]
@@ -575,7 +618,119 @@ impl ShareVm {
         self.badge_overrides.get(&asset).copied()
     }
 
+    /// 同步通道信任册更新（M1-b；app-ui 随配对册变化调用，整表替换）。
+    pub fn set_trusted_peers(&mut self, ids: Vec<String>) {
+        self.trusted_peers = ids.into_iter().collect();
+    }
+
+    /// 远端可得视图（M1-b 发现面数据源，只读）：对端 id → 它当前共享给
+    /// 本机的可得清单。
+    pub fn peer_views(&self) -> &BTreeMap<String, PeerSyncState> {
+        &self.peer_views
+    }
+
+    /// 发现面打开：对已知地址的已配对对端全部补拉一轮（用户显式动作驱动，
+    /// 非定时器）。无地址的对端跳过（等下次 DEVICE 命中再拉）。
+    pub fn refresh_peer_views(&mut self) -> Vec<ShareAction> {
+        let ids: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|d| self.trusted_peers.contains(&d.id))
+            .map(|d| d.id.clone())
+            .collect();
+        ids.iter()
+            .filter_map(|id| {
+                let since = self.peer_views.get(id).map(|v| v.rev).unwrap_or(0);
+                self.pull_line(id, since).map(ShareAction::Send)
+            })
+            .collect()
+    }
+
     // ===== 内部 =====
+
+    /// 应用一条来自对端的同步报文（M1-b 发现面数据流）。
+    /// 信任收口：未配对对端的报文一律丢弃，绝不进视图。
+    fn apply_sync(&mut self, peer_id: String, message: SyncMessage) -> Vec<ShareAction> {
+        if !self.trusted_peers.contains(&peer_id) {
+            return Vec::new();
+        }
+        match message {
+            // PULL 由 worker 在引擎内应答，不该到 UI：防御性忽略。
+            SyncMessage::Pull { .. } => Vec::new(),
+            SyncMessage::Snapshot { rev, offers } => {
+                self.peer_views
+                    .insert(peer_id, PeerSyncState { rev, offers });
+                vec![ShareAction::Refresh]
+            }
+            SyncMessage::Delta {
+                from_rev,
+                to_rev,
+                added,
+                removed,
+            } => self.apply_delta(peer_id, from_rev, to_rev, added, removed),
+        }
+    }
+
+    /// Delta 三分支（rev 为发送方全局单调计数，逐动作 +1）：
+    /// - 无视图且 from_rev == 0：发送方全新状态，直接立册；
+    /// - to_rev ≤ 缓存：重放，丢弃；
+    /// - from_rev > 缓存：断档（漏收过推送），原位套用会造成混合旧态，
+    ///   丢弃并按缓存 rev 补拉全量（事件驱动自愈，不重试推送）。
+    fn apply_delta(
+        &mut self,
+        peer_id: String,
+        from_rev: u64,
+        to_rev: u64,
+        added: Vec<share::ShareOffer>,
+        removed: Vec<Uuid>,
+    ) -> Vec<ShareAction> {
+        let Some(view) = self.peer_views.get(&peer_id) else {
+            if from_rev == 0 {
+                self.peer_views.insert(
+                    peer_id,
+                    PeerSyncState {
+                        rev: to_rev,
+                        offers: added,
+                    },
+                );
+                return vec![ShareAction::Refresh];
+            }
+            return self
+                .pull_line(&peer_id, 0)
+                .map(ShareAction::Send)
+                .into_iter()
+                .collect();
+        };
+        let cached = view.rev;
+        if to_rev <= cached {
+            return Vec::new();
+        }
+        if from_rev > cached {
+            return self
+                .pull_line(&peer_id, cached)
+                .map(ShareAction::Send)
+                .into_iter()
+                .collect();
+        }
+        let view = self.peer_views.get_mut(&peer_id).unwrap();
+        view.offers.retain(|o| !removed.contains(&o.asset_uuid));
+        for offer in added {
+            view.offers.retain(|o| o.asset_uuid != offer.asset_uuid);
+            view.offers.push(offer);
+        }
+        view.rev = to_rev;
+        vec![ShareAction::Refresh]
+    }
+
+    /// 组一条 SYNC_SEND 补拉行；对端尚无已知地址时为 None（等下次 DEVICE）。
+    fn pull_line(&self, peer_id: &str, since_rev: u64) -> Option<String> {
+        let device = self.devices.iter().find(|d| d.id == peer_id)?;
+        let json = serde_json::to_string(&SyncMessage::Pull { since_rev }).ok()?;
+        Some(format!(
+            "SYNC_SEND\t{peer_id}\t{}\t{json}",
+            device.addrs.join(";")
+        ))
+    }
 
     fn find_batch(&self, id: Uuid) -> Option<&ShareBatch> {
         self.batches.iter().find(|b| b.id == id)
@@ -889,5 +1044,163 @@ mod tests {
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(1536 * 1024), "1.5 MB");
         assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    fn sync_snapshot_line(peer: &str, rev: u64, names: &[&str]) -> String {
+        let snapshot = SyncMessage::Snapshot {
+            rev,
+            offers: names
+                .iter()
+                .map(|n| share::ShareOffer {
+                    asset_uuid: Uuid::new_v4(),
+                    file_name: n.to_string(),
+                    kind: AssetKind::Image,
+                    size_bytes: 8,
+                })
+                .collect(),
+        };
+        format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&snapshot).unwrap()
+        )
+    }
+
+    #[test]
+    fn sync_only_trusted_peers_enter_views() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        let line = sync_snapshot_line(&peer, 4, &["a.png"]);
+        // 未配对（未进信任册）：快照被丢弃，绝不进发现面。
+        let actions = vm.handle_line(&line);
+        assert!(actions.is_empty());
+        assert!(vm.peer_views().get(&peer).is_none());
+        // 进信任册后：快照立册。
+        vm.set_trusted_peers(vec![peer.clone()]);
+        let actions = vm.handle_line(&line);
+        assert_eq!(vm.peer_views().get(&peer).unwrap().rev, 4);
+        assert!(actions.contains(&ShareAction::Refresh));
+    }
+
+    #[test]
+    fn delta_apply_replay_and_gap_branches() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        vm.set_trusted_peers(vec![peer.clone()]);
+        vm.handle_line(&device_line()); // 提供地址，补拉才组得出行
+
+        // 无视图 + from_rev=0：发送方全新状态直接立册。
+        let added = share::ShareOffer {
+            asset_uuid: Uuid::new_v4(),
+            file_name: "x.png".into(),
+            kind: AssetKind::Image,
+            size_bytes: 1,
+        };
+        let delta = SyncMessage::Delta {
+            from_rev: 0,
+            to_rev: 2,
+            added: vec![added.clone()],
+            removed: vec![],
+        };
+        vm.handle_line(&format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&delta).unwrap()
+        ));
+        assert_eq!(vm.peer_views().get(&peer).unwrap().rev, 2);
+
+        // from_rev == 缓存：原位套用（同 uuid 替换而非追加）。
+        let replacement = share::ShareOffer {
+            asset_uuid: added.asset_uuid,
+            file_name: "x2.png".into(),
+            kind: AssetKind::Image,
+            size_bytes: 2,
+        };
+        let other = share::ShareOffer {
+            asset_uuid: Uuid::new_v4(),
+            file_name: "y.png".into(),
+            kind: AssetKind::Image,
+            size_bytes: 3,
+        };
+        let delta = SyncMessage::Delta {
+            from_rev: 2,
+            to_rev: 5,
+            added: vec![replacement, other],
+            removed: vec![],
+        };
+        let line = format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&delta).unwrap()
+        );
+        vm.handle_line(&line);
+        let view = vm.peer_views().get(&peer).unwrap();
+        assert_eq!(view.rev, 5);
+        assert_eq!(view.offers.len(), 2);
+        assert!(view.offers.iter().any(|o| o.file_name == "x2.png"));
+
+        // 重放（to_rev ≤ 缓存）：丢弃且无动作。
+        let actions = vm.handle_line(&line);
+        assert!(actions.is_empty());
+
+        // 断档（from_rev > 缓存）：丢弃并按缓存 rev 补拉全量。
+        let delta = SyncMessage::Delta {
+            from_rev: 8,
+            to_rev: 9,
+            added: vec![],
+            removed: vec![added.asset_uuid],
+        };
+        let actions = vm.handle_line(&format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&delta).unwrap()
+        ));
+        match &actions[0] {
+            ShareAction::Send(l) => {
+                assert!(l.starts_with(&format!("SYNC_SEND\t{peer}\t")));
+                assert!(l.contains(r#""kind":"pull""#));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn device_discovery_triggers_initial_pull_once() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        vm.set_trusted_peers(vec![peer.clone()]);
+        let actions = vm.handle_line(&device_line());
+        assert!(actions.iter().any(
+            |a| matches!(a, ShareAction::Send(l) if l.starts_with("SYNC_SEND\t") && l.contains(r#""kind":"pull""#))
+        ));
+        // 已有视图后再次命中：不再补拉。
+        vm.handle_line(&sync_snapshot_line(&peer, 1, &["a.png"]));
+        let actions = vm.handle_line(&device_line());
+        assert!(!actions.iter().any(|a| matches!(a, ShareAction::Send(_))));
+    }
+
+    #[test]
+    fn refresh_peer_views_pulls_all_trusted_devices() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        let stranger = "e".repeat(52);
+        vm.handle_line(&device_line());
+        vm.handle_line(&format!("DEVICE\t{stranger}\t小王\t10.0.0.2:1"));
+        vm.set_trusted_peers(vec![peer.clone()]);
+        let actions = vm.refresh_peer_views();
+        assert_eq!(actions.len(), 1, "只拉已配对对端");
+        match &actions[0] {
+            ShareAction::Send(l) => assert!(l.starts_with(&format!("SYNC_SEND\t{peer}\t"))),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_sent_failure_notifies_only_on_failure() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        let actions = vm.handle_line(&format!("SYNC_SENT\t{peer}\tok\t"));
+        assert!(actions.is_empty());
+        let actions = vm.handle_line(&format!("SYNC_SENT\t{peer}\tfailed\t连接超时"));
+        assert!(matches!(
+            &actions[0],
+            ShareAction::Notice(TargetNoticeTone::Warning, t) if t.contains("连接超时")
+        ));
     }
 }

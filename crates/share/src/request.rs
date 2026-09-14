@@ -17,6 +17,10 @@ use crate::manifest::{is_safe_display_name, MANIFEST_MAX_ITEMS};
 /// QUIC ALPN（D80）：传输层与应用层之间的协议分隔符，收发两侧必须一致。
 pub const ALPN: &str = "assetdeck-share/1";
 
+/// QUIC 同步通道 ALPN（D80-M1）：NOTIFY/PULL/SNAPSHOT 走独立 ALPN，
+/// 与推送通道互不干扰、可独立演进（M1-b 起双 ALPN 并存注册）。
+pub const ALPN_SYNC: &str = "assetdeck-share-sync/1";
+
 /// mDNS 服务类型（D80 M0 设备发现）：instance = 设备名-短 id。
 pub const MDNS_SERVICE: &str = "_assetdeck-share._udp.local.";
 
