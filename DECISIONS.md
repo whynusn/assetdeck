@@ -1070,6 +1070,14 @@ if (click_count % 2) == 1 {
 - **模型修订（批3 期间）**：空群组 = 草稿态合法（0 成员 0 可见，UI 先建组后勾成员）；unpair 只对「因本次解配而变空」的域动手，且个人域变空才删壳、群组域保留空壳。
 - **显式延期**：个人域创建与配对码 → M1-c（配对交互时自然出现）；瓦片「共享中」角标 → M1-b 发现面（与发送角标区分）；新弹窗 slint-viewer 渲染冒烟归入 M1-a 后真机批次（本批弹窗 1:1 复用已验证的设备选择器 chrome/布局，slint 编译门禁通过；本机 crates CDN 超时致 viewer 装不上，不阻塞）。
 
+**M1-c 落地（2026-09-14，远程直连 + 配对码/个人域）**：
+- **worker endpoint 切 `presets::N0DisableRelay`**：Minimal(crypto) + `PkarrPublisher::n0_dns` + `PkarrResolver::n0_dns` + `DnsAddressLookup::n0_dns`——节点地址经 n0 公共 iroh.link DNS 发布/解析，记录按**本机密钥签名**（pkarr = 签名 DNS 包，地址记录与端点密钥绑定，他人不可冒发）；`RelayMode::Disabled` 保持无中继红线不变（信令只交换地址，流量仍直连）。mDNS 局域网发现保留并存（同网段仍零外联）。
+- **portmapper 恢复默认启用**：移除 M0 的显式 `.portmapper_config(PortmapperConfig::Disabled)`（iroh Builder 默认 `Enabled{}`，UPnP/PCP/NAT-PMP 自动映射）；打洞不再被配置层钉死。信令/映射的真机连通性实测归真机批次（双机冒烟）。
+- **配对码（share::pairing）**：`pairing_code(id)` = SHA-256(设备 id) 截 5 字节 → z32 表 8 字符（40 位指纹，碰撞空间 2^40，展示核对用）。**不参与任何判定**——信任收口仍是显式配对册（手贴 52 位标识）；配对码只用于人对人口头核对「你贴的就是我给你的」。
+- **个人域**：`DomainKind::Personal` 恒 1 成员；管理弹窗设备行「个人域」按钮 → `create_domain("{设备名} 专属", Personal, [device_id])`，已有个人域守卫（该设备已建过则报错不重建）。UI 上个人域 = 素材右键「共享到域」里的一键入口（发给自己另一台设备）。
+- **UI 回显**：控制面顶行 self-id/self-code 只读回显（自己的 52 位标识 + 配对码，对方粘贴配对用）；设备行详情从 uuid 前缀改「配对码 xxxx」；域行按 `DomainKind` 显示「个人 / N 成员」。
+- share 48 + worker 16 lib + 7 E2E 全绿、clippy 零警告（workspace 级验证受阻于并行会话 library 改动，CI 提交树兜底）。
+
 **M1-b 批1 落地（2026-09-14，同步通道引擎）**：share-worker 新增 `sync` 模块——独立 ALPN `assetdeck-share-sync/1` 与推送通道并存注册（同一 endpoint 双 ALPN，入站按握手 ALPN 分流），会话 = 单 bi 流 + 一行 JSON。stdin 命令 `SYNC_STATE`（整册替换「我共享给谁什么」缓存）/ `SYNC_SEND`（Pull 等应答、Delta 即发即收）；stdout 事件 `SYNC_RECV` / `SYNC_SENT`。对端身份取自 QUIC 握手（`Connection::remote_id`，TLS 证书背书，报文不自报身份——发现面「来自谁」不可伪造）；入站 PULL 由引擎按 `SyncBook` 取该对端视角应答（册外对端 = 零可得，fail-closed），入站 Delta 上抛交 UI 依配对册采信（引擎不持信任状态）。
 - **契约修订（Delta 载荷按接收方视角）**：`Delta.added` 从 `Vec<SharingEntry>` 改为 `Vec<ShareOffer>`、`removed` 从 `Vec<RevokedEntry>` 改为 `Vec<Uuid>`——旧形接收方既无法展示（SharingEntry 不含元数据，素材在发送方库内）也无法套用（撤销按 (asset,domain) 计而成员册永不出本机）；新形只传「对该端新可得 / 不再可得」，连域 id 都不上线，泄漏面更小。rev 保持发送方全局单调计数，逐动作 +1。`RevokedEntry` 类型随之移除。
 - **漏收防御三分支（share_vm `apply_delta`）**：to_rev ≤ 缓存 = 重放丢弃；from_rev == 缓存 = 原位套用（同 uuid 替换、removed 移除）；from_rev > 缓存 = 断档（漏收过推送），丢弃并按缓存 rev 事件驱动补拉全量。冷启动由 Pull 全量覆盖——服务端恒以全量 Snapshot 应答，不做增量续传（册里无历史）。全部事件驱动（DEVICE 命中、SYNC_RECV 报文、发现面打开 `refresh_peer_views`），零 Timer；推送丢失不重试，靠补拉自愈。
