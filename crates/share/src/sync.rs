@@ -1,11 +1,15 @@
-//! 同步消息契约（D80-M1）：push/pull 混合同步的三种报文 + 被拉方的
+//! 同步消息契约（D80-M1）：push/pull 混合同步的报文 + 被拉方的
 //! 「我共享给谁什么」状态册。
 //!
 //! 载体 = M1-b 落地的独立 QUIC 同步通道（ALPN [`crate::request::ALPN_SYNC`]，
 //! 单 bi 流 + `\n` 行 JSON），与推送通道互不干扰。铁律：
-//! - 任何报文都**不含域定义**（成员册不出本机）；接收方视角只有
+//! - 可得性视角报文**不含域定义**（成员册不出本机）；接收方视角只有
 //!   [`ShareOffer`]（谁有哪些素材可得），连域 id 都不上线——Delta/Snapshot
 //!   都是发送方**按接收方预先过滤**的视角报文，过滤逻辑留在本机。
+//! - **例外（M2 邀请机制，信任模型修订）**：[`SyncMessage::JoinInvite`] /
+//!   [`SyncMessage::Roster`] 是经群主**显式分发**的域上下文（贴邀请码是
+//!   显式动作，非静默泄漏）——成员册经群主名册同步，这是「邀请制 O(N)
+//!   组群」的载体。除此之外域定义仍然不出本机。
 //! - [`SyncMessage::Delta`] 表达区间 (from_rev, to_rev] 内**接收方视角**的
 //!   变更（added = 新增可得、removed = 不再可得，按 asset_uuid 计），由
 //!   在线推送通道投递；[`SyncMessage::Pull`] 是上线方的拉取请求
@@ -27,8 +31,9 @@ use domain::AssetKind;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::invite::GroupRoster;
 use crate::manifest::is_safe_display_name;
-use crate::request::is_device_id;
+use crate::request::{is_device_id, is_safe_label};
 
 /// 接收方视角的一行「可得」：只含元数据，不含域、不含路径——对象路径
 /// 只在后续显式推送的清单（manifest）里出现。
@@ -88,6 +93,10 @@ pub enum SyncError {
     },
     /// 册/报文里的对端设备标识不是合法 z32 形状。
     BadPeerId(String),
+    /// JoinInvite 的设备名不安全（空或含控制字符）。
+    BadDeviceName,
+    /// Roster 名册不合法（域名/成员 id/成员名形状）。
+    BadRoster,
 }
 
 impl core::fmt::Display for SyncError {
@@ -101,6 +110,8 @@ impl core::fmt::Display for SyncError {
                 write!(f, "第 {index} 条可得项文件名不安全")
             }
             SyncError::BadPeerId(id) => write!(f, "对端设备标识不合法：{id}"),
+            SyncError::BadDeviceName => write!(f, "邀请报文的设备名不合法"),
+            SyncError::BadRoster => write!(f, "群组名册不合法"),
         }
     }
 }
@@ -118,8 +129,9 @@ fn check_offers(offers: &[ShareOffer]) -> Result<(), SyncError> {
 
 impl SyncMessage {
     /// 结构性守卫：Delta 区间必须非空且携带变更（含新增项文件名检查）；
-    /// Snapshot 的可得项文件名复用清单同名规则；册复用同一规则。
-    /// Pull/Request 恒合法。
+    /// Snapshot 的可得项文件名复用清单同名规则；册复用同一规则；
+    /// Roster 复用邀请模块的名册校验；JoinInvite 的设备名必须安全
+    /// （展示名进对端设备册，控制字符是注入面）。Pull/Request 恒合法。
     pub fn validate(&self) -> Result<(), SyncError> {
         match self {
             SyncMessage::Delta {
@@ -142,6 +154,14 @@ impl SyncMessage {
             SyncMessage::Pull { .. } => Ok(()),
             SyncMessage::Request { .. } => Ok(()),
             SyncMessage::Snapshot { offers, .. } => check_offers(offers),
+            SyncMessage::JoinInvite { device_name, .. } => {
+                if is_safe_label(device_name) {
+                    Ok(())
+                } else {
+                    Err(SyncError::BadDeviceName)
+                }
+            }
+            SyncMessage::Roster { roster } => roster.validate().map_err(|_| SyncError::BadRoster),
         }
     }
 }
@@ -165,6 +185,20 @@ pub enum SyncMessage {
     /// 「可获得性→传输」的原语边界：接收方 UI 显式审批后才发起 M0 推送
     /// （素材移动原语 = 推送 + 接收侧双确认，索取本身不自动投递任何字节）。
     Request { asset_uuid: Uuid },
+    /// 邀请加入请求（M2 邀请机制）：贴码方外拨签发方后发出。`domain_id`
+    /// 为 None = 纯互认（写入签发方设备册）；Some = 请求加入群组域。
+    /// 签发方收到后：自动互认入册（名取 `device_name`）+（群组）把请求方
+    /// 写进成员册并广播 [`SyncMessage::Roster`]。**信任豁免**：这是邀请流
+    /// 的引导报文，发送方尚未入册——持有 domain id 即持有邀请码（被授权）。
+    JoinInvite {
+        domain_id: Option<Uuid>,
+        device_name: String,
+    },
+    /// 群主名册（M2）：JoinInvite 的后续（群主异步入册后广播）与成员册
+    /// 变更的推送。接收方据此自动互认全体成员 + 本地建域/更新/移出
+    /// （名册不含自己 = 被踢出信号）。信任收口：只接受「有未决 JoinInvite
+    /// 的对端（引导握手）或已配对对端（成员变更广播）」的名册。
+    Roster { roster: GroupRoster },
 }
 
 #[cfg(test)]
@@ -196,8 +230,22 @@ mod tests {
         let request = SyncMessage::Request {
             asset_uuid: Uuid::new_v4(),
         };
+        let join = SyncMessage::JoinInvite {
+            domain_id: Some(Uuid::new_v4()),
+            device_name: "小李的电脑".into(),
+        };
+        let roster = SyncMessage::Roster {
+            roster: crate::invite::GroupRoster {
+                domain_id: Uuid::new_v4(),
+                domain_name: "家庭组".into(),
+                members: vec![crate::invite::RosterMember {
+                    id: "a".repeat(52),
+                    name: "群主".into(),
+                }],
+            },
+        };
 
-        for message in [&delta, &pull, &snapshot, &request] {
+        for message in [&delta, &pull, &snapshot, &request, &join, &roster] {
             let json = serde_json::to_string(message).unwrap();
             let back: SyncMessage = serde_json::from_str(&json).unwrap();
             assert_eq!(&back, message);
@@ -216,6 +264,67 @@ mod tests {
         assert!(serde_json::to_string(&request)
             .unwrap()
             .contains(r#""kind":"request""#));
+        assert!(serde_json::to_string(&join)
+            .unwrap()
+            .contains(r#""kind":"join_invite""#));
+        assert!(serde_json::to_string(&roster)
+            .unwrap()
+            .contains(r#""kind":"roster""#));
+    }
+
+    #[test]
+    fn join_invite_and_roster_validation() {
+        // 设备名安全 → 合法；空/控制字符 → 拒。
+        SyncMessage::JoinInvite {
+            domain_id: None,
+            device_name: "小李的电脑".into(),
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            SyncMessage::JoinInvite {
+                domain_id: None,
+                device_name: String::new(),
+            }
+            .validate(),
+            Err(SyncError::BadDeviceName)
+        );
+        assert_eq!(
+            SyncMessage::JoinInvite {
+                domain_id: None,
+                device_name: "bad\tname".into(),
+            }
+            .validate(),
+            Err(SyncError::BadDeviceName)
+        );
+
+        // 名册合法 / 坏成员 id → 拒。
+        SyncMessage::Roster {
+            roster: crate::invite::GroupRoster {
+                domain_id: Uuid::new_v4(),
+                domain_name: "家庭组".into(),
+                members: vec![crate::invite::RosterMember {
+                    id: "a".repeat(52),
+                    name: "群主".into(),
+                }],
+            },
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            SyncMessage::Roster {
+                roster: crate::invite::GroupRoster {
+                    domain_id: Uuid::new_v4(),
+                    domain_name: "家庭组".into(),
+                    members: vec![crate::invite::RosterMember {
+                        id: "short".into(),
+                        name: "群主".into(),
+                    }],
+                },
+            }
+            .validate(),
+            Err(SyncError::BadRoster)
+        );
     }
 
     #[test]

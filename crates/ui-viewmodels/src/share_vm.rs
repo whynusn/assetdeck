@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use share::{
-    DeviceEntry, DoneState, PeerSyncState, SendItem, SendRequest, ShareDirection, ShareOffer,
-    SyncBookState, SyncMessage, WorkerEvent,
+    DeviceEntry, DoneState, GroupRoster, PeerSyncState, RosterMember, SendItem, SendRequest,
+    ShareDirection, ShareOffer, SyncBookState, SyncMessage, WorkerEvent,
 };
 
 use crate::share_control::ShareControlVm;
@@ -139,6 +139,22 @@ pub enum ShareAction {
     /// 把控制面注册表整册推给 worker（SYNC_STATE；引擎册整体替换）。
     /// READY 时发一次，之后随控制面变更（app-ui 侧）重推。
     PushSyncState,
+    /// 把一台设备写进控制面设备册（M2 邀请流的互认入册：贴码方对签发方、
+    /// Roster 全体成员、JoinInvite 请求方——app-ui 侧执行 control.pair）。
+    PairDevice {
+        id: String,
+        name: String,
+    },
+    /// 邀请加入请求到达（M2，签发方视角）：自动互认入册 +（群组）写成员
+    /// 册并广播名册。domain_id None = 纯互认。
+    JoinRequested {
+        peer_id: String,
+        device_name: String,
+        domain_id: Option<Uuid>,
+    },
+    /// 群主名册到达（M2，成员视角）：app-ui 侧互认全体成员 + 本地建域/
+    /// 更新/移出（名册不含自己 = 被踢出信号）。
+    RosterReceived(GroupRoster),
 }
 
 /// 入口报价（待确认的来件）。
@@ -187,6 +203,13 @@ pub struct ShareVm {
     /// 未配对对端的同步报文一律丢弃（fail-closed：陌生人发来的「可得清单」
     /// 绝不进发现面）。
     trusted_peers: HashSet<String>,
+    /// 未决邀请加入（M2）：已发 JoinInvite 的签发方 id。其名册到达是引导
+    /// 握手的应答——信任收口只放行「未决加入的对端或已配对对端」。
+    pending_joins: Vec<String>,
+    /// 未读可得数（M2 共享中心角标）：对端视角新增的可得项数。打开发现
+    /// 分区（mark_offers_seen）即清零；「有新内容可取」≠自动投递素材，
+    /// 不变不变量。
+    unseen_offers: usize,
 }
 
 /// 已完结批次的保留上限（够看最近几次；再往后的历史属于记录面，M1 落库）。
@@ -215,6 +238,8 @@ impl ShareVm {
             final_keep: FINAL_KEEP,
             peer_views: BTreeMap::new(),
             trusted_peers: HashSet::new(),
+            pending_joins: Vec::new(),
+            unseen_offers: 0,
         }
     }
 
@@ -363,6 +388,63 @@ impl ShareVm {
             actions.push(ShareAction::BadgesChanged(badge_changed));
         }
         actions.push(ShareAction::Refresh);
+        actions
+    }
+
+    /// 贴入邀请码（M2 邀请流）：解析（设备/群组按形状自区分）→ 本地互认
+    /// 入册（app-ui 侧 PairDevice）+ 外拨签发方发 JoinInvite（纯 id 拨号，
+    /// pkarr 地址发现解析直连地址）。群组邀请的名册到达（Roster）前不建域。
+    pub fn join_with_invite(&mut self, code: &str) -> Vec<ShareAction> {
+        let invite = match share::parse_invite_code(code) {
+            Ok(invite) => invite,
+            Err(error) => {
+                return vec![ShareAction::Notice(
+                    TargetNoticeTone::Warning,
+                    format!("邀请码不合法：{error}"),
+                )]
+            }
+        };
+        if self.self_id.as_deref() == Some(invite.creator_id.as_str()) {
+            return vec![ShareAction::Notice(
+                TargetNoticeTone::Warning,
+                "这是本机自己的邀请码".into(),
+            )];
+        }
+        let self_name = self
+            .self_name
+            .clone()
+            .unwrap_or_else(|| "AssetDeck".to_string());
+        let message = SyncMessage::JoinInvite {
+            domain_id: invite.domain_id,
+            device_name: self_name,
+        };
+        let Ok(json) = serde_json::to_string(&message) else {
+            return vec![ShareAction::Notice(
+                TargetNoticeTone::Error,
+                "邀请请求构造失败".into(),
+            )];
+        };
+        let prefix = &invite.creator_id[..invite.creator_id.len().min(12)];
+        let mut actions = vec![
+            ShareAction::PairDevice {
+                id: invite.creator_id.clone(),
+                name: format!("设备 {prefix}"),
+            },
+            ShareAction::Send(format!("SYNC_SEND\t{}\t\t{json}", invite.creator_id)),
+        ];
+        if invite.domain_id.is_some() {
+            // 名册引导握手：未决加入标记（Roster 信任收口的应答侧锚点）。
+            self.pending_joins.push(invite.creator_id.clone());
+            actions.push(ShareAction::Notice(
+                TargetNoticeTone::Success,
+                "加入请求已发出，等待对方共享中心确认".into(),
+            ));
+        } else {
+            actions.push(ShareAction::Notice(
+                TargetNoticeTone::Success,
+                "已向对方发起互认，识别完成后可在共享中心看到对方".into(),
+            ));
+        }
         actions
     }
 
@@ -705,6 +787,21 @@ impl ShareVm {
         &self.peer_views
     }
 
+    /// 未读可得数（M2 共享中心角标）：对端视角新增的可得项累计。
+    pub fn unseen_offers(&self) -> usize {
+        self.unseen_offers
+    }
+
+    /// 打开发现分区/共享中心：未读清零（用户已看过）。
+    pub fn mark_offers_seen(&mut self) {
+        self.unseen_offers = 0;
+    }
+
+    /// 未决加入数（M2）：贴码后等待对端名册的请求条数。
+    pub fn pending_join_count(&self) -> usize {
+        self.pending_joins.len()
+    }
+
     /// 发现面打开：对已知地址的已配对对端全部补拉一轮（用户显式动作驱动，
     /// 非定时器）。无地址的对端跳过（等下次 DEVICE 命中再拉）。
     pub fn refresh_peer_views(&mut self) -> Vec<ShareAction> {
@@ -724,41 +821,84 @@ impl ShareVm {
 
     // ===== 内部 =====
 
-    /// 应用一条来自对端的同步报文（M1-b 发现面数据流）。
-    /// 信任收口：未配对对端的报文一律丢弃，绝不进视图。
+    /// 应用一条来自对端的同步报文（M1-b 发现面数据流 / M2 邀请流）。
+    /// 信任收口：未配对对端的可得性/索取报文一律丢弃，绝不进视图；
+    /// **豁免**：JoinInvite 是邀请流的引导报文（发送方尚未入册，持有
+    /// domain id 即持有邀请码）；Roster 只放行「未决 JoinInvite 的对端
+    /// （引导握手应答）或已配对对端（成员变更广播）」。
     fn apply_sync(&mut self, peer_id: String, message: SyncMessage) -> Vec<ShareAction> {
-        if !self.trusted_peers.contains(&peer_id) {
-            return Vec::new();
-        }
         match message {
-            // PULL 由 worker 在引擎内应答，不该到 UI：防御性忽略。
-            SyncMessage::Pull { .. } => Vec::new(),
-            SyncMessage::Request { asset_uuid } => {
-                // 索取审批队列：并发索取按先到先弹。信任收口已在函数头部
-                // 完成（未配对对端的索取绝不进审批框）。
-                let first = self.requests.is_empty();
-                self.requests.push(PendingRequest {
-                    peer_id,
-                    asset_uuid,
-                });
-                let mut actions = Vec::new();
-                if first {
-                    actions.push(ShareAction::OpenRequestDialog);
+            SyncMessage::JoinInvite {
+                domain_id,
+                device_name,
+            } => {
+                vec![
+                    ShareAction::JoinRequested {
+                        peer_id,
+                        device_name,
+                        domain_id,
+                    },
+                    ShareAction::Refresh,
+                ]
+            }
+            SyncMessage::Roster { roster } => {
+                let pending = self.pending_joins.iter().position(|id| *id == peer_id);
+                if pending.is_none() && !self.trusted_peers.contains(&peer_id) {
+                    return Vec::new();
                 }
-                actions.push(ShareAction::Refresh);
-                actions
+                if let Some(index) = pending {
+                    self.pending_joins.remove(index);
+                }
+                vec![ShareAction::RosterReceived(roster), ShareAction::Refresh]
             }
-            SyncMessage::Snapshot { rev, offers } => {
-                self.peer_views
-                    .insert(peer_id, PeerSyncState { rev, offers });
-                vec![ShareAction::Refresh]
+            _ => {
+                if !self.trusted_peers.contains(&peer_id) {
+                    return Vec::new();
+                }
+                match message {
+                    // PULL 由 worker 在引擎内应答，不该到 UI：防御性忽略。
+                    SyncMessage::Pull { .. } => Vec::new(),
+                    SyncMessage::Request { asset_uuid } => {
+                        // 索取审批队列：并发索取按先到先弹。信任收口已在
+                        // 函数内完成（未配对对端的索取绝不进审批框）。
+                        let first = self.requests.is_empty();
+                        self.requests.push(PendingRequest {
+                            peer_id,
+                            asset_uuid,
+                        });
+                        let mut actions = Vec::new();
+                        if first {
+                            actions.push(ShareAction::OpenRequestDialog);
+                        }
+                        actions.push(ShareAction::Refresh);
+                        actions
+                    }
+                    SyncMessage::Snapshot { rev, offers } => {
+                        // M2 角标：视角里新增的可得项计未读（打开发现分区
+                        // mark_offers_seen 即清；重放/未变的 Snapshot 不计）。
+                        let new_count = match self.peer_views.get(&peer_id) {
+                            Some(view) => offers
+                                .iter()
+                                .filter(|o| {
+                                    !view.offers.iter().any(|c| c.asset_uuid == o.asset_uuid)
+                                })
+                                .count(),
+                            None => offers.len(),
+                        };
+                        self.unseen_offers += new_count;
+                        self.peer_views
+                            .insert(peer_id, PeerSyncState { rev, offers });
+                        vec![ShareAction::Refresh]
+                    }
+                    SyncMessage::Delta {
+                        from_rev,
+                        to_rev,
+                        added,
+                        removed,
+                    } => self.apply_delta(peer_id, from_rev, to_rev, added, removed),
+                    SyncMessage::JoinInvite { .. } | SyncMessage::Roster { .. } => Vec::new(),
+                }
             }
-            SyncMessage::Delta {
-                from_rev,
-                to_rev,
-                added,
-                removed,
-            } => self.apply_delta(peer_id, from_rev, to_rev, added, removed),
         }
     }
 
@@ -777,6 +917,7 @@ impl ShareVm {
     ) -> Vec<ShareAction> {
         let Some(view) = self.peer_views.get(&peer_id) else {
             if from_rev == 0 {
+                self.unseen_offers += added.len();
                 self.peer_views.insert(
                     peer_id,
                     PeerSyncState {
@@ -806,6 +947,10 @@ impl ShareVm {
         let view = self.peer_views.get_mut(&peer_id).unwrap();
         view.offers.retain(|o| !removed.contains(&o.asset_uuid));
         for offer in added {
+            let is_new = !view.offers.iter().any(|o| o.asset_uuid == offer.asset_uuid);
+            if is_new {
+                self.unseen_offers += 1;
+            }
             view.offers.retain(|o| o.asset_uuid != offer.asset_uuid);
             view.offers.push(offer);
         }
@@ -873,6 +1018,64 @@ impl ShareVm {
             self.batches.remove(index);
         }
     }
+}
+
+/// M2 群主侧名册装配：域成员 + 群主自身（群内互享语义成立——成员本地域
+/// 含群主，向域共享即全群可达）。成员名取设备册备注名（缺席留空，接收方
+/// 回落 uuid 前缀）。域不存在返回 None。
+pub fn group_roster_of(
+    control: &ShareControlVm,
+    domain_id: Uuid,
+    self_id: &str,
+    self_name: &str,
+) -> Option<GroupRoster> {
+    let domain = control.domains().iter().find(|d| d.id == domain_id)?;
+    let mut members: Vec<RosterMember> = domain
+        .members
+        .iter()
+        .map(|id| RosterMember {
+            id: id.clone(),
+            name: control
+                .devices()
+                .get(id)
+                .map(|d| d.name.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    members.push(RosterMember {
+        id: self_id.to_string(),
+        name: self_name.to_string(),
+    });
+    Some(GroupRoster {
+        domain_id,
+        domain_name: domain.name.clone(),
+        members,
+    })
+}
+
+/// M2 名册广播行：发给 recipients ∩ 本会话已发现的设备（离线跳过——
+/// 下次成员变更广播 / 对端拉取自愈）。
+pub fn roster_send_lines(
+    devices: &[DeviceEntry],
+    roster: &GroupRoster,
+    recipients: &[String],
+) -> Vec<String> {
+    let Ok(json) = serde_json::to_string(&SyncMessage::Roster {
+        roster: roster.clone(),
+    }) else {
+        return Vec::new();
+    };
+    recipients
+        .iter()
+        .filter_map(|id| {
+            let device = devices.iter().find(|d| &d.id == id)?;
+            Some(format!(
+                "SYNC_SEND\t{}\t{}\t{json}",
+                device.id,
+                device.addrs.join(";")
+            ))
+        })
+        .collect()
 }
 
 /// D80-M1-b SYNC_STATE 行：控制面整册按设备过滤后的引擎册载荷（worker
@@ -1472,5 +1675,196 @@ mod tests {
         // 离线设备（不在 devices）跳过——断档守卫自愈。
         let lines = super::delta_sync_lines(&control, &[], prev_rev, &before, &lookup);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn join_with_invite_device_and_group_forms() {
+        let mut vm = ready_vm();
+        let creator = "d".repeat(52);
+
+        // 设备邀请码：PairDevice（互认占位名）+ JoinInvite（domain None）+ 无未决。
+        let actions = vm.join_with_invite(&creator);
+        assert!(matches!(
+            &actions[0],
+            ShareAction::PairDevice { id, .. } if *id == creator
+        ));
+        match &actions[1] {
+            ShareAction::Send(l) => {
+                assert!(l.starts_with(&format!("SYNC_SEND\t{creator}\t")));
+                assert!(l.contains(r#""kind":"join_invite""#));
+                assert!(l.contains(r#""domain_id":null"#));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(vm.pending_join_count() == 0);
+
+        // 自己的邀请码 → 拒绝。
+        let self_id = vm.self_id().unwrap().to_string();
+        let actions = vm.join_with_invite(&self_id);
+        assert!(matches!(
+            &actions[0],
+            ShareAction::Notice(TargetNoticeTone::Warning, _)
+        ));
+
+        // 群组邀请码：标记未决（名册引导握手）。
+        let domain_id = Uuid::new_v4();
+        let code = share::group_invite_code(&creator, domain_id);
+        let actions = vm.join_with_invite(&code);
+        assert!(vm.pending_join_count() == 1);
+        match &actions[1] {
+            ShareAction::Send(l) => assert!(l.contains(r#""kind":"join_invite""#)),
+            other => panic!("{other:?}"),
+        }
+
+        // 坏码 → 明确提示，不发线。
+        let actions = vm.join_with_invite("short");
+        assert!(matches!(
+            &actions[0],
+            ShareAction::Notice(TargetNoticeTone::Warning, _)
+        ));
+        assert!(vm.pending_join_count() == 1, "坏码不产生未决加入");
+    }
+
+    #[test]
+    fn roster_trust_gate_pending_and_paired() {
+        let mut vm = ready_vm();
+        let creator = "d".repeat(52);
+        let roster = share::GroupRoster {
+            domain_id: Uuid::new_v4(),
+            domain_name: "家庭组".into(),
+            members: vec![share::RosterMember {
+                id: creator.clone(),
+                name: "群主".into(),
+            }],
+        };
+
+        // 陌生人名册（无未决、未配对）：丢弃。
+        let line = format!(
+            "SYNC_RECV\t{creator}\t{}",
+            serde_json::to_string(&SyncMessage::Roster {
+                roster: roster.clone()
+            })
+            .unwrap()
+        );
+        assert!(vm.handle_line(&line).is_empty());
+
+        // 贴群组邀请码 → 未决；名册到达 → 放行并消费未决。
+        let code = share::group_invite_code(&creator, Uuid::new_v4());
+        vm.join_with_invite(&code);
+        let actions = vm.handle_line(&line);
+        assert!(actions.contains(&ShareAction::RosterReceived(roster.clone())));
+        assert!(vm.pending_join_count() == 0, "名册到达消费未决加入");
+
+        // 已配对对端的成员变更广播：信任册放行（无需未决）。
+        vm.set_trusted_peers(vec![creator.clone()]);
+        let actions = vm.handle_line(&line);
+        assert!(actions.contains(&ShareAction::RosterReceived(roster)));
+    }
+
+    #[test]
+    fn join_invite_bypasses_trust_gate_and_reaches_owner() {
+        let mut vm = ready_vm();
+        let joiner = "d".repeat(52);
+        let domain_id = Uuid::new_v4();
+        let message = SyncMessage::JoinInvite {
+            domain_id: Some(domain_id),
+            device_name: "小李的电脑".into(),
+        };
+        // 未配对对端的 JoinInvite：引导报文豁免信任门，直达签发方。
+        let actions = vm.handle_line(&format!(
+            "SYNC_RECV\t{joiner}\t{}",
+            serde_json::to_string(&message).unwrap()
+        ));
+        match &actions[0] {
+            ShareAction::JoinRequested {
+                peer_id,
+                device_name,
+                domain_id: d,
+            } => {
+                assert_eq!(peer_id, &joiner);
+                assert_eq!(device_name, "小李的电脑");
+                assert_eq!(*d, Some(domain_id));
+            }
+            other => panic!("{other:?}"),
+        }
+        // 设备名不安全 → 协议层拒绝（进不了 apply_sync）。
+        let bad = SyncMessage::JoinInvite {
+            domain_id: None,
+            device_name: "bad\tname".into(),
+        };
+        let parsed = share::parse_worker_line(&format!(
+            "SYNC_RECV\t{joiner}\t{}",
+            serde_json::to_string(&bad).unwrap()
+        ));
+        assert!(matches!(parsed, share::WorkerEvent::Unknown(_)));
+    }
+
+    #[test]
+    fn unseen_offers_count_and_mark_seen() {
+        let mut vm = ready_vm();
+        let peer = "d".repeat(52);
+        vm.set_trusted_peers(vec![peer.clone()]);
+        assert_eq!(vm.unseen_offers(), 0);
+
+        // 快照新增 2 项 → 未读 2；同一条行重放不计（视图里已有同 uuid）。
+        let line = sync_snapshot_line(&peer, 1, &["a.png", "b.png"]);
+        vm.handle_line(&line);
+        assert_eq!(vm.unseen_offers(), 2);
+        vm.handle_line(&line);
+        assert_eq!(vm.unseen_offers(), 2);
+
+        // 打开发现分区 → 清零。
+        vm.mark_offers_seen();
+        assert_eq!(vm.unseen_offers(), 0);
+
+        // Delta 新增 → 未读 +1（视图里没有的 uuid 才计）。
+        let delta = SyncMessage::Delta {
+            from_rev: 1,
+            to_rev: 2,
+            added: vec![share::ShareOffer {
+                asset_uuid: Uuid::new_v4(),
+                file_name: "c.png".into(),
+                kind: AssetKind::Image,
+                size_bytes: 1,
+            }],
+            removed: vec![],
+        };
+        vm.handle_line(&format!(
+            "SYNC_RECV\t{peer}\t{}",
+            serde_json::to_string(&delta).unwrap()
+        ));
+        assert_eq!(vm.unseen_offers(), 1);
+    }
+
+    #[test]
+    fn roster_helpers_build_and_filter() {
+        use crate::share_control::ShareControlVm;
+        let mut control = ShareControlVm::new();
+        let peer = "d".repeat(52);
+        control.pair(&peer, "小李", 1).unwrap();
+        let domain = control
+            .create_domain("家庭组", share::DomainKind::Group, vec![peer.clone()])
+            .unwrap();
+        let self_id = "e".repeat(52);
+
+        // 名册装配：域成员 + 群主自身，名字取设备册。
+        let roster = super::group_roster_of(&control, domain, &self_id, "本机").unwrap();
+        assert_eq!(roster.members.len(), 2);
+        assert_eq!(roster.members[0].id, peer);
+        assert_eq!(roster.members[0].name, "小李");
+        assert_eq!(roster.members[1].id, self_id);
+        assert_eq!(roster.members[1].name, "本机");
+
+        // 广播过滤：只有在线（devices 里有的）接收方组行。
+        let devices = vec![DeviceEntry {
+            id: peer.clone(),
+            name: "小李".into(),
+            addrs: vec!["192.168.1.8:4433".into()],
+        }];
+        let offline = "f".repeat(52);
+        let lines = super::roster_send_lines(&devices, &roster, &[peer.clone(), offline]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with(&format!("SYNC_SEND\t{peer}\t192.168.1.8:4433")));
+        assert!(lines[0].contains(r#""kind":"roster""#));
     }
 }

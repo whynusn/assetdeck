@@ -5,6 +5,7 @@
 
 pub mod domain;
 pub mod events;
+pub mod invite;
 pub mod manifest;
 pub mod pairing;
 pub mod record;
@@ -15,6 +16,9 @@ pub mod sync;
 
 pub use domain::{DomainError, DomainKind, PairedDevice, PairedDevices, ShareDomain};
 pub use events::{parse_worker_line, DoneState, ItemRole, WorkerEvent};
+pub use invite::{
+    group_invite_code, parse_invite_code, GroupRoster, InviteCode, InviteError, RosterMember,
+};
 pub use manifest::{
     safe_ext, ManifestError, ManifestItem, TransferManifest, FILE_NAME_MAX_CHARS,
     MANIFEST_MAX_ITEMS,

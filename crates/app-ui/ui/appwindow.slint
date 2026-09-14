@@ -320,15 +320,13 @@ export component AppWindow inherits Window {
         in property <string> share-summary-text: "";
 
         // —— D80-M1-b 发现面（接收侧）：谁共享了什么 + 索取审批 ——
-        // 发现面弹窗：对端行（单选）+ 其可得清单；点「索取」走审批弹窗，
-        // 对端显式同意后才推送（素材移动原语 = 推送 + 接收侧双确认）。
-        in property <bool> share-face-open: false;
+        // D80-M2 发现面已并入共享中心弹窗（模型/回调沿用 face 前缀）：
+        // 对端行（单选）+ 其可得清单；点「索取」走审批弹窗，对端显式同意
+        // 后才推送（素材移动原语 = 推送 + 接收侧双确认）。
         in property <[ShareFacePeerData]> share-face-peers;
         in property <[ShareFaceOfferData]> share-face-offers;
         in property <int> share-face-selected-peer: -1;
         in property <string> share-face-hint: "";
-        callback share-face-toggled();
-        callback share-face-closed();
         callback share-face-refresh();
         callback share-face-peer-picked(int);
         callback share-face-offer-requested(string);
@@ -359,6 +357,13 @@ export component AppWindow inherits Window {
         // M1-c 配对码：本机标识（只读可选中复制）+ 8 字符指纹（展示核对用）。
         in-out property <string> share-ctl-self-id: "";
         in property <string> share-ctl-self-code: "";
+        // D80-M2 邀请机制：顶部贴码加入（一次输入，设备/群组邀请码通吃）+
+        // 群组域邀请码展示 + 未读可得角标（接收侧盲区修复）。
+        in-out property <string> share-ctl-join-code: "";
+        in property <string> share-ctl-invite-code: "";
+        in property <int> share-ctl-unseen: 0;
+        callback share-ctl-join(string);
+        callback share-ctl-domain-invite(string);
         callback share-ctl-closed();
         callback share-ctl-device-add(string, string);
         callback share-ctl-device-remove(string);
@@ -931,7 +936,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // D80-M1-b 发现面入口：谁共享了什么（接收侧）。
+                    // D80-M2 共享中心入口（管理面 + 发现面合并体）。
                     face-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: 30px;
@@ -939,11 +944,24 @@ export component AppWindow inherits Window {
 
                         IconButton {
                             glyph: Glyph.share;
-                            tip: "共享发现：对端共享给我的可得清单";
-                            active: root.share-face-open;
+                            tip: "共享中心：邀请码加入、配对设备、共享域与发现";
+                            active: root.share-ctl-open;
                             clicked => {
-                                root.share-face-toggled();
+                                root.share-ctl-open-requested();
                             }
+                        }
+
+                        // M2 未读可得角标：红点压图标右上角，开共享中心看详情。
+                        // 8px 是「余光可辨」的下限（同 D56 更新角标）。
+                        if root.share-ctl-unseen > 0: Rectangle {
+                            x: parent.width - 9px;
+                            y: 1px;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.danger;
+                            border-width: 1px;
+                            border-color: Theme.bg-bar;
                         }
                     }
 
@@ -1613,7 +1631,7 @@ export component AppWindow inherits Window {
             || root.target-rename-open
             || root.tuning-open
             || root.share-devices-open || root.share-offer-open
-            || root.share-face-open || root.share-request-open
+            || root.share-request-open
             || root.share-domains-open || root.share-ctl-open
             || root.update-open: TouchArea {
             width: 100%;
@@ -2674,149 +2692,6 @@ export component AppWindow inherits Window {
             }
         }
 
-        // —— D80-M1-b 发现面弹窗（接收侧：谁共享了什么）——
-        // 顶部锚定 y150（仓内约定：弹窗不垂直居中）。对端行单选，选中对端
-        // 的可得清单逐行「索取」；索取走审批弹窗，不自动投递。
-        if root.share-face-open: Rectangle {
-            x: (root.width - 340px) / 2;
-            y: 150px;
-            width: 340px;
-            height: share-face-layout.preferred-height;
-            border-radius: Theme.radius-lg;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-            background: Theme.bg-overlay;
-            drop-shadow-blur: 16px;
-            drop-shadow-offset-y: 4px;
-            drop-shadow-color: Theme.scrim;
-
-            share-face-layout := VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-
-                Text {
-                    text: "共享发现";
-                    color: Theme.text;
-                    font-size: 13px;
-                    font-weight: 600;
-                }
-                Text {
-                    text: root.share-face-hint;
-                    color: Theme.text-3;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-
-                // 对端行：peer_views ∩ 已发现设备；空态文案。
-                if root.share-face-peers.length == 0: Text {
-                    text: "暂无共享——已配对对端共享素材后这里会列出";
-                    color: Theme.text-3;
-                    font-size: 11px;
-                    wrap: word-wrap;
-                }
-                for peer[i] in root.share-face-peers: Rectangle {
-                    height: 36px;
-                    border-radius: Theme.radius;
-                    border-width: peer.selected ? 1px : 0px;
-                    border-color: Theme.accent;
-                    background: peer.selected ? Theme.accent-soft : Theme.bg-raised;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 1px;
-
-                            Text {
-                                text: peer.name;
-                                color: Theme.text;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: peer.detail;
-                                color: Theme.text-3;
-                                font-size: 10px;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            root.share-face-peer-picked(i);
-                        }
-                    }
-                }
-
-                // 选中对端的可得清单：逐行「索取」。
-                if root.share-face-selected-peer >= 0 && root.share-face-offers.length == 0: Text {
-                    text: "该设备暂无共享素材";
-                    color: Theme.text-3;
-                    font-size: 11px;
-                }
-                for offer in root.share-face-offers: Rectangle {
-                    height: 36px;
-                    border-radius: Theme.radius;
-                    background: Theme.bg-raised;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 1px;
-
-                            Text {
-                                text: offer.name;
-                                color: Theme.text;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: offer.size;
-                                color: Theme.text-3;
-                                font-size: 10px;
-                                overflow: elide;
-                            }
-                        }
-
-                        Rectangle { horizontal-stretch: 1; }
-
-                        Button {
-                            height: 24px;
-                            text: "索取";
-                            clicked => {
-                                root.share-face-offer-requested(offer.asset-id);
-                            }
-                        }
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    Button {
-                        height: 30px;
-                        text: "刷新";
-                        clicked => { root.share-face-refresh(); }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        height: 30px;
-                        text: "关闭";
-                        clicked => { root.share-face-closed(); }
-                    }
-                }
-            }
-        }
-
         // —— D80-M1-b 索取审批弹窗（接收侧第二道门：同意才推送）——
         if root.share-request-open: Rectangle {
             x: (root.width - 340px) / 2;
@@ -2952,7 +2827,7 @@ export component AppWindow inherits Window {
 
                     Button {
                         height: 30px;
-                        text: "管理共享域…";
+                        text: "共享中心…";
                         clicked => { root.share-ctl-open-requested(); }
                     }
                     Rectangle { horizontal-stretch: 1; }
@@ -2984,10 +2859,29 @@ export component AppWindow inherits Window {
                 spacing: 10px;
 
                 Text {
-                    text: "共享域管理";
+                    text: "共享中心";
                     color: Theme.text;
                     font-size: 13px;
                     font-weight: 600;
+                }
+
+                // D80-M2 邀请机制：一次贴码双向互认（设备邀请码 = 52 位标识，
+                // 群组邀请码 = 群主标识.域码，单输入框通吃）。QUIC 握手证书
+                // 交换身份，群主确认后名册广播把设备带进组（O(N) 免两两配对）。
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.share-ctl-join-code;
+                        placeholder-text: "粘贴对方的邀请码加入";
+                        horizontal-stretch: 2;
+                    }
+                    Button {
+                        height: 30px;
+                        primary: true;
+                        text: "加入";
+                        clicked => { root.share-ctl-join(root.share-ctl-join-code); }
+                    }
                 }
 
                 // M1-c 配对码：本机标识只读可选中复制；8 字符配对码供两侧
@@ -3121,6 +3015,12 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; }
+                        // D80-M2 群组域邀请码：点击生成展示（发给对方即可加入）。
+                        if !domain.is-personal: Button {
+                            height: 24px;
+                            text: "邀请码";
+                            clicked => { root.share-ctl-domain-invite(domain.id); }
+                        }
                         Button {
                             height: 24px;
                             text: "删除";
@@ -3164,6 +3064,134 @@ export component AppWindow inherits Window {
                     toggled => {
                         root.share-ctl-member-toggled(member.id, self.checked);
                     }
+                }
+
+                // D80-M2 群组邀请码展示：只读可选中复制（发给对方粘贴加入）。
+                if root.share-ctl-invite-code != "": VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "本群组邀请码（发给对方，对方粘贴后等你确认）";
+                        color: Theme.text-2;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    LineEdit {
+                        text: root.share-ctl-invite-code;
+                        read-only: true;
+                    }
+                }
+
+                // —— D80-M2 发现分区（原共享发现弹窗并入）：对端行单选 +
+                // 选中对端的可得清单逐行「索取」；索取走审批弹窗，不自动投递。
+                Text {
+                    text: "来自对端的共享（发现）";
+                    color: Theme.text-2;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.share-face-hint;
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                if root.share-face-peers.length == 0: Text {
+                    text: "暂无共享——已配对对端共享素材后这里会列出";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                for peer[i] in root.share-face-peers: Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius;
+                    border-width: peer.selected ? 1px : 0px;
+                    border-color: Theme.accent;
+                    background: peer.selected ? Theme.accent-soft : Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+
+                            Text {
+                                text: peer.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: peer.detail;
+                                color: Theme.text-3;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.share-face-peer-picked(i);
+                        }
+                    }
+                }
+                if root.share-face-selected-peer >= 0 && root.share-face-offers.length == 0: Text {
+                    text: "该设备暂无共享素材";
+                    color: Theme.text-3;
+                    font-size: 11px;
+                }
+                for offer in root.share-face-offers: Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius;
+                    background: Theme.bg-raised;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+
+                            Text {
+                                text: offer.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: offer.size;
+                                color: Theme.text-3;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Button {
+                            height: 24px;
+                            text: "索取";
+                            clicked => {
+                                root.share-face-offer-requested(offer.asset-id);
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Button {
+                        height: 30px;
+                        text: "刷新发现";
+                        clicked => { root.share-face-refresh(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 HorizontalLayout {

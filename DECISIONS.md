@@ -1090,6 +1090,23 @@ if (click_count % 2) == 1 {
 - **审查修正**：before/after 设备集按下标 zip 会把 A 的 diff 算到 B 头上（unpair 错位）→ 改按 device_id 查表；lookup 闭包捕获目录句柄不可 Copy → `&impl Fn` 按引用传。
 - share 47 + ui-viewmodels 113（新增 sync_state_line/delta_sync_lines 接收方过滤 + request_asset/直发按 id + 索取入队测试）+ worker 16 lib + 2 sync E2E 全绿，workspace 门禁 + clippy 零警告。新弹窗渲染冒烟归真机批次（1:1 复用设备选择器/首连确认 chrome）。
 
+### D80-M2 邀请机制 + 共享中心 UX 合并（2026-09-14 定稿并落地）
+
+用户复盘「逐一配对 → 组域 → 释放共享」交互太难懂、N 群组 O(N²) 互认太复杂，定盘：**邀请码是信任模型的入口，一次贴码完成互认/入组**。
+
+**UX 重设计（4→2 入口 + O(N) 组网）**：
+1. **一切邀请都是 JoinInvite**：`domain_id: Option<Uuid>`（None = 纯互认双向写册；Some = 加入群组域）。设备邀请码 = 52 位标识本身；群组邀请码 = `{群主标识}.{z32(域id)}`（26 字符域码段）；**一个输入框通吃**（`parse_invite_code` 按段数/形状分流）。贴码即发 JoinInvite 同步报文——QUIC 握手证书交换身份（报文不自报身份，不可伪造），持有 domain id 即持有邀请码 = 授权（ possession = authorization）。
+2. **O(N) 组网，成员永互不配对**：群主 async-accept JoinInvite → 自动配对 + 请求方入成员册 → 名册广播给全体成员（含新成员）。成员侧收 Roster → 自动配对全员 + 建/更本地域；本地域成员 = 群主 + 其他成员，共享给本地域即达全组。被移出成员收到**不含自己**的名册 = 踢出信号（本地拆域级联撤销共享）。
+3. **入口 4→2**：素材级「共享」（逐域勾选，语义不变）+ 顶栏「共享中心」（原「共享域管理」+「共享发现」两弹窗合并：顶部贴码加入 + 本机标识/配对码 + 设备册 + 群组域（邀请码按钮）+ 成员勾选 + 底部发现分区（对端可得清单/索取））。
+4. **接收侧盲区修复**：unseen_offers 未读角标（快照/Delta 新增可得计未读，打开共享中心 `mark_offers_seen` 清零；入口 IconButton 红点，同 D56 更新角标样式）。
+
+**信任模型修订（本节取代 D80-M1 模型第 1 条的「域定义不进同步载荷」）**：名册（域成员册）**经群主显式分发**（Roster 报文）——不再是「永不出本机」，但仍是显式动作（群主广播/邀请应答），且接收侧信任收口：Roster 只放行「未决 JoinInvite 的对端（引导握手应答）或已配对对端（成员变更广播）」，陌生人 Roster 丢弃。JoinInvite 是唯一豁免信任门的报文（发送方尚未入册，贴码即授权）。D80 不变量全部保持：素材永不自动投递、素材移动原语 = 推送 + 接收侧双确认、auto-send 默认关、无中继。
+
+**落地（三批全绿）**：
+- 批1（share/worker）：`invite.rs`（group_invite_code/parse_invite_code/z32 编解码 + GroupRoster/RosterMember 校验）+ SyncMessage `JoinInvite`/`Roster` 变体（validate 走 is_safe_label/roster 形状）+ worker `target_addr` 改纯 id 外拨（iroh EndpointAddr 只带 id → pkarr 信令/DNS 地址发现，本地地址簿直连地址附加；旧实现把空地址判 None 致首连死路）。
+- 批2（ui-viewmodels/app-ui）：share_vm `join_with_invite`（解析/自码守卫/PairDevice+SYNC_SEND 组行/未决标记）、`apply_sync` 信任门重构（JoinInvite 豁免 + Roster 未决/信任册双门 + 未读计数）、`group_roster_of`（域成员 + 群主自身，群内互享语义）+ `roster_send_lines`（接收方 ∩ 在线设备）；app-ui `handle_join_requested`（群主侧：配对 → 入册 → 名册广播）、`handle_roster_received`（成员侧：自动配对 → 踢出拆域/建域/成员册更新；本地域匹配先按群主域 id 再按名——成员侧本地域 uuid 与群主不同源，记档）、`PairDevice`/`JoinRequested`/`RosterReceived` 三个 dispatch 臂（grid.sync 经 SHARE_GRID thread_local 句柄）、slint 共享中心合并 + 邀请码输入/展示 + 未读角标。
+- **记档（M2 已知边缘）**：成员侧本地域按名匹配，群主重命名域后成员变更广播将匹配失败（建出同内容新域）；跨域 uuid 映射待需要再议。名册自动配对失败（如对端已解配）仅 warn 不阻塞名册应用。
+
 **M0 冒烟风险记档（用户拍板：不等）**：M0 传输闭环代码绿（回环 E2E）但真机双机未验证、CI MSVC 首编 vendored iroh 待观察；M1 模型层与传输解耦（契约层先行），不阻塞。双机冒烟（桥接 VM 或 Termux 对端）并入 M1-a 完成后的真机批次，Termux 发现段受 Android 组播锁/路由器 AP 隔离制约的结论届时如实记录。
 
 **M0 落地（2026-09-08）**：闭环全链就位——`tools/share-worker`（iroh 引擎 + mDNS 发现 + stdin/stdout 行协议，iroh/tokio 只进此编译单元；`presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在配置层，零信令/零打洞/零中继）；`crates/share`（清单/请求/设备纯模型 + worker 事件行解析端 `events`）；ui-viewmodels `share_vm`（批次/报价/角标状态机，纯逻辑零 IO，事件流进 → `ShareAction` 副作用出）；app-ui 接线（worker 生命周期 = 主进程 stdin 管道，右键菜单「共享到设备…」id=5 追加尾 + 多选操作条「共享」→ 设备选择弹窗 → 显式推送；接收侧首连确认弹窗 → 复用 D66 归类弹窗导入流，`ImportFlow.post_phase1` 钩子回 ACK/NACK，导入成败即 worker 收尾信号）；角标真源 = VM `badge_overrides` HashMap（状态迁移点写、O(1) 查、批次 evict 不回滚），`BadgesChanged` 定向刷瓦片不整表重建；deps_guard 新增 `d80_network_stack_confined_to_share_worker`（app-ui/ui-viewmodels Cargo.toml 禁 iroh/tokio/mdns-sd）；打包 5 exe（share-worker.exe 随包）。

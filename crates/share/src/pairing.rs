@@ -8,8 +8,9 @@
 use sha2::{Digest, Sha256};
 
 /// 与设备标识一致的 z32 字母表（base32 小写字母数字表），复制粘贴兼容。
-/// 配对码只取前 32 槽（5bit 索引 0..31），尾 4 字符不参与编码。
-const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+/// 配对码只取前 32 槽（5bit 索引 0..31），尾 4 字符不参与编码；
+/// invite.rs（邀请码的域段编码）复用同一张表。
+pub const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// 配对码长度：5 字节 40 位 → 8 × 5bit。
 pub const PAIRING_CODE_LEN: usize = 8;

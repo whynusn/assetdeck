@@ -79,6 +79,9 @@ thread_local! {
     static SHARE_CONTROL_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     /// 「共享到域…」弹窗待处理的素材 uuid 文本（uuids_of 产物；关闭即弃）。
     static SHARE_DOMAIN_PENDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// 网格同步句柄（主线程 setup 建，dispatch 的 join/roster 臂取回调
+    /// grid.sync() 整体重排——Rc 非 Send，同 SHARE_VM 模式）。
+    static SHARE_GRID: RefCell<Option<Rc<GridCtx>>> = const { RefCell::new(None) };
 }
 
 /// D80 共享接线的 UI 线程侧装配件（见 [`SHARE_WIRING`]）。
@@ -1070,8 +1073,248 @@ fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareActio
             }
             ShareAction::Notice(tone, text) => show_notice(&ui, tone, text),
             ShareAction::BadgesChanged(uuids) => refresh_share_badges(&ui, &uuids),
+            ShareAction::PairDevice { id, name } => {
+                // 贴码互认：占位名配对（对端备注名由名册/设备册覆盖）。
+                let outcome = SHARE_CONTROL.with(|control| {
+                    control
+                        .borrow_mut()
+                        .pair(&id, &name, ui_viewmodels::unix_now_secs() as i64)
+                        .map(|_| ())
+                        .err()
+                });
+                match outcome {
+                    Some(error) => show_notice(&ui, TargetNoticeTone::Warning, error.to_string()),
+                    None => {
+                        persist_share_control();
+                        sync_share_trusted_peers();
+                        sync_share_ctl_ui(&ui);
+                    }
+                }
+            }
+            ShareAction::JoinRequested {
+                peer_id,
+                device_name,
+                domain_id,
+            } => handle_join_requested(&ui, &peer_id, &device_name, domain_id),
+            ShareAction::RosterReceived(roster) => handle_roster_received(&ui, roster),
         }
     }
+}
+
+/// M2 加入请求（群主侧）：配对请求方；群组邀请再把请求方加入成员册并向
+/// 全体成员（含新成员）广播名册。素材不自动投递——名册只广播可获得性上下文。
+fn handle_join_requested(
+    ui: &AppWindow,
+    peer_id: &str,
+    device_name: &str,
+    domain_id: Option<Uuid>,
+) {
+    let ts = ui_viewmodels::unix_now_secs() as i64;
+    let outcome = SHARE_CONTROL.with(|control| {
+        control
+            .borrow_mut()
+            .pair(peer_id, device_name, ts)
+            .map(|_| ())
+            .err()
+    });
+    if let Some(error) = outcome {
+        show_notice(ui, TargetNoticeTone::Warning, error.to_string());
+        return;
+    }
+    let Some(domain_id) = domain_id else {
+        // 设备邀请码（纯互认）：配对即收口。
+        show_notice(
+            ui,
+            TargetNoticeTone::Success,
+            format!("已与 {device_name} 完成互认配对"),
+        );
+        persist_share_control();
+        sync_share_trusted_peers();
+        sync_share_ctl_ui(ui);
+        return;
+    };
+    // 群组邀请：域必须存在且为群组域；请求方加入成员册。
+    let broadcast = SHARE_CONTROL.with(|control| {
+        let mut control = control.borrow_mut();
+        let domain = match control
+            .domains()
+            .iter()
+            .find(|d| d.id == domain_id && d.kind == DomainKind::Group)
+        {
+            Some(domain) => domain,
+            None => return Err("共享域不存在或不是群组域".into()),
+        };
+        let domain_name = domain.name.clone();
+        let mut members = domain.members.clone();
+        if !members.iter().any(|m| m == peer_id) {
+            members.push(peer_id.to_string());
+        }
+        match control.set_domain_members(domain_id, members) {
+            Ok(()) => Ok(domain_name),
+            Err(error) => Err(error.to_string()),
+        }
+    });
+    match broadcast {
+        Err(error) => show_notice(ui, TargetNoticeTone::Warning, error),
+        Ok(domain_name) => {
+            persist_share_control();
+            sync_share_trusted_peers();
+            // 名册广播：域成员（含新成员）∩ 在线设备组 SYNC_SEND 行。
+            let devices = SHARE_VM.with(|vm| vm.borrow().devices().to_vec());
+            let self_id = SHARE_VM.with(|vm| {
+                vm.borrow()
+                    .self_id()
+                    .map(str::to_string)
+                    .unwrap_or_default()
+            });
+            let self_name = SHARE_VM.with(|vm| {
+                vm.borrow()
+                    .self_name()
+                    .map(str::to_string)
+                    .unwrap_or_default()
+            });
+            let lines = SHARE_CONTROL.with(|control| {
+                let control = control.borrow();
+                let recipients = control
+                    .domains()
+                    .iter()
+                    .find(|d| d.id == domain_id)
+                    .map(|d| d.members.clone())
+                    .unwrap_or_default();
+                ui_viewmodels::group_roster_of(&control, domain_id, &self_id, &self_name)
+                    .map(|roster| ui_viewmodels::roster_send_lines(&devices, &roster, &recipients))
+                    .unwrap_or_default()
+            });
+            for line in lines {
+                share_write_line(&line);
+            }
+            show_notice(
+                ui,
+                TargetNoticeTone::Success,
+                format!("{device_name} 已加入「{domain_name}」并广播名册"),
+            );
+            sync_share_ctl_ui(ui);
+            SHARE_GRID.with(|slot| {
+                if let Some(grid) = slot.borrow().as_ref() {
+                    grid.sync();
+                }
+            });
+        }
+    }
+}
+
+/// M2 名册接收（成员侧）：自动配对名册全员；本机不在册且本地有该域 =
+/// 踢出信号（拆域）；否则建域或整体替换成员册。域匹配先按 id 再按名
+/// （成员侧本地域 uuid 与群主不同，建域名册同源）。
+fn handle_roster_received(ui: &AppWindow, roster: ui_viewmodels::GroupRoster) {
+    let ts = ui_viewmodels::unix_now_secs() as i64;
+    let self_id = SHARE_VM.with(|vm| vm.borrow().self_id().map(str::to_string));
+    let self_in = self_id
+        .as_deref()
+        .map(|id| roster.members.iter().any(|m| m.id == id))
+        .unwrap_or(false);
+
+    // 1) 自动配对：未配对的名册成员逐个补（占位名 = 名册名，空名回落前缀）。
+    for member in &roster.members {
+        let exists = SHARE_CONTROL
+            .with(|control| control.borrow().devices().get(member.id.as_str()).is_some());
+        if exists {
+            continue;
+        }
+        let fallback = format!(
+            "设备 {}",
+            ui_viewmodels::pairing_code(&member.id).to_uppercase()
+        );
+        let name = if member.name.is_empty() {
+            fallback
+        } else {
+            member.name.clone()
+        };
+        let outcome = SHARE_CONTROL.with(|control| {
+            control
+                .borrow_mut()
+                .pair(&member.id, &name, ts)
+                .map(|_| ())
+                .err()
+        });
+        if let Some(error) = outcome {
+            logging::warn!("名册自动配对失败 {}: {error}", member.id);
+        }
+    }
+
+    // 2) 定位本地域：先按群主域 id，再按名（同源建域）。借用不出
+    // with 块（or_else 跨临时借不动），两段各自收拢为 Option<Uuid>。
+    let local = SHARE_CONTROL
+        .with(|control| {
+            let control = control.borrow();
+            control
+                .domains()
+                .iter()
+                .find(|d| d.kind == DomainKind::Group && d.id == roster.domain_id)
+                .map(|d| d.id)
+        })
+        .or_else(|| {
+            SHARE_CONTROL.with(|control| {
+                control
+                    .borrow()
+                    .domains()
+                    .iter()
+                    .find(|d| d.kind == DomainKind::Group && d.name == roster.domain_name)
+                    .map(|d| d.id)
+            })
+        });
+
+    match (self_in, local) {
+        (false, Some(local)) => {
+            // 踢出信号：名册没有本机，本地域拆壳（级联撤销共享事实）。
+            SHARE_CONTROL.with(|control| control.borrow_mut().remove_domain(local));
+            persist_share_control();
+            show_notice(
+                ui,
+                TargetNoticeTone::Warning,
+                format!("已被移出共享域「{}」", roster.domain_name),
+            );
+        }
+        (true, Some(local)) => {
+            let members: Vec<String> = roster.members.iter().map(|m| m.id.clone()).collect();
+            let outcome = SHARE_CONTROL.with(|control| {
+                control
+                    .borrow_mut()
+                    .set_domain_members(local, members)
+                    .err()
+            });
+            if let Some(error) = outcome {
+                show_notice(ui, TargetNoticeTone::Warning, error.to_string());
+            }
+            persist_share_control();
+        }
+        (true, None) => {
+            let members: Vec<String> = roster.members.iter().map(|m| m.id.clone()).collect();
+            let outcome = SHARE_CONTROL.with(|control| {
+                control
+                    .borrow_mut()
+                    .create_domain(&roster.domain_name, DomainKind::Group, members)
+                    .err()
+            });
+            if let Some(error) = outcome {
+                show_notice(ui, TargetNoticeTone::Warning, error.to_string());
+            }
+            persist_share_control();
+            show_notice(
+                ui,
+                TargetNoticeTone::Success,
+                format!("已加入共享域「{}」", roster.domain_name),
+            );
+        }
+        (false, None) => {}
+    }
+    sync_share_trusted_peers();
+    sync_share_ctl_ui(ui);
+    SHARE_GRID.with(|slot| {
+        if let Some(grid) = slot.borrow().as_ref() {
+            grid.sync();
+        }
+    });
 }
 
 /// 按 VM 真值回填共享相关 UI 属性（设备表/单选/扫描态/报价/摘要/弹窗开合）。
@@ -1084,6 +1327,8 @@ fn sync_share_ui(ui: &AppWindow) {
         ui.set_share_selected_device(vm.picker_selected().map(|i| i as i32).unwrap_or(-1));
         ui.set_share_offer_text(vm.offer_text().unwrap_or_default().into());
         ui.set_share_summary_text(vm.active_summary().unwrap_or_default().into());
+        // M2 共享中心角标：未读可得数（打开共享中心即清零）。
+        ui.set_share_ctl_unseen(vm.unseen_offers() as i32);
         if let Some(wiring) = wiring {
             let rows: Vec<ShareDeviceData> = vm
                 .devices()
@@ -1321,6 +1566,11 @@ fn sync_share_ctl_ui(ui: &AppWindow) {
             None => Vec::new(),
         };
         ui.set_share_ctl_members(ModelRc::from(Rc::new(VecModel::from(members))));
+    });
+    // M2 共享中心即发现面合并体：打开期间未读恒 0（打开动作已 mark）。
+    SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        ui.set_share_ctl_unseen(vm.unseen_offers() as i32);
     });
 }
 
@@ -2499,6 +2749,7 @@ fn main() {
         thumb_cache.clone(),
         share_vm.clone(),
     ));
+    SHARE_GRID.with(|slot| *slot.borrow_mut() = Some(grid.clone()));
 
     // 用户画像损坏不得拖垮主程序：退回内置画像并留痕（内置画像有编译期测试兜底）。
     // D76.4：手编文件之上再拼接设置面板管理的「上框点位」覆盖（settings.toml，
@@ -3256,6 +3507,12 @@ fn main() {
             if let Some(ui) = crud.ui.upgrade() {
                 ui.set_share_ctl_open(true);
                 ui.set_share_ctl_selected_domain(-1);
+                // M2 共享中心 = 管理面 + 发现面合并体：打开即未读清零
+                // （用户已看过）+ 全量补拉一轮（用户显式动作驱动，非定时器）。
+                SHARE_VM.with(|vm| vm.borrow_mut().mark_offers_seen());
+                let actions = SHARE_VM.with(|vm| vm.borrow_mut().refresh_peer_views());
+                dispatch_share_actions(&crud.ui, actions);
+                sync_share_face_ui(&ui);
                 sync_share_ctl_ui(&ui);
             }
         });
@@ -3452,34 +3709,56 @@ fn main() {
         });
     }
 
-    // —— D80-M1-b 发现面（接收侧）回调：视图 + 索取 + 审批 ——
+    // —— D80-M2 邀请码回调：加入 + 域邀请码生成 ——
     {
         let crud = crud.clone();
-        app.on_share_face_toggled(move || {
+        app.on_share_ctl_join(move |code| {
             let Some(ui) = crud.ui.upgrade() else { return };
-            if ui.get_share_face_open() {
-                ui.set_share_face_open(false);
-                ui.set_share_face_selected_peer(-1);
+            let actions = SHARE_VM.with(|vm| vm.borrow_mut().join_with_invite(code.as_str()));
+            let sent = actions.iter().any(|a| matches!(a, ShareAction::Send(_)));
+            dispatch_share_actions(&crud.ui, actions);
+            // 发出即清空输入框（失败留码便于改正重试）。
+            if sent {
+                ui.set_share_ctl_join_code("".into());
+            }
+            sync_share_ctl_ui(&ui);
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_domain_invite(move |domain_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            let Ok(domain_id) = Uuid::parse_str(domain_id.as_str()) else {
+                return;
+            };
+            // M1-c 个人域没有邀请码（单设备专属）；群组邀请码 = 群主 id.z32(域id)。
+            let is_group = SHARE_CONTROL.with(|control| {
+                control
+                    .borrow()
+                    .domains()
+                    .iter()
+                    .any(|d| d.id == domain_id && d.kind == DomainKind::Group)
+            });
+            if !is_group {
+                show_notice(&ui, TargetNoticeTone::Warning, "个人域没有邀请码".into());
                 return;
             }
-            ui.set_share_face_open(true);
-            ui.set_share_face_selected_peer(-1);
-            sync_share_face_ui(&ui);
-            // 打开即全量补拉一轮（用户显式动作驱动，非定时器；断档自愈的
-            // 主动形态）。离线对端无地址跳过，等 DEVICE 命中补拉。
-            let actions = SHARE_VM.with(|vm| vm.borrow_mut().refresh_peer_views());
-            dispatch_share_actions(&crud.ui, actions);
-        });
-    }
-    {
-        let crud = crud.clone();
-        app.on_share_face_closed(move || {
-            if let Some(ui) = crud.ui.upgrade() {
-                ui.set_share_face_open(false);
-                ui.set_share_face_selected_peer(-1);
+            let self_id = SHARE_VM.with(|vm| {
+                vm.borrow()
+                    .self_id()
+                    .map(str::to_string)
+                    .unwrap_or_default()
+            });
+            if self_id.is_empty() {
+                show_notice(&ui, TargetNoticeTone::Warning, "共享通道未就绪".into());
+                return;
             }
+            let code = ui_viewmodels::group_invite_code(&self_id, domain_id);
+            ui.set_share_ctl_invite_code(code.into());
         });
     }
+
+    // —— D80-M1-b 发现面（接收侧）回调：视图 + 索取 + 审批 ——
     {
         let crud = crud.clone();
         app.on_share_face_refresh(move || {

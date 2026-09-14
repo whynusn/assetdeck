@@ -59,18 +59,18 @@ fn parse_staging_root(args: &[String]) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// 设备表 → EndpointAddr（id + 直连地址）。地址全非法 = None。
+/// 设备表 → EndpointAddr（id + 直连地址）。地址全非法或为空时仍以纯 id
+/// 拨号（M1-c pkarr 信令/DNS 地址发现 + 本地地址簿缓存解析直连地址——
+/// 邀请流的贴码方就是靠这条路径首次连上签发方）。
 fn target_addr(id_z32: &str, addrs: &[String]) -> Option<EndpointAddr> {
     let id: EndpointId = EndpointId::from_z32(id_z32).ok()?;
     let mut addr = EndpointAddr::new(id);
-    let mut any = false;
     for value in addrs {
         if let Ok(socket) = value.parse::<SocketAddr>() {
             addr = addr.with_ip_addr(socket);
-            any = true;
         }
     }
-    any.then_some(addr)
+    Some(addr)
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -393,8 +393,9 @@ mod tests {
         // 52 个 'a' 不是合法 z32 编码的 ed25519 公钥形状时，from_z32 可能
         // 报错——只断言「全非法地址 = None」这条不依赖 id 有效性的分支。
         if id.is_some() {
-            assert!(target_addr(&"a".repeat(52), &[]).is_none());
-            assert!(target_addr(&"a".repeat(52), &["garbage".into()]).is_none());
+            // M2：地址为空时仍以纯 id 拨号（pkarr/DNS 地址发现解析直连地址）。
+            assert!(target_addr(&"a".repeat(52), &[]).is_some());
+            assert!(target_addr(&"a".repeat(52), &["garbage".into()]).is_some());
         }
         assert!(target_addr("short", &["1.2.3.4:5".into()]).is_none());
     }
