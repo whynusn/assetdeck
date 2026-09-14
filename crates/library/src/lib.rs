@@ -1092,7 +1092,10 @@ mod tests {
         let meta = library.store().get_asset(&uuid).unwrap().unwrap();
         let copy = root.join(&meta.rel_path);
         assert!(copy.is_file(), "库内正本必须已落盘: {}", copy.display());
-        assert!(fs::read(&copy).unwrap() == fs::read(&source).unwrap(), "库内正本与源内容一致");
+        assert!(
+            fs::read(&copy).unwrap() == fs::read(&source).unwrap(),
+            "库内正本与源内容一致"
+        );
 
         // 删除源文件：素材行与库内正本都不受影响。
         fs::remove_file(&source).unwrap();

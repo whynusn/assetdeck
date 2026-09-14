@@ -176,7 +176,11 @@ fn backpressure_rejects_beyond_capacity_under_concurrency() {
     // 尝试文件预建（循环内不做任何文件 IO，第一次 enqueue 紧跟 spawn）。
     let mut attempts: Vec<PathBuf> = Vec::new();
     for i in 0..300 {
-        attempts.push(make_png(dir.path(), &format!("bp{i}.png"), 60 + (i % 30) as u8));
+        attempts.push(make_png(
+            dir.path(),
+            &format!("bp{i}.png"),
+            60 + (i % 30) as u8,
+        ));
     }
 
     // 7.9MB 文本（上限 8MB）：读 + 归一化 + 写盘，拉长在途窗口。
