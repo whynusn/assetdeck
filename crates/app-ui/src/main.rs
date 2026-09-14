@@ -4357,6 +4357,83 @@ fn main() {
         });
     }
 
+    // 手动刷新（导入菜单第三项）：立即整库重载对齐界面，再重跑缩略图派生
+    // 只补缺失（derive-thumbs 对已有缩略图的素材跳过）——派生被中断、工具
+    // 缺失后补装、外部改库等场景的自助恢复入口。借用 importing 旗标防并发。
+    {
+        let ui = app.as_weak();
+        let vm = vm.clone();
+        let thumbs = real_resolver.clone();
+        let library_root = library_root.clone();
+        let filter_categories = filter_categories.clone();
+        let cache = thumb_cache.clone();
+        let grid = grid.clone();
+        let importing = importing.clone();
+        let settings = settings.clone();
+
+        app.on_refresh_library_requested(move || {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            if importing.load(Ordering::SeqCst) {
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "正在导入/刷新素材，请等进度条结束后再操作".to_string(),
+                );
+                return;
+            }
+            let root = library_root
+                .clone()
+                .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+            // 立即整库重载：与库状态对齐（与 on_thumbnails_generated 同路径）。
+            match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
+                Ok((index, resolver)) => {
+                    let names = resolver.category_names();
+                    let counts = category_counts_for(&resolver, &names);
+                    apply_categories(&ui, &filter_categories, &names, &counts);
+
+                    let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
+                    new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
+                    if let Ok(aspects) = resolver.aspects() {
+                        new_vm.set_aspects(aspects);
+                    }
+                    *vm.borrow_mut() = new_vm;
+                    *thumbs.borrow_mut() = Some(resolver);
+                    cache.borrow_mut().clear();
+                    ui.set_content_y(0.0);
+                    sync_counts(&ui, vm.borrow().total(), true);
+                    grid.sync();
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Success,
+                        "素材库已刷新，正在补齐缺失缩略图...".to_string(),
+                    );
+                }
+                Err(error) => {
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Error,
+                        format!("刷新素材库失败: {error}"),
+                    );
+                    return;
+                }
+            }
+            // 重跑缩略图派生：只补缺失，结束统一整库重载（进度条由
+            // on_thumbnail_progress 驱动、on_thumbnails_generated 收尾）。
+            importing.store(true, Ordering::SeqCst);
+            ui.set_progress_visible(true);
+            ui.set_progress_percent(0.0);
+            ui.set_progress_text("正在刷新缩略图...".into());
+            spawn_derive_thumbs(
+                ui.as_weak(),
+                root,
+                settings.borrow().fast_import_mode,
+                std::sync::Arc::clone(&importing),
+            );
+        });
+    }
+
     // 分类侧栏拖宽结束：松手才写盘（拖动过程只动内存属性，避免每帧 IO）。
     {
         let settings = settings.clone();
@@ -5468,12 +5545,9 @@ fn spawn_import_pipeline(
 
     let weak = ui.clone();
     let root_thread = root;
-    let derive = helper_exe("derive-thumbs.exe");
-    let worker = helper_exe("decode-worker.exe");
     let weak_progress = weak.clone();
     importing.store(true, Ordering::SeqCst);
     let importing_phase1 = Arc::clone(&importing);
-    let importing_phase2 = Arc::clone(&importing);
 
     // D37/D38：日志约定传给子进程（derive-thumbs / decode-worker 读 env）；
     // 导入档位（--mode）已由调用方拼进 import_args。
@@ -5586,12 +5660,10 @@ fn spawn_import_pipeline(
         })
         .with_finished(move |success, message| {
             let weak = weak.clone();
-            let derive = derive.clone();
-            let worker = worker.clone();
             let root_thread = root_thread.clone();
             let weak_invoke = weak.clone();
             let importing_phase1 = Arc::clone(&importing_phase1);
-            let importing_phase2 = Arc::clone(&importing_phase2);
+            let importing_phase2 = Arc::clone(&importing);
             let post_hook = post_phase1.clone();
             let done_stats_finished = Arc::clone(&done_stats);
             let result_items_finished = Arc::clone(&result_items);
@@ -5678,82 +5750,99 @@ fn spawn_import_pipeline(
                 }
             });
 
-            // 阶段二：缩略图派生（同一编排器；仅当阶段一成功；缺工具时 UI 直接收尾）。
+            // 阶段二：缩略图派生（仅当阶段一成功；共用编排器，手动刷新同路）。
             // 失败分支绝不刷新库：那是误导性「下无 meta.db」报错的旧来源。
             if !success {
                 return;
             }
-            if !derive.is_file() || !worker.is_file() {
-                importing.store(false, Ordering::SeqCst);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.invoke_thumbnails_generated();
+            spawn_derive_thumbs(weak, root_thread, fast_import_mode, importing_phase2);
+        })
+        .run_in_background();
+}
+
+/// 阶段二：缩略图派生子进程（导入编排与手动刷新共用）。
+///
+/// 进度条开/收与库重载由回调统一处理：进度走 `on_thumbnail_progress`，
+/// 结束统一 `invoke_thumbnails_generated`（壳层在那里整库重载并收进度条）。
+/// `importing` 旗标在结束（含缺工具收尾）时清零——手动刷新借用同一条旗标
+/// 防并发导入。缺工具时 UI 直接收尾：素材已入库是事实，缩略图暂缺如实提示。
+fn spawn_derive_thumbs(
+    ui: slint::Weak<AppWindow>,
+    root: String,
+    fast_import_mode: bool,
+    importing: std::sync::Arc<AtomicBool>,
+) {
+    let weak = ui;
+    let derive = helper_exe("derive-thumbs.exe");
+    let worker = helper_exe("decode-worker.exe");
+    if !derive.is_file() || !worker.is_file() {
+        importing.store(false, Ordering::SeqCst);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_thumbnails_generated();
+                show_notice(
+                    &ui,
+                    TargetNoticeTone::Warning,
+                    "未找到缩略图工具（derive-thumbs/decode-worker），
+ 缩略图暂缺；请使用完整安装包运行"
+                        .to_string(),
+                );
+            }
+        });
+        return;
+    }
+    // D37 档位沿用：派生速度与导入档一致（设置在启动后可改，按当前值）。
+    let mode_arg: &'static str = if fast_import_mode {
+        "fast"
+    } else {
+        "background"
+    };
+    let weak_derived_progress = weak.clone();
+    let weak_derived_finished = weak.clone();
+    let mut task = ChildTask::new(
+        derive,
+        vec![
+            "--library".into(),
+            root,
+            "--worker-exe".into(),
+            worker.to_string_lossy().into_owned(),
+            "--mode".into(),
+            mode_arg.to_string(),
+        ],
+    );
+    if let Some(dir) = logging::logs_dir() {
+        task = task
+            .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
+            .with_env("DSH_LOG_LEVEL", logging::current_level().as_str());
+    }
+    task = task.with_line(move |line| logging::info!("derive-thumbs: {line}"));
+    let _ = task
+        .with_progress(move |done, total| {
+            let weak = weak_derived_progress.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_thumbnail_progress(done as i32, total as i32);
+                }
+            });
+        })
+        .with_finished(move |success, message| {
+            // 缩略图成败都不改变「素材已在库」的事实：都触发一次库重载；
+            // 但失败原因要浮出来——「N 个素材缩略图派生失败」对用户不可见
+            // 是旧缺陷（`_success, _message` 直接吞掉）。
+            importing.store(false, Ordering::SeqCst);
+            let weak = weak_derived_finished.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_thumbnails_generated();
+                    if !success && !message.trim().is_empty() {
                         show_notice(
                             &ui,
                             TargetNoticeTone::Warning,
-                            "素材已导入，但未找到缩略图工具（derive-thumbs/decode-worker），
- 缩略图暂缺；请使用完整安装包运行"
-                                .to_string(),
+                            format!("缩略图派生未全部成功：{}", message.trim()),
                         );
                     }
-                });
-                return;
-            }
-            // D37 档位沿用：派生速度与导入档一致（设置在启动后可改，按当前值）。
-            let mode_arg: &'static str = if fast_import_mode {
-                "fast"
-            } else {
-                "background"
-            };
-            let weak_derived_progress = weak.clone();
-            let weak_derived_finished = weak.clone();
-            let mut phase2_task = ChildTask::new(
-                derive,
-                vec![
-                    "--library".into(),
-                    root_thread,
-                    "--worker-exe".into(),
-                    worker.to_string_lossy().into_owned(),
-                    "--mode".into(),
-                    mode_arg.to_string(),
-                ],
-            );
-            if let Some(dir) = logs_dir_arg.clone() {
-                phase2_task = phase2_task
-                    .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
-                    .with_env("DSH_LOG_LEVEL", log_level_arg);
-            }
-            phase2_task =
-                phase2_task.with_line(move |line| logging::info!("derive-thumbs: {line}"));
-            let _ = phase2_task
-                .with_progress(move |done, total| {
-                    let weak = weak_derived_progress.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.invoke_thumbnail_progress(done as i32, total as i32);
-                        }
-                    });
-                })
-                .with_finished(move |success, message| {
-                    // 缩略图成败都不改变「导入已完成」的事实：都触发一次库重载；
-                    // 但失败原因要浮出来——旧实现 `_success, _message` 直接吞掉，
-                    // 「N 个素材缩略图派生失败」对用户完全不可见。
-                    importing_phase2.store(false, Ordering::SeqCst);
-                    let weak = weak_derived_finished.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.invoke_thumbnails_generated();
-                            if !success && !message.trim().is_empty() {
-                                show_notice(
-                                    &ui,
-                                    TargetNoticeTone::Warning,
-                                    format!("缩略图派生未全部成功：{}", message.trim()),
-                                );
-                            }
-                        }
-                    });
-                })
-                .run_in_background();
+                }
+            });
         })
         .run_in_background();
 }

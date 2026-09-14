@@ -130,12 +130,14 @@ fn duplicate_byte_identical_image_rejected_no_second_copy() {
 }
 
 #[test]
-fn async_copy_metadata_visible_before_done() {
+fn enqueue_returns_only_after_bytes_and_meta_committed() {
+    // 全量导入（拷贝先行）：enqueue 返回 = 字节已落库 + 元数据已可见。
+    // 旧实现（元数据先行、拷贝异步）在「返回」与「字节落盘」之间留有窗口期，
+    // 用户此刻删除源文件即丢素材（真实用户事故）；此处钉死新不变式。
     let dir = tempfile::tempdir().unwrap();
     let big_source = make_png(dir.path(), "big.png", 77);
     let lib_dir = dir.path().join("library");
     let lib = Library::open(&lib_dir).unwrap();
-    lib.set_paused(true);
 
     let t = expect_ticket(
         lib.enqueue(ImportRequest {
@@ -146,45 +148,71 @@ fn async_copy_metadata_visible_before_done() {
         .unwrap(),
     );
     assert!(
-        lib.store().get_asset(&t.uuid).unwrap().is_some(),
-        "元数据必须在拷贝开始前即可查（D7 体感瞬时入库）"
+        matches!(lib.state_of(&t), Some(CopyState::Done)),
+        "enqueue 返回即应到 Done 终态，实际 {:?}",
+        lib.state_of(&t)
     );
-
-    lib.set_paused(false);
-    wait_for(&lib, &t, |s| matches!(s, CopyState::Done));
+    assert!(
+        lib.store().get_asset(&t.uuid).unwrap().is_some(),
+        "enqueue 返回时元数据必须已可见（D7 体感瞬时入库）"
+    );
+    assert!(
+        lib_dir
+            .join(format!("objects/{}/raw.png", t.uuid))
+            .is_file(),
+        "enqueue 返回时库内正本必须已落盘（全量导入）"
+    );
 }
 
 #[test]
-fn copy_queue_respects_backpressure_cap() {
+fn backpressure_rejects_beyond_capacity_under_concurrency() {
+    // 同步拷贝下 backpressure 按「并发在途 enqueue 数」计：cap=1 且另一路
+    // 拷贝未完成时，后来的 enqueue 必须被拒。大文本素材拉长拷贝窗口；
+    // 尝试文件全部预建，spawn 后立刻连发，首试必落在大拷贝在途窗口内。
     let dir = tempfile::tempdir().unwrap();
     let lib_dir = dir.path().join("library");
-    let lib = Library::open_with_capacity(&lib_dir, 1).unwrap();
-    lib.set_paused(true);
+    let lib = std::sync::Arc::new(Library::open_with_capacity(&lib_dir, 1).unwrap());
 
-    let src0 = make_png(dir.path(), "bp0.png", 60);
-    let outcome = lib
-        .enqueue(ImportRequest {
-            source: src0,
-            category: None,
-            tags: vec![],
-        })
-        .unwrap();
-    assert!(matches!(outcome, EnqueueOutcome::Ticket { .. }));
+    // 尝试文件预建（循环内不做任何文件 IO，第一次 enqueue 紧跟 spawn）。
+    let mut attempts: Vec<PathBuf> = Vec::new();
+    for i in 0..300 {
+        attempts.push(make_png(dir.path(), &format!("bp{i}.png"), 60 + (i % 30) as u8));
+    }
 
-    let src1 = make_png(dir.path(), "bp1.png", 61);
-    let outcome = lib
-        .enqueue(ImportRequest {
-            source: src1,
-            category: None,
-            tags: vec![],
-        })
-        .unwrap();
+    // 7.9MB 文本（上限 8MB）：读 + 归一化 + 写盘，拉长在途窗口。
+    let big = dir.path().join("big.txt");
+    std::fs::write(&big, vec![b'x'; 7936 * 1024]).unwrap();
+    let lib_for_worker = std::sync::Arc::clone(&lib);
+    let big_for_worker = big.clone();
+    let worker = std::thread::spawn(move || {
+        lib_for_worker
+            .enqueue(ImportRequest {
+                source: big_for_worker,
+                category: None,
+                tags: vec![],
+            })
+            .unwrap()
+    });
+
+    let mut saw_backpressure = false;
+    for src in &attempts {
+        let outcome = lib
+            .enqueue(ImportRequest {
+                source: src.clone(),
+                category: None,
+                tags: vec![],
+            })
+            .unwrap();
+        if matches!(outcome, EnqueueOutcome::Backpressure) {
+            saw_backpressure = true;
+            break;
+        }
+    }
     assert!(
-        matches!(outcome, EnqueueOutcome::Backpressure),
-        "cap=1 且任务未消费时必须背压拒绝，实际 {outcome:?}"
+        saw_backpressure,
+        "cap=1 且大拷贝在途时必须观察到一次背压拒绝"
     );
-
-    lib.set_paused(false);
+    let _ = worker.join().unwrap();
 }
 
 #[test]

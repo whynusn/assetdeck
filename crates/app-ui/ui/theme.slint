@@ -101,6 +101,8 @@ export global Glyph {
     out property <string> file-text: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5M9 12H15.5M9 15.5H15.5M9 19H12.5";
     out property <string> film: "M4.5 4.5H19.5V19.5H4.5ZM7 4.5V19.5M17 4.5V19.5M7 9.5H4.5M7 14.5H4.5M19.5 9.5H17M19.5 14.5H17";
     out property <string> file: "M6.5 3.5H14L18.5 8V20.5H6.5ZM14 3.5V8H18.5";
+    // 刷新：圆弧 + 箭头（ clockwise 开口在右上，箭头指向弧线末端）。
+    out property <string> refresh: "M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.8 3.6v3.4h-3.4";
 }
 
 // 图标按钮：无文字的方形按钮，语义交给 Tooltip，界面上不再堆说明文本。

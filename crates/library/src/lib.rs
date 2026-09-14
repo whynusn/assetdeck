@@ -1,4 +1,4 @@
-//! .library 管理、异步拷贝队列与导入编排。
+//! .library 管理与导入编排（全量导入：拷贝先行、元数据后提交）。
 //!
 //! 素材类别判定收敛到 media 注册表；分类推断收敛到 [`rules`]（CategoryRule）。
 
@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use domain::AssetKind;
@@ -191,47 +190,25 @@ pub enum CopyState {
     Failed(String),
 }
 
-struct CopyJob {
-    ticket_id: u64,
-    uuid: String,
-    source: PathBuf,
-    dest: PathBuf,
-    total: u64,
-    /// 会话内登记的 phash u64 值（无 phash 的素材为 None）；失败回滚精确清除用。
-    session_hash: Option<u64>,
-    /// 会话内登记的内容摘要（仅非图片素材，D61）；失败回滚精确清除用。
-    content_hash: Option<[u8; 32]>,
-}
-
 /// 元数据写线程的批量操作。导入数万条时逐行 autocommit 在 Windows 上每行
 /// 一次 fsync（实测 ~4ms/行），攒批共享一次事务提交是恢复秒级入库的关键。
 enum DbOp {
-    Upsert {
-        ticket: u64,
-        meta: store::AssetMeta,
-    },
-    /// 删除残留行（拷贝失败回滚）。排进同一队列保证与潜在 Upsert 的先后序，
-    /// 避免「先删后插」复活幽灵行。
-    Tombstone {
-        uuid: String,
-    },
+    Upsert { ticket: u64, meta: store::AssetMeta },
 }
 
 struct Shared {
-    queue: VecDeque<CopyJob>,
     states: HashMap<u64, CopyState>,
     active: usize,
-    paused: bool,
-    /// 元数据已提交（或该票已确认无需提交）的 ticket 集合：拷贝线程把 Done
+    /// 元数据已提交（或该票已确认无需提交）的 ticket 集合：enqueue 把 Done
     /// 的确认权押在这里——文件落盘不算完成，元数据行也必须已在库里（D7「无半成品」）。
     meta_ready: HashSet<u64>,
 }
 
 static TICKET_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// 导入速度档位（D37）：前台高速 vs 后台安静。
+/// 导入速度档位（D37）。
 ///
-/// Fast：多线程拷贝 + 大批量事务 + 全并发解码；用户显式点了导入按钮并盯着
+/// Fast：大批量事务 + 全并发解码 + 高背压上限；用户显式点了导入按钮并盯着
 /// 进度条，此时吞吐优先。Background：小并发低调跑，少抢磁盘/CPU，供将来
 /// 「闲时补导/同步」类场景使用。CLI 缺省为 Fast。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,8 +222,6 @@ pub enum ImportMode {
 pub struct LibraryConfig {
     /// 在途上限（背压）。调用方按 capacity 收敛未完成票数。
     pub capacity: usize,
-    /// 并发拷贝线程数。1 恢复旧的串行语义。
-    pub copy_workers: usize,
     /// 元数据攒批阈值：写线程最多积攒这么多行再合并成一次事务提交。
     /// usize::MAX 表示不经队列直接同步写（旧语义，测试对照用）。
     pub meta_batch: usize,
@@ -258,12 +233,8 @@ pub struct LibraryConfig {
 impl LibraryConfig {
     /// 前台高速导入默认值：面向一次性数万条的目标场景。
     pub fn fast() -> Self {
-        let cores = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2);
         LibraryConfig {
             capacity: 64,
-            copy_workers: cores.clamp(2, 8),
             meta_batch: 256,
             memory_phash_index: true,
         }
@@ -273,7 +244,6 @@ impl LibraryConfig {
     pub fn background() -> Self {
         LibraryConfig {
             capacity: 16,
-            copy_workers: 1,
             meta_batch: 64,
             memory_phash_index: true,
         }
@@ -341,12 +311,11 @@ type DbQueueLock = Arc<(Mutex<VecDeque<DbOp>>, Condvar)>;
 
 impl Library {
     pub fn open(root: &Path) -> Result<Self> {
-        // 与历史版本完全一致的默认形态：容量 16、单拷贝线程；内存索引开启。
+        // 与历史版本完全一致的默认形态：容量 16；内存索引开启。
         Self::build(
             root,
             LibraryConfig {
                 capacity: 16,
-                copy_workers: 1,
                 meta_batch: 128,
                 memory_phash_index: true,
             },
@@ -359,7 +328,6 @@ impl Library {
             root,
             LibraryConfig {
                 capacity,
-                copy_workers: 1,
                 meta_batch: 128,
                 memory_phash_index: true,
             },
@@ -376,7 +344,6 @@ impl Library {
             root,
             LibraryConfig {
                 capacity,
-                copy_workers: 1,
                 meta_batch: 128,
                 memory_phash_index: true,
             },
@@ -441,51 +408,29 @@ impl Library {
 
         let shared: SharedLock = Arc::new((
             Mutex::new(Shared {
-                queue: VecDeque::new(),
                 states: HashMap::new(),
                 active: 0,
-                paused: false,
                 meta_ready: HashSet::new(),
             }),
             Condvar::new(),
         ));
 
-        // 并发拷贝线程池：数量按档位来（前台 = 核数钳 2..=8，后台 = 1）。
-        let workers = config.copy_workers.max(1);
-        let worker_root = root.to_path_buf();
-
-        // 元数据写队列与写线程先建好：worker 需要 tombstone 回滚通道。
-        let db_queue: DbQueueLock = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
-
-        for _ in 0..workers {
-            let worker_root = worker_root.clone();
-            let worker_shared = Arc::clone(&shared);
-            let worker_db_queue = Arc::clone(&db_queue);
-            let worker_phash_index = std::sync::Arc::clone(&phash_index);
-            let worker_content_session = Arc::clone(&content_session);
-            thread::spawn(move || {
-                worker_loop(
-                    worker_root,
-                    worker_shared,
-                    worker_db_queue,
-                    worker_phash_index,
-                    worker_content_session,
-                )
-            });
-        }
-
         // 元数据写线程：消费 DbOp，连续 Upsert 攒到阈值共享一次事务提交。
-        {
-            let db_queue = Arc::clone(&db_queue);
+        let db_queue: DbQueueLock = {
+            let db_queue: DbQueueLock = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
             let writer_shared = Arc::clone(&shared);
+            let writer_queue = Arc::clone(&db_queue);
             let batch = if config.meta_batch == 0 {
                 usize::MAX
             } else {
                 config.meta_batch
             };
             let db_root = root.to_path_buf();
-            std::thread::spawn(move || meta_writer_loop(db_root, db_queue, writer_shared, batch));
-        }
+            std::thread::spawn(move || {
+                meta_writer_loop(db_root, writer_queue, writer_shared, batch)
+            });
+            db_queue
+        };
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -507,28 +452,19 @@ impl Library {
         &self.store
     }
 
-    /// 测试钩子：暂停/恢复拷贝工作线程，保证队列语义可确定性验证。
-    pub fn set_paused(&self, paused: bool) {
-        let (lock, cv) = &*self.shared;
-        let mut g = lock.lock().unwrap();
-        g.paused = paused;
-        drop(g);
-        cv.notify_all();
-    }
-
     pub fn state_of(&self, ticket: &ImportTicket) -> Option<CopyState> {
         let (lock, _) = &*self.shared;
         let g = lock.lock().unwrap();
         g.states.get(&ticket.id).cloned()
     }
 
-    /// 在途背压容量。
     pub fn capacity(&self) -> usize {
         self.config.capacity
     }
 
-    /// 等待某个票到达终态（Done/Failed）。条件变量等待替代调用方的
-    /// 20ms 轮询；超时返回 None。Duplicate/Unsupported 无状态条目，返回 None。
+    /// 等待某个票到达终态（Done/Failed）。Done 即元数据已提交（enqueue 在
+    /// 提交确认后才置 Done）。条件变量等待替代调用方的轮询；超时返回 None。
+    /// Duplicate/Unsupported 无状态条目，返回 None。
     pub fn wait_terminal(
         &self,
         ticket: &ImportTicket,
@@ -553,8 +489,13 @@ impl Library {
         }
     }
 
-    /// 导入入口：同步完成 解码→pHash→内存去重判定；元数据进写队列攒批提交，
-    /// 字节拷贝交给工作线程池异步执行（D37）。语义不变式：
+    /// 导入入口（全量导入）：同步完成 解码→pHash→去重判定→**字节拷贝**→
+    /// 元数据提交。语义不变式：
+    /// - **enqueue 返回 Ok 时素材已完整复制入库**（objects/<uuid>/raw.* 已
+    ///   落盘、元数据行已可见）——源文件此后删除/移动不再影响素材（真实
+    ///   用户场景：导入后清理源文件，素材不再凭空消失）；
+    /// - 拷贝失败不产生任何库内痕迹（无行、无半成品目录），调用方按
+    ///   「单文件失败」上报后继续；
     /// - 单文件失败不拖垮整批：单条 Unsupported 只上报不中止；
     /// - 完成票的元数据必然已落库：Done 由元数据提交确认后才置位；
     /// - 视频跳过解码，仅派发 media job。
@@ -653,6 +594,8 @@ impl Library {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_else(|| "bin".to_string());
         let rel_path = format!("{rel_dir}/raw.{ext}");
+        let dest = self.root.join(&rel_path);
+        // created_at 取自源文件元数据：必须在拷贝前读，拷贝后源文件可能已被清理。
         let created_at = fs::metadata(&req.source)?
             .modified()
             .ok()
@@ -682,17 +625,69 @@ impl Library {
         };
 
         // 票号先行：写线程的提交确认要挂到这个票上（meta_ready）。
+        // 在途计数在此入账（拷贝在本线程内完成，Done/失败两处出账）。
         let id = TICKET_SEQ.fetch_add(1, Ordering::Relaxed);
+        {
+            let (lock, _) = &*self.shared;
+            let mut g = lock.lock().unwrap();
+            g.states.insert(id, CopyState::Pending);
+            g.active += 1;
+        }
 
-        // 元数据进写队列攒批提交；拷贝线程在提交确认后才置 Done。
+        // —— 全量拷贝（同步，调用线程内完成）——
+        // 旧实现把字节拷贝丢进独立线程池、元数据先行落库（D37）：enqueue 返回
+        // 与字节落盘之间存在窗口期，用户此刻删除源文件会让拷贝失败 → 回滚删行，
+        // 素材凭空消失（真实用户事故）。现在拷贝先行：enqueue 返回时字节已在
+        // 库内，源文件此后删除/移动不再影响素材。进度仍上报 CopyState::Copying
+        // （state_of 观察者可见）。
+        {
+            let shared = std::sync::Arc::clone(&self.shared);
+            let total = size_bytes as u64;
+            let progress = move |copied: u64| {
+                let (lock, _) = &*shared;
+                let mut g = lock.lock().unwrap();
+                g.states.insert(id, CopyState::Copying { copied, total });
+            };
+            // 文本素材走归一化拷贝（D60 库内文本不变量的写入点），其余逐块复制。
+            let outcome = if kind == AssetKind::Text {
+                copy_text_normalized(&req.source, &dest, total, progress)
+            } else {
+                copy_with_progress(&req.source, &dest, total, progress)
+            };
+            if let Err(e) = outcome {
+                // 拷贝失败 = 无行、无半成品：元数据尚未提交，无需回滚删行；
+                // 清掉半成品目录后按单文件失败上报，不拖垮整批。
+                let _ = fs::remove_dir_all(self.root.join(&rel_dir));
+                let (lock, cv) = &*self.shared;
+                let mut g = lock.lock().unwrap();
+                g.states.insert(id, CopyState::Failed(format!("{e}")));
+                g.active -= 1;
+                drop(g);
+                cv.notify_all();
+                return Err(LibraryError::Io(e));
+            }
+        }
+
+        // 字节已就位；元数据进写队列攒批提交（D7「无半成品」不变式保持：
+        // Done 由提交确认后才置位，完成票的元数据必然已落库）。
         self.queue_db_op(DbOp::Upsert { ticket: id, meta })?;
 
         // D7 语义守护：enqueue 返回前元数据必须已可见（体感瞬时入库）。
         // 写线程攒批 flush 后一次 notify_all——并发导入下所有调用方一起醒，
         // 只付出一次条件变量等待；单条导入也只需写线程一个循环周期。
-        self.wait_meta_ready(id, std::time::Duration::from_secs(10))?;
+        if let Err(e) = self.wait_meta_ready(id, std::time::Duration::from_secs(10)) {
+            // 写线程故障（10s 内无提交确认）：按失败收尾出账，避免占用背压名额。
+            let (lock, cv) = &*self.shared;
+            let mut g = lock.lock().unwrap();
+            g.states.insert(id, CopyState::Failed(format!("{e}")));
+            g.active -= 1;
+            drop(g);
+            cv.notify_all();
+            return Err(e);
+        }
 
         // 内存索引登记：hash 与会话 uuid 都已确定，后续同批重复直接本地解析。
+        // （登记在拷贝成功之后：失败路径无需清理。）
         let session_hash = phash_bytes
             .as_ref()
             .map(|b| u64::from_be_bytes(b.as_slice().try_into().expect("8 字节")));
@@ -706,31 +701,23 @@ impl Library {
             .unwrap()
             .insert(content_hash, uuid.clone());
         // 派发语义：Image/Video/Text 有解码工序，Other 不在 v1 派生范围。
+        // 派发用库内正本路径——源文件此后删除/移动不影响派发工序。
         if let Some(kind) = to_media_kind(kind) {
             self.dispatcher.dispatch(MediaJob {
                 uuid: uuid.clone(),
-                source: req.source.clone(),
+                source: dest,
                 kind,
             });
         }
 
-        let job = CopyJob {
-            ticket_id: id,
-            uuid: uuid.clone(),
-            source: req.source,
-            dest: self.root.join(rel_path),
-            total: size_bytes as u64,
-            // 失败回滚时精确清掉本条登记（与上面的 push 同值）。
-            session_hash,
-            content_hash: Some(content_hash),
-        };
-        let (lock, cv) = &*self.shared;
-        let mut g = lock.lock().unwrap();
-        g.states.insert(id, CopyState::Pending);
-        g.queue.push_back(job);
-        g.active += 1;
-        drop(g);
-        cv.notify_all();
+        {
+            let (lock, cv) = &*self.shared;
+            let mut g = lock.lock().unwrap();
+            g.states.insert(id, CopyState::Done);
+            g.active -= 1;
+            drop(g);
+            cv.notify_all();
+        }
 
         Ok(EnqueueOutcome::Ticket {
             ticket: ImportTicket { id, uuid },
@@ -888,205 +875,9 @@ fn phash_of(img: &image::DynamicImage) -> Option<Vec<u8>> {
     phash::reliable_phash(&gray).map(|h| h.to_be_bytes().to_vec())
 }
 
-fn worker_loop(
-    root: PathBuf,
-    shared: SharedLock,
-    db_queue: DbQueueLock,
-    phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>>,
-    content_session: std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
-) {
-    loop {
-        let job = {
-            let (lock, cv) = &*shared;
-            let mut g = lock.lock().unwrap();
-            loop {
-                if g.paused || g.queue.is_empty() {
-                    g = cv.wait(g).unwrap();
-                } else {
-                    break;
-                }
-            }
-            match g.queue.pop_front() {
-                Some(job) => {
-                    g.states.insert(
-                        job.ticket_id,
-                        CopyState::Copying {
-                            copied: 0,
-                            total: job.total,
-                        },
-                    );
-                    job
-                }
-                None => continue,
-            }
-        };
-
-        let progress = |copied: u64| {
-            let (lock, _) = &*shared;
-            let mut g = lock.lock().unwrap();
-            g.states.insert(
-                job.ticket_id,
-                CopyState::Copying {
-                    copied,
-                    total: job.total,
-                },
-            );
-        };
-        // 文本素材走归一化拷贝（D60 库内文本不变量的写入点），其余逐块复制。
-        let outcome = if media::kind_of(&job.dest) == AssetKind::Text {
-            copy_text_normalized(&job.source, &job.dest, job.total, progress)
-        } else {
-            copy_with_progress(&job.source, &job.dest, job.total, progress)
-        };
-
-        match outcome {
-            Ok(()) => {
-                // 文件已就位；但 D7「无半成品」要求元数据行也在库里才算完成。
-                // 等写线程对这张票的提交确认（meta_ready），或看到写线程把票
-                // 判成 Failed（如落库毒行）——两种情况都由本线程收尾并减 active。
-                // Arc 克隆仅引用计数，跨循环迭代不产生所有权问题。
-                finish_after_copy_ok(
-                    root.as_path(),
-                    shared.clone(),
-                    db_queue.clone(),
-                    std::sync::Arc::clone(&phash_index),
-                    std::sync::Arc::clone(&content_session),
-                    job,
-                );
-            }
-            Err(e) => {
-                // 拷贝失败：文件/目录清理在本线程，删除行走 tombstone 队列，
-                // 与写线程可能尚未提交的同 uuid Upsert 保持先后序。
-                let _ = std::fs::remove_file(&job.dest);
-                let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
-                purge_session_hash(&phash_index, job.session_hash);
-                purge_content_session(&content_session, job.content_hash);
-                let (q_lock, q_cv) = &*db_queue;
-                {
-                    let mut q = q_lock.lock().unwrap();
-                    q.push_back(DbOp::Tombstone {
-                        uuid: job.uuid.clone(),
-                    });
-                    drop(q);
-                    q_cv.notify_all();
-                }
-                let (lock, cv) = &*shared;
-                let mut g = lock.lock().unwrap();
-                g.states
-                    .insert(job.ticket_id, CopyState::Failed(format!("{e}")));
-                g.active -= 1;
-                drop(g);
-                cv.notify_all();
-            }
-        }
-    }
-}
-
-/// 失败回滚时从内存索引精确摘除该素材的 hash（防御重复导入撞上幽灵条目）。
-fn purge_session_hash(phash_index: &std::sync::Arc<Option<Mutex<PHashIndex>>>, hv: Option<u64>) {
-    if let Some(hv) = hv {
-        let opt: Option<&Mutex<PHashIndex>> = (**phash_index).as_ref();
-        if let Some(mutex) = opt {
-            mutex.lock().unwrap().remove_hash(hv);
-        }
-    }
-}
-
-/// 失败回滚时摘除会话内容摘要登记（D61；无持久索引，摘登记即可）。
-fn purge_content_session(
-    content_session: &std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
-    digest: Option<[u8; 32]>,
-) {
-    if let Some(digest) = digest {
-        content_session.lock().unwrap().remove(&digest);
-    }
-}
-
-/// 拷贝成功后的收尾：等元数据提交确认 → Done；见 Failed（落库失败）→ 清盘。
-/// 死锁面分析：本函数只在 states 锁上做 wait_timeout（锁随等待释放），
-/// 写线程只短暂持锁标记 meta_ready / 失败态，不存在交叉等待环。
-fn finish_after_copy_ok(
-    root: &Path,
-    shared: SharedLock,
-    db_queue: DbQueueLock,
-    phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>>,
-    content_session: std::sync::Arc<Mutex<HashMap<[u8; 32], String>>>,
-    job: CopyJob,
-) {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let (lock, cv) = &*shared;
-        let mut g = lock.lock().unwrap();
-        // 写线程判负的票（落库反复失败）：清掉刚拷好的文件，保持无半成品。
-        if let Some(CopyState::Failed(_msg)) = g.states.get(&job.ticket_id) {
-            drop(g);
-            let _ = std::fs::remove_file(&job.dest);
-            let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
-            purge_session_hash(&phash_index, job.session_hash);
-            purge_content_session(&content_session, job.content_hash);
-            let (q_lock, q_cv) = &*db_queue;
-            {
-                let mut q = q_lock.lock().unwrap();
-                q.push_back(DbOp::Tombstone {
-                    uuid: job.uuid.clone(),
-                });
-                drop(q);
-                q_cv.notify_all();
-            }
-            let (lock, cv) = &*shared;
-            let mut g = lock.lock().unwrap();
-            g.active -= 1;
-            drop(g);
-            cv.notify_all();
-            return; // Failed 态已由写线程登记，保留原因给调用方
-        }
-        if g.meta_ready.remove(&job.ticket_id) {
-            g.states.insert(job.ticket_id, CopyState::Done);
-            g.active -= 1;
-            drop(g);
-            cv.notify_all();
-            return;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            // 写线程迟迟未确认（磁盘卡死等）：按失败收尾避免占用背压名额，
-            // tombstone 由本路径补发以清理潜在半提交行。
-            drop(g);
-            let _ = std::fs::remove_file(&job.dest);
-            let _ = std::fs::remove_dir_all(root.join("objects").join(&job.uuid));
-            purge_session_hash(&phash_index, job.session_hash);
-            purge_content_session(&content_session, job.content_hash);
-            let (q_lock, q_cv) = &*db_queue;
-            {
-                let mut q = q_lock.lock().unwrap();
-                q.push_back(DbOp::Tombstone {
-                    uuid: job.uuid.clone(),
-                });
-                drop(q);
-                q_cv.notify_all();
-            }
-            let (lock, cv) = &*shared;
-            let mut g = lock.lock().unwrap();
-            g.states.insert(
-                job.ticket_id,
-                CopyState::Failed("等待元数据提交确认超时".into()),
-            );
-            g.active -= 1;
-            drop(g);
-            cv.notify_all();
-            return;
-        }
-        let slice = (deadline - now).min(Duration::from_millis(200));
-        let (g2, _) = cv.wait_timeout(g, slice).unwrap();
-        drop(g2);
-    }
-}
-
 /// 元数据写线程（D37）：从队列批量取 DbOp；连续 Upsert 合并为一次事务
-/// （阈值 max_batch），Tombstone 前先冲刷未提交的 Upsert 批，保证顺序。
-/// 单批整体失败时退化为逐行提交隔离毒行；单行也失败才把票直接置为
-/// Failed——随后拷贝线程负责文件侧清理，本线程不再碰磁盘。
+/// （阈值 max_batch）。单批整体失败时退化为逐行提交隔离毒行；单行也失败
+/// 才把票直接置为 Failed（附带原因），成功的照常标 ready。
 fn meta_writer_loop(_root: PathBuf, dq: DbQueueLock, shared: SharedLock, max_batch: usize) {
     let store = match Store::open(&_root.join("meta.db")) {
         Ok(store) => store,
@@ -1108,7 +899,6 @@ fn meta_writer_loop(_root: PathBuf, dq: DbQueueLock, shared: SharedLock, max_bat
             q.drain(..take).collect()
         };
 
-        // 冲刷器：攒连续 Upsert，遇 Tombstone 或结尾统一提交。
         let mut ups_meta: Vec<store::AssetMeta> = Vec::with_capacity(ops.len());
         let mut ups_tickets: Vec<u64> = Vec::with_capacity(ops.len());
         macro_rules! flush_ups {
@@ -1128,11 +918,6 @@ fn meta_writer_loop(_root: PathBuf, dq: DbQueueLock, shared: SharedLock, max_bat
                     if ups_meta.len() >= max_batch.max(1) {
                         flush_ups!();
                     }
-                }
-                DbOp::Tombstone { uuid } => {
-                    flush_ups!();
-                    // 幽灵防复活序：delete 在其前所有 upsert 提交之后执行。
-                    let _ = store.delete_asset(&uuid);
                 }
             }
         }
@@ -1225,14 +1010,6 @@ fn copy_text_normalized(
     Ok(())
 }
 
-/// 拷贝失败的文件侧清理（D37 重构后数据库行删除改经 tombstone 队列，
-/// 与写线程串行化，杜绝独立连接与批量事务互相踩踏）。此函数仅为兼容
-/// 直连库删除而保留的纯 fs 形态；worker 失败路径已内联同等逻辑。
-#[allow(dead_code)]
-fn rollback_failed_import(root: &Path, uuid: &str, dest: &Path) {
-    let _ = fs::remove_file(dest);
-    let _ = fs::remove_dir_all(root.join("objects").join(uuid));
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1296,6 +1073,104 @@ mod tests {
             }
             other => panic!("预期入库，实际 {other:?}"),
         }
+    }
+
+    // ----- 全量导入语义：enqueue 返回即素材完整入库，源文件删除不再丢素材 -----
+
+    /// 真实用户事故回归：导入完成后删除源文件，素材必须原样保留（库内正本
+    /// 完整、元数据行在库）。旧实现的窗口期（enqueue 返回与字节落盘之间）
+    /// 已由「拷贝先行」消灭，此处钉死不变式。
+    #[test]
+    fn source_deleted_after_import_leaves_asset_intact() {
+        let root = temp_root("delete_source");
+        let source = root.join("src.png");
+        structured_png(&source, 0);
+        let library = Library::open(&root).unwrap();
+
+        let (uuid, _) = import_and_wait(&library, &source);
+        // enqueue 返回即字节已在库内：库内正本存在且与源内容一致。
+        let meta = library.store().get_asset(&uuid).unwrap().unwrap();
+        let copy = root.join(&meta.rel_path);
+        assert!(copy.is_file(), "库内正本必须已落盘: {}", copy.display());
+        assert!(fs::read(&copy).unwrap() == fs::read(&source).unwrap(), "库内正本与源内容一致");
+
+        // 删除源文件：素材行与库内正本都不受影响。
+        fs::remove_file(&source).unwrap();
+        assert!(
+            library.store().get_asset(&uuid).unwrap().is_some(),
+            "删除源文件后素材行必须在库"
+        );
+        assert!(copy.is_file(), "删除源文件后库内正本必须原样保留");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 媒体派发用库内正本路径：源文件删除后派发工序照常可用（旧实现派发
+    /// 源路径，删源后派发失败）。派发发生在 enqueue 内同步完成，返回时
+    /// source 字段即库内正本。
+    #[test]
+    fn media_job_targets_library_copy_not_source() {
+        let root = temp_root("media_job_path");
+        let source = root.join("src.png");
+        structured_png(&source, 0);
+        let recorder = RecordingDispatcher::new();
+        let jobs_probe = recorder.clone();
+        let library = Library::open_full(
+            &root,
+            LibraryConfig {
+                capacity: 16,
+                meta_batch: 128,
+                memory_phash_index: true,
+            },
+            Box::new(recorder),
+        )
+        .unwrap();
+
+        let (uuid, _) = import_and_wait(&library, &source);
+        let jobs = jobs_probe.jobs();
+        assert_eq!(jobs.len(), 1, "Image 素材应派发一条 media job");
+        assert_eq!(jobs[0].uuid, uuid);
+        assert!(jobs[0].source.is_file(), "派发路径必须是已落盘的库内正本");
+        assert!(
+            jobs[0].source.starts_with(root.join("objects")),
+            "派发路径必须在 objects/ 下（库内正本）: {:?}",
+            jobs[0].source
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 拷贝/摘要阶段的不可读源不产生库内痕迹：源替换为不可读形态（目录
+    /// 占位同名文件）→ enqueue 必 Err，无行、无半成品目录。
+    #[test]
+    fn unreadable_source_leaves_no_row_and_no_orphan() {
+        let root = temp_root("copy_fail");
+        let source = root.join("src.png");
+        structured_png(&source, 0);
+        let library = Library::open(&root).unwrap();
+
+        let outcome = library.enqueue(ImportRequest {
+            source: source.clone(),
+            category: Some("测试".to_string()),
+            tags: vec![],
+        });
+        match outcome {
+            Ok(EnqueueOutcome::Ticket { .. }) | Ok(EnqueueOutcome::Duplicate { .. }) => {}
+            other => panic!("首份导入应成功: {other:?}"),
+        }
+        // 不可读注入：源替换为目录（读文件/摘要阶段即 Err）。
+        fs::remove_file(&source).unwrap();
+        fs::create_dir(&source).unwrap();
+        let outcome = library.enqueue(ImportRequest {
+            source: source.clone(),
+            category: Some("测试".to_string()),
+            tags: vec![],
+        });
+        assert!(outcome.is_err(), "目录占位源必须失败");
+        assert_eq!(
+            library.store().all_assets_count().unwrap(),
+            1,
+            "失败导入不得留下新行"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     // ----- D65 语义：判死权收归字节等值，pHash 只提醒 -----
@@ -1412,8 +1287,8 @@ mod tests {
             .expect("极小图导入不得 panic/失败");
         match outcome {
             EnqueueOutcome::Ticket { ticket, similarity } => {
-                // 元数据落库走异步写队列（D37）——Done 终态保证 meta 必然已提交
-                //（finish_after_copy_ok 在 meta_ready 确认后才置 Done）。
+                // Done 终态保证 meta 必然已提交（enqueue 在写线程提交确认后才
+                // 置 Done；全量导入语义下字节也已落库）。
                 let state = library
                     .wait_terminal(&ticket, std::time::Duration::from_secs(30))
                     .expect("极小图导入应在 30s 内到达终态");

@@ -455,6 +455,8 @@ export component AppWindow inherits Window {
     // 路径列表进同一归类弹窗；不支持类型由 VM 过滤（R4）。
     callback files-dropped([string]);
     callback import-menu-toggled();
+    // 手动刷新（导入菜单第三项）：重载库 + 重跑缩略图派生（只补缺失）。
+    callback refresh-library-requested();
     callback sidebar-resize-ended(length);
     callback clear-library-requested();
     callback export-emo-requested();
@@ -1840,6 +1842,17 @@ export component AppWindow inherits Window {
                     detail: "整个文件夹一次导入，默认建议按目录名新建分类";
                     clicked => {
                         root.import-requested();
+                    }
+                }
+
+                // 手动刷新：重载库并重跑缩略图派生（只补缺失，已有缩略图跳过）
+                //——缩略图派生被中断/工具缺失时的唯一自助恢复入口。
+                MenuItem {
+                    glyph: Glyph.refresh;
+                    text: "刷新素材库";
+                    detail: "重新载入素材并补齐缺失的缩略图";
+                    clicked => {
+                        root.refresh-library-requested();
                     }
                 }
             }
