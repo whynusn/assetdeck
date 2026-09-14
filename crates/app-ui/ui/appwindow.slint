@@ -144,6 +144,8 @@ export struct ShareCtlDomainData {
     name: string,
     member-count: int,
     shared: bool,
+    // M1-c：个人域（单成员）与群组域在行上区分展示。
+    is-personal: bool,
     selected: bool,
 }
 
@@ -354,9 +356,13 @@ export component AppWindow inherits Window {
         in-out property <string> share-ctl-device-name: "";
         in-out property <string> share-ctl-device-id: "";
         in-out property <string> share-ctl-new-domain-name: "";
+        // M1-c 配对码：本机标识（只读可选中复制）+ 8 字符指纹（展示核对用）。
+        in-out property <string> share-ctl-self-id: "";
+        in property <string> share-ctl-self-code: "";
         callback share-ctl-closed();
         callback share-ctl-device-add(string, string);
         callback share-ctl-device-remove(string);
+        callback share-ctl-personal-create(string);
         callback share-ctl-domain-selected(int);
         callback share-ctl-domain-create(string);
         callback share-ctl-domain-remove(string);
@@ -2984,14 +2990,33 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                 }
 
+                // M1-c 配对码：本机标识只读可选中复制；8 字符配对码供两侧
+                // 比对（对方粘贴本机标识配对，配对完成后对方行显对端码）。
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.share-ctl-self-id;
+                        read-only: true;
+                        placeholder-text: "共享通道未就绪";
+                        horizontal-stretch: 2;
+                    }
+                    Text {
+                        text: "配对码 " + root.share-ctl-self-code;
+                        color: Theme.text-2;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
                 Text {
-                    text: "已配对设备（粘贴对方设备标识完成配对）";
+                    text: "已配对设备（粘贴对方设备标识完成配对，配对码核对）";
                     color: Theme.text-2;
                     font-size: 11px;
                     font-weight: 600;
                 }
                 if root.share-ctl-devices.length == 0: Text {
-                    text: "还没有配对设备。对方可在「共享 → 管理共享域」里查看自己的 52 位设备标识。";
+                    text: "还没有配对设备。把上面「本机设备标识」发给对方，对方粘贴配对；两侧配对码一致即同一台设备。";
                     color: Theme.text-3;
                     font-size: 11px;
                     wrap: word-wrap;
@@ -3024,6 +3049,12 @@ export component AppWindow inherits Window {
                             overflow: elide;
                         }
                         Rectangle { horizontal-stretch: 1; }
+                        // M1-c 个人域：单设备专属域（个人域恒 1 成员）。
+                        Button {
+                            height: 24px;
+                            text: "个人域";
+                            clicked => { root.share-ctl-personal-create(device.id); }
+                        }
                         Button {
                             height: 24px;
                             text: "移除";
@@ -3060,7 +3091,7 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                 }
                 if root.share-ctl-domains.length == 0: Text {
-                    text: "还没有共享域——先新建一个群组域，再勾选成员。";
+                    text: "还没有共享域——为设备建个人域，或新建群组域后勾选成员。";
                     color: Theme.text-3;
                     font-size: 11px;
                 }
@@ -3084,7 +3115,7 @@ export component AppWindow inherits Window {
                             overflow: elide;
                         }
                         Text {
-                            text: domain.member-count + " 成员";
+                            text: domain.is-personal ? "个人" : domain.member-count + " 成员";
                             color: Theme.text-3;
                             font-size: 10px;
                             vertical-alignment: center;

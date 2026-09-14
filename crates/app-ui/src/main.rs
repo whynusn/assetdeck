@@ -1259,7 +1259,17 @@ fn broadcast_share_delta(prev_rev: u64, before: &[(String, Vec<Uuid>)]) {
 }
 
 /// D80-M1 控制面管理弹窗数据回填：设备册 / 域册 / 选中域的成员勾选集。
+/// M1-c 配对码：设备行 detail = 8 字符指纹；弹窗顶部显本机标识 + 本机配对码。
 fn sync_share_ctl_ui(ui: &AppWindow) {
+    let (self_id, self_code) = SHARE_VM.with(|vm| {
+        let vm = vm.borrow();
+        match vm.self_id() {
+            Some(id) => (id.to_string(), ui_viewmodels::pairing_code(id)),
+            None => (String::new(), String::new()),
+        }
+    });
+    ui.set_share_ctl_self_id(self_id.into());
+    ui.set_share_ctl_self_code(self_code.into());
     SHARE_CONTROL.with(|control| {
         let control = control.borrow();
         let devices: Vec<ShareCtlDeviceData> = control
@@ -1268,7 +1278,8 @@ fn sync_share_ctl_ui(ui: &AppWindow) {
             .map(|device| ShareCtlDeviceData {
                 id: device.id.clone().into(),
                 name: device.name.clone().into(),
-                detail: format!("{}…", &device.id[..device.id.len().min(12)]).into(),
+                // 配对码：与对方屏幕上的「本机配对码」比对的指纹。
+                detail: format!("配对码 {}", ui_viewmodels::pairing_code(&device.id)).into(),
             })
             .collect();
         ui.set_share_ctl_devices(ModelRc::from(Rc::new(VecModel::from(devices))));
@@ -1283,6 +1294,7 @@ fn sync_share_ctl_ui(ui: &AppWindow) {
                 name: domain.name.clone().into(),
                 member_count: domain.members.len() as i32,
                 shared: false,
+                is_personal: domain.kind == DomainKind::Personal,
                 selected: index as i32 == selected,
             })
             .collect();
@@ -1347,6 +1359,7 @@ fn sync_share_asset_domains(ui: &AppWindow) {
                     .shared_entries()
                     .iter()
                     .any(|e| e.asset_uuid == asset && e.domain_id == domain.id),
+                is_personal: domain.kind == DomainKind::Personal,
                 selected: false,
             })
             .collect();
@@ -3310,6 +3323,41 @@ fn main() {
             sync_share_ctl_ui(&ui);
             // 解配级联撤销共享事实 →「共享中」角标随重排消失。
             grid.sync();
+        });
+    }
+    {
+        let crud = crud.clone();
+        app.on_share_ctl_personal_create(move |device_id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            // M1-c 个人域：单设备专属域（个人域恒 1 成员）。已有个人域含该
+            // 设备 → 提示不重建；名称取设备备注名 +「专属」。
+            let outcome: Result<(), String> = SHARE_CONTROL.with(|control| {
+                let mut control = control.borrow_mut();
+                let exists = control.domains().iter().any(|d| {
+                    d.kind == DomainKind::Personal
+                        && d.members.iter().any(|m| m == device_id.as_str())
+                });
+                if exists {
+                    return Err("该设备已有个人域".into());
+                }
+                let Some(device) = control.devices().get(device_id.as_str()) else {
+                    return Err("设备不存在".into());
+                };
+                let label = format!("{} 专属", device.name);
+                match control.create_domain(
+                    &label,
+                    DomainKind::Personal,
+                    vec![device_id.to_string()],
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error.to_string()),
+                }
+            });
+            if let Err(error) = outcome {
+                show_notice(&ui, TargetNoticeTone::Warning, error);
+            }
+            persist_share_control();
+            sync_share_ctl_ui(&ui);
         });
     }
     {

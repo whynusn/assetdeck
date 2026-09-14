@@ -6,6 +6,7 @@
 pub mod domain;
 pub mod events;
 pub mod manifest;
+pub mod pairing;
 pub mod record;
 pub mod registry;
 pub mod request;
@@ -18,6 +19,7 @@ pub use manifest::{
     safe_ext, ManifestError, ManifestItem, TransferManifest, FILE_NAME_MAX_CHARS,
     MANIFEST_MAX_ITEMS,
 };
+pub use pairing::{pairing_code, PAIRING_CODE_LEN};
 pub use record::{ShareDirection, ShareOutcome, ShareRecord};
 pub use registry::ShareRegistry;
 pub use request::{

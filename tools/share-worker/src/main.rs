@@ -5,9 +5,15 @@
 //! 无系统服务、无开机自启。空闲成本 = 一个 UDP socket + mDNS 公告线程。
 //!
 //! M0 局域网闭环（D80 分期）：mDNS 发现 → 显式推送 → iroh 直连 →
-//! 清单先行 → 双重确认 → 导入管线。零 STUN/打洞/信令服务器；
-//! `presets::Minimal` + `PortmapperConfig::Disabled` 把「不出户」钉死在
-//! 配置层（钉子 1/2 的 M0 形态：M1 才引入 pkarr 信令与端口映射）。
+//! 清单先行 → 双重确认 → 导入管线。
+//!
+//! M1-c 远程直连（D80 分期；钉子 1/2 的 M1 形态）：
+//! - `presets::N0DisableRelay` = pkarr 第三方信令（PkarrPublisher/Resolver/
+//!   DnsLookup → n0 公共 `iroh.link` DNS，记录按本机密钥签名=指纹绑定）
+//!   + `RelayMode::Disabled`（无中继，连接只走直连——红线不变）；
+//! - portmapper 恢复 Builder 默认 `Enabled`（UPnP/PCP/NAT-PMP 网关映射，
+//!   映射地址被当作可拨直连地址发布；SSDP 组播探测可能触发防火墙提示，
+//!   M1-d installer 防火墙规则批次一并收口）。
 //!
 //! 协议见 [`proto`]；引擎见 [`engine`]。
 
@@ -17,7 +23,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iroh::endpoint::presets;
-use iroh::endpoint::PortmapperConfig;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use mdns_sd::ServiceDaemon;
 use share_worker::sync::SyncInbound;
@@ -81,12 +86,15 @@ async fn main() {
         std::process::exit(2);
     }
 
-    let endpoint = match Endpoint::builder(presets::Minimal)
+    // D80 钉子 1/2 的 M1-c 形态：pkarr 第三方信令 + relay disabled（连接只走
+    // 直连）；portmapper 不再显式关闭（Builder 默认 Enabled，网关映射地址
+    // 被当作可拨直连地址发布——直连成功率的关键增量）。信令与映射的真机
+    // 连通性（iroh.link 可达性、NAT 网关放行）归真机批次验证。
+    let endpoint = match Endpoint::builder(presets::N0DisableRelay)
         .alpns(vec![
             share::ALPN.as_bytes().to_vec(),
             share::ALPN_SYNC.as_bytes().to_vec(),
         ])
-        .portmapper_config(PortmapperConfig::Disabled)
         .bind()
         .await
     {

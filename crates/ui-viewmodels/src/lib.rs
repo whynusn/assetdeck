@@ -39,6 +39,8 @@ pub use share_control::{ControlError, ShareControlVm};
 // D80 共享通道装配所需的传输类型：app-ui 依赖白名单不含 share（deps_guard
 // EXACT 纪律），SendItem/DeviceEntry/ShareOffer 经此转发；uuid 同理（角标键与批次 id）。
 pub use share::{DeviceEntry, SendItem, ShareOffer};
+// D80-M1-c 配对码指纹（share pairing 模块）：app-ui 走本 crate。
+pub use share::pairing_code;
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,
