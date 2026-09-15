@@ -1504,17 +1504,15 @@ fn broadcast_share_delta(prev_rev: u64, before: &[(String, Vec<Uuid>)]) {
 }
 
 /// D80-M1 控制面管理弹窗数据回填：设备册 / 域册 / 选中域的成员勾选集。
-/// M1-c 配对码：设备行 detail = 8 字符指纹；弹窗顶部显本机标识 + 本机配对码。
+/// M2 收敛：顶部只显「我的邀请码」（52 位标识本身）；配对码指纹展示移除。
 fn sync_share_ctl_ui(ui: &AppWindow) {
-    let (self_id, self_code) = SHARE_VM.with(|vm| {
-        let vm = vm.borrow();
-        match vm.self_id() {
-            Some(id) => (id.to_string(), ui_viewmodels::pairing_code(id)),
-            None => (String::new(), String::new()),
-        }
+    let self_id = SHARE_VM.with(|vm| {
+        vm.borrow()
+            .self_id()
+            .map(str::to_string)
+            .unwrap_or_default()
     });
     ui.set_share_ctl_self_id(self_id.into());
-    ui.set_share_ctl_self_code(self_code.into());
     SHARE_CONTROL.with(|control| {
         let control = control.borrow();
         let devices: Vec<ShareCtlDeviceData> = control
@@ -1523,8 +1521,6 @@ fn sync_share_ctl_ui(ui: &AppWindow) {
             .map(|device| ShareCtlDeviceData {
                 id: device.id.clone().into(),
                 name: device.name.clone().into(),
-                // 配对码：与对方屏幕上的「本机配对码」比对的指纹。
-                detail: format!("配对码 {}", ui_viewmodels::pairing_code(&device.id)).into(),
             })
             .collect();
         ui.set_share_ctl_devices(ModelRc::from(Rc::new(VecModel::from(devices))));
@@ -3533,29 +3529,24 @@ fn main() {
     }
     {
         let crud = crud.clone();
-        app.on_share_ctl_device_add(move |name, id| {
+        app.on_share_ctl_device_rename(move |device_id, new_name| {
             let Some(ui) = crud.ui.upgrade() else { return };
+            // M2 收敛：设备列表行内改名（回车提交）。rename = pair 按 id
+            // upsert 换名，paired_at 保留原值（不改配对时间）。
             let outcome = SHARE_CONTROL.with(|control| {
+                let mut control = control.borrow_mut();
+                let Some(device) = control.devices().get(device_id.as_str()) else {
+                    return Some(ControlError::BadDeviceId);
+                };
+                let paired_at = device.paired_at;
                 control
-                    .borrow_mut()
-                    .pair(
-                        id.trim(),
-                        name.trim(),
-                        ui_viewmodels::unix_now_secs() as i64,
-                    )
-                    .map(|_| ())
+                    .pair(device_id.as_str(), new_name.trim(), paired_at)
                     .err()
             });
-            match outcome {
-                Some(error) => show_notice(&ui, TargetNoticeTone::Warning, error.to_string()),
-                None => {
-                    ui.set_share_ctl_device_name("".into());
-                    ui.set_share_ctl_device_id("".into());
-                }
+            if let Some(error) = outcome {
+                show_notice(&ui, TargetNoticeTone::Warning, error.to_string());
             }
             persist_share_control();
-            // D80-M1-b：信任 = 已配对，配对变化即刷新同步信任册。
-            sync_share_trusted_peers();
             sync_share_ctl_ui(&ui);
         });
     }

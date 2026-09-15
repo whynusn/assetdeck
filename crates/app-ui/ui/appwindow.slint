@@ -131,12 +131,13 @@ export struct ShareDeviceData {
     selected: bool,
 }
 
-// D80-M1 控制面行：设备册（id 供移除回调回传）/ 域册（shared = 当前素材对
+// D80-M1 控制面行：设备册（id 供移除/改名回调回传）/ 域册（shared = 当前素材对
 // 该域共享中；selected = 管理弹窗选中高亮）/ 域成员勾选行。
+// D80-M2 收敛：detail（配对码指纹）移除——邀请直发模型里核对动作消失，
+// 全流程只认「我的邀请码 + 贴对方邀请码」一个凭据。
 export struct ShareCtlDeviceData {
     id: string,
     name: string,
-    detail: string,
 }
 
 export struct ShareCtlDomainData {
@@ -351,12 +352,11 @@ export component AppWindow inherits Window {
         in property <int> share-ctl-selected-domain: -1;
         in property <string> share-ctl-selected-domain-id: "";
         in property <[ShareCtlMemberData]> share-ctl-members;
-        in-out property <string> share-ctl-device-name: "";
-        in-out property <string> share-ctl-device-id: "";
         in-out property <string> share-ctl-new-domain-name: "";
-        // M1-c 配对码：本机标识（只读可选中复制）+ 8 字符指纹（展示核对用）。
+        // M1-c 配对码 → D80-M2 收敛为「我的邀请码」：52 位标识本身就是设备
+        // 邀请码（一个东西一个名字）。配对码指纹展示移除（邀请直发模型里
+        // 核对动作消失，故障排查时日志仍可查）。
         in-out property <string> share-ctl-self-id: "";
-        in property <string> share-ctl-self-code: "";
         // D80-M2 邀请机制：顶部贴码加入（一次输入，设备/群组邀请码通吃）+
         // 群组域邀请码展示 + 未读可得角标（接收侧盲区修复）。
         in-out property <string> share-ctl-join-code: "";
@@ -365,8 +365,10 @@ export component AppWindow inherits Window {
         callback share-ctl-join(string);
         callback share-ctl-domain-invite(string);
         callback share-ctl-closed();
-        callback share-ctl-device-add(string, string);
+        // D80-M2 收敛：手动「备注名+标识+配对」行移除（贴原始标识走邀请码
+        // 框即可，备注名改在设备列表行内改名）。
         callback share-ctl-device-remove(string);
+        callback share-ctl-device-rename(string, string);
         callback share-ctl-personal-create(string);
         callback share-ctl-domain-selected(int);
         callback share-ctl-domain-create(string);
@@ -2865,15 +2867,32 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                 }
 
-                // D80-M2 邀请机制：一次贴码双向互认（设备邀请码 = 52 位标识，
-                // 群组邀请码 = 群主标识.域码，单输入框通吃）。QUIC 握手证书
-                // 交换身份，群主确认后名册广播把设备带进组（O(N) 免两两配对）。
+                // D80-M2 邀请机制：全流程只认一个凭据——「我的邀请码」
+                // （52 位标识本身）+ 贴对方邀请码（设备/群组通吃，一次输入）。
+                // QUIC 握手证书交换身份，群主确认后名册广播把设备带进组
+                //（O(N) 免两两配对）。
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: "我的邀请码";
+                        color: Theme.text-2;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                    LineEdit {
+                        text <=> root.share-ctl-self-id;
+                        read-only: true;
+                        placeholder-text: "共享通道未就绪";
+                        horizontal-stretch: 1;
+                    }
+                }
                 HorizontalLayout {
                     spacing: 8px;
 
                     LineEdit {
                         text <=> root.share-ctl-join-code;
-                        placeholder-text: "粘贴对方的邀请码加入";
+                        placeholder-text: "粘贴对方的邀请码（设备或群组均可）";
                         horizontal-stretch: 2;
                     }
                     Button {
@@ -2884,33 +2903,14 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // M1-c 配对码：本机标识只读可选中复制；8 字符配对码供两侧
-                // 比对（对方粘贴本机标识配对，配对完成后对方行显对端码）。
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    LineEdit {
-                        text <=> root.share-ctl-self-id;
-                        read-only: true;
-                        placeholder-text: "共享通道未就绪";
-                        horizontal-stretch: 2;
-                    }
-                    Text {
-                        text: "配对码 " + root.share-ctl-self-code;
-                        color: Theme.text-2;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                    }
-                }
-
                 Text {
-                    text: "已配对设备（粘贴对方设备标识完成配对，配对码核对）";
+                    text: "已配对设备（改名：直接编辑名称后回车）";
                     color: Theme.text-2;
                     font-size: 11px;
                     font-weight: 600;
                 }
                 if root.share-ctl-devices.length == 0: Text {
-                    text: "还没有配对设备。把上面「本机设备标识」发给对方，对方粘贴配对；两侧配对码一致即同一台设备。";
+                    text: "还没有配对设备。把上面「我的邀请码」发给对方，对方贴入即可互相配对。";
                     color: Theme.text-3;
                     font-size: 11px;
                     wrap: word-wrap;
@@ -2925,22 +2925,12 @@ export component AppWindow inherits Window {
                         padding-right: 6px;
                         spacing: 8px;
 
-                        VerticalLayout {
-                            alignment: center;
-
-                            Text {
-                                text: device.name;
-                                color: Theme.text;
-                                font-size: 12px;
-                                overflow: elide;
+                        LineEdit {
+                            text: device.name;
+                            horizontal-stretch: 2;
+                            accepted(text) => {
+                                root.share-ctl-device-rename(device.id, text);
                             }
-                        }
-                        Text {
-                            text: device.detail;
-                            color: Theme.text-3;
-                            font-size: 10px;
-                            vertical-alignment: center;
-                            overflow: elide;
                         }
                         Rectangle { horizontal-stretch: 1; }
                         // M1-c 个人域：单设备专属域（个人域恒 1 成员）。
@@ -2953,27 +2943,6 @@ export component AppWindow inherits Window {
                             height: 24px;
                             text: "移除";
                             clicked => { root.share-ctl-device-remove(device.id); }
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    LineEdit {
-                        text <=> root.share-ctl-device-name;
-                        placeholder-text: "备注名";
-                        horizontal-stretch: 1;
-                    }
-                    LineEdit {
-                        text <=> root.share-ctl-device-id;
-                        placeholder-text: "52 位设备标识";
-                        horizontal-stretch: 2;
-                    }
-                    Button {
-                        height: 30px;
-                        text: "配对";
-                        clicked => {
-                            root.share-ctl-device-add(root.share-ctl-device-name, root.share-ctl-device-id);
                         }
                     }
                 }
@@ -2995,6 +2964,16 @@ export component AppWindow inherits Window {
                     border-width: domain.selected ? 1px : 0px;
                     border-color: Theme.accent;
                     background: domain.selected ? Theme.accent-soft : Theme.bg-raised;
+
+                    // 整行选择用 TouchArea 必须**垫底**（声明在布局之前）：
+                    // Slint 后声明者在顶层收点击，垫在后会吃掉行内
+                    // 「邀请码/删除」按钮的点击（1.17.1 实测点不动）。
+                    TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        clicked => {
+                            root.share-ctl-domain-selected(i);
+                        }
+                    }
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -3025,13 +3004,6 @@ export component AppWindow inherits Window {
                             height: 24px;
                             text: "删除";
                             clicked => { root.share-ctl-domain-remove(domain.id); }
-                        }
-                    }
-
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            root.share-ctl-domain-selected(i);
                         }
                     }
                 }
