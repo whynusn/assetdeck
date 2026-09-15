@@ -32,3 +32,6 @@ Cargo.lock.bak
 # 工具运行态（mimosa 安全扫描插件的 hook 状态）
 /.mimosa/
 
+# 会话工具运行态（ZCode CLI 的 workspace 配置/计划，不进仓）
+/.zcode/
+
