@@ -1,0 +1,1067 @@
+{
+  "version": 1,
+  "defaults": {
+    "app-version": "v0.1.7",
+    "animations-enabled": false
+  },
+  "states": {
+    "shell-empty": {
+      "props": {
+        "total-text": "0 个素材",
+        "categories": [
+          "全部",
+          "收件箱",
+          "设计",
+          "截图"
+        ],
+        "category-counts": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "selected-category": -1,
+        "empty-title": "把素材拖进来",
+        "empty-hint": "支持图片、视频与文本，拖放窗口或按 Ctrl+V 粘贴导入"
+      }
+    },
+    "shell-grid": {
+      "props": {
+        "total-text": "12,480 个素材",
+        "filter-label": "全部",
+        "categories": [
+          "全部",
+          "收件箱",
+          "设计",
+          "截图",
+          "参考"
+        ],
+        "category-counts": [
+          12480,
+          236,
+          4821,
+          6690,
+          733
+        ],
+        "selected-category": -1,
+        "active-asset-id": 2,
+        "target-label": "微信 · 文件传输助手",
+        "target-health-color": "#5ac18e",
+        "target-pinned": true,
+        "target-mode": 1,
+        "tiles": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 1,
+            "label": "dog.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/dog.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": true,
+            "share-badge": 2,
+            "shared": true
+          },
+          {
+            "x": 246,
+            "y": 0,
+            "w": 236,
+            "h": 210,
+            "asset-id": 2,
+            "label": "desk.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/desk.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 492,
+            "y": 0,
+            "w": 236,
+            "h": 150,
+            "asset-id": 3,
+            "label": "sky1.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/sky1.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 0,
+            "y": 180,
+            "w": 236,
+            "h": 190,
+            "asset-id": 4,
+            "label": "laptop.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/laptop.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 3,
+            "shared": true
+          },
+          {
+            "x": 246,
+            "y": 220,
+            "w": 236,
+            "h": 160,
+            "asset-id": 5,
+            "label": "jellyfish.mp4",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/walrus.jpg",
+            "thumb-fade": true,
+            "kind": 1,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 492,
+            "y": 160,
+            "w": 236,
+            "h": 170,
+            "asset-id": 6,
+            "label": "green2.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/green2.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 1,
+            "shared": true
+          },
+          {
+            "x": 0,
+            "y": 380,
+            "w": 236,
+            "h": 120,
+            "asset-id": 7,
+            "label": "排期.txt",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/orange3.png",
+            "thumb-fade": true,
+            "kind": 2,
+            "preview": "本周排期：周一需求评审，周三视觉走查，周五发版",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 246,
+            "y": 390,
+            "w": 236,
+            "h": 140,
+            "asset-id": 8,
+            "label": "orange3.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/orange3.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          }
+        ],
+        "trash-count": 5
+      }
+    },
+    "empty-search": {
+      "extends": "shell-grid",
+      "props": {
+        "tiles": [],
+        "search-text": "赛博朋克",
+        "total-text": "0 个素材",
+        "empty-title": "没有匹配的素材",
+        "empty-hint": "换个关键词，或按 Esc 清空检索"
+      }
+    },
+    "empty-category": {
+      "extends": "shell-grid",
+      "props": {
+        "tiles": [],
+        "selected-category": 4,
+        "filter-label": "参考",
+        "total-text": "0 个素材",
+        "empty-title": "「参考」还是空的",
+        "empty-hint": "把素材拖到这个分类，或在导入时选择它"
+      }
+    },
+    "tile-kinds": {
+      "extends": "shell-grid",
+      "props": {
+        "total-text": "6 个素材",
+        "tiles": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 1,
+            "label": "dog.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/dog.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": true,
+            "share-badge": 2,
+            "shared": true
+          },
+          {
+            "x": 246,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 2,
+            "label": "bigbuckbunny.mp4",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/desk.jpg",
+            "thumb-fade": true,
+            "kind": 1,
+            "preview": "",
+            "selected": false,
+            "share-badge": 3,
+            "shared": false
+          },
+          {
+            "x": 492,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 3,
+            "label": "会议纪要.txt",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/orange3.png",
+            "thumb-fade": true,
+            "kind": 2,
+            "preview": "10 月 23 日评审：分类收敛、日志导出、空态文案三项通过",
+            "selected": false,
+            "share-badge": 0,
+            "shared": true
+          },
+          {
+            "x": 0,
+            "y": 180,
+            "w": 236,
+            "h": 170,
+            "asset-id": 4,
+            "label": "字体包.zip",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/green2.png",
+            "thumb-fade": true,
+            "kind": 3,
+            "preview": "",
+            "selected": false,
+            "share-badge": 1,
+            "shared": false
+          },
+          {
+            "x": 246,
+            "y": 180,
+            "w": 236,
+            "h": 170,
+            "asset-id": 5,
+            "label": "walrus.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/walrus.jpg",
+            "thumb-fade": false,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 492,
+            "y": 180,
+            "w": 236,
+            "h": 170,
+            "asset-id": 6,
+            "label": "sky1.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/sky1.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 2,
+            "shared": true
+          }
+        ]
+      }
+    },
+    "selection-bar": {
+      "extends": "shell-grid",
+      "props": {
+        "selection-bar": 1,
+        "selection-count": 3,
+        "selection-text": "已选 3 项",
+        "select-mode-active": true,
+        "tiles": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 1,
+            "label": "dog.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/dog.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": true,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 246,
+            "y": 0,
+            "w": 236,
+            "h": 210,
+            "asset-id": 2,
+            "label": "desk.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/desk.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": true,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 492,
+            "y": 0,
+            "w": 236,
+            "h": 150,
+            "asset-id": 3,
+            "label": "sky1.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/sky1.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": true,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 0,
+            "y": 180,
+            "w": 236,
+            "h": 190,
+            "asset-id": 4,
+            "label": "laptop.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/laptop.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          }
+        ]
+      }
+    },
+    "trash-bar": {
+      "extends": "shell-grid",
+      "props": {
+        "selection-bar": 2,
+        "trash-count": 5,
+        "tiles": [
+          {
+            "x": 0,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 1,
+            "label": "old-cover.png",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/green2.png",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          },
+          {
+            "x": 246,
+            "y": 0,
+            "w": 236,
+            "h": 170,
+            "asset-id": 2,
+            "label": "draft-v2.jpg",
+            "color": "#24282d",
+            "thumb": "{{ROOT}}/samples/inbox/laptop.jpg",
+            "thumb-fade": true,
+            "kind": 0,
+            "preview": "",
+            "selected": false,
+            "share-badge": 0,
+            "shared": false
+          }
+        ]
+      }
+    },
+    "notice-success": {
+      "extends": "shell-grid",
+      "props": {
+        "notice-text": "已放入微信 · 文件传输助手的输入框",
+        "notice-tone": 0
+      }
+    },
+    "notice-warning": {
+      "extends": "shell-grid",
+      "props": {
+        "notice-text": "目标窗口可能已切换，本次仅复制到剪贴板",
+        "notice-tone": 1
+      }
+    },
+    "notice-error": {
+      "extends": "shell-grid",
+      "props": {
+        "notice-text": "上框失败：目标窗口已关闭，素材已复制到剪贴板",
+        "notice-tone": 2
+      }
+    },
+    "progress": {
+      "extends": "shell-grid",
+      "props": {
+        "progress-visible": true,
+        "progress-percent": 0.42,
+        "progress-text": "正在导入 42/100 · 1.2 GB"
+      }
+    },
+    "scope-menu": {
+      "extends": "shell-grid",
+      "props": {
+        "search-text": "封面",
+        "search-scope": 2,
+        "scope-menu-open": true,
+        "scope-menu-shown": true
+      }
+    },
+    "import-menu": {
+      "extends": "shell-grid",
+      "props": {
+        "import-menu-open": true,
+        "import-menu-shown": true
+      }
+    },
+    "import-menu-armed": {
+      "extends": "shell-grid",
+      "props": {
+        "import-menu-open": true,
+        "import-menu-shown": true,
+        "clear-button-text": "再次点击清空全部素材",
+        "clear-button-armed": true
+      }
+    },
+    "context-menu": {
+      "extends": "tile-kinds",
+      "props": {
+        "context-menu-open": true,
+        "context-menu-x": 320,
+        "context-menu-y": 260,
+        "context-menu-title": "3 项"
+      }
+    },
+    "cat-menu": {
+      "extends": "shell-grid",
+      "props": {
+        "cat-menu-open": true,
+        "cat-menu-x": 96,
+        "cat-menu-y": 300,
+        "cat-menu-title": "设计"
+      }
+    },
+    "rename": {
+      "extends": "shell-grid",
+      "props": {
+        "rename-open": true,
+        "rename-current": "dog.jpg",
+        "rename-error": ""
+      }
+    },
+    "rename-error": {
+      "extends": "shell-grid",
+      "props": {
+        "rename-open": true,
+        "rename-current": "dog.jpg",
+        "rename-error": "名称已存在，换一个再试"
+      }
+    },
+    "cat-rename": {
+      "extends": "shell-grid",
+      "props": {
+        "cat-rename-open": true,
+        "cat-rename-current": "设计",
+        "cat-rename-error": ""
+      }
+    },
+    "properties": {
+      "extends": "shell-grid",
+      "props": {
+        "properties-open": true,
+        "props-name": "dog.jpg",
+        "props-size": "1920 × 1280",
+        "props-bytes": "2.4 MB",
+        "props-created": "2026-10-12 18:04",
+        "props-path": "C:\\Users\\Administrator\\Pictures\\dog.jpg"
+      }
+    },
+    "move": {
+      "extends": "shell-grid",
+      "props": {
+        "move-menu-open": true,
+        "move-error": ""
+      }
+    },
+    "classify": {
+      "extends": "shell-grid",
+      "props": {
+        "classify-open": true,
+        "classify-shown": true,
+        "classify-summary": "3 个素材",
+        "classify-argument": "设计/封面",
+        "classify-matches": [
+          "设计",
+          "设计/封面",
+          "封面参考"
+        ],
+        "classify-hint": "将归入已有分类「设计/封面」",
+        "classify-hint-kind": 1
+      }
+    },
+    "import-result": {
+      "extends": "shell-grid",
+      "props": {
+        "import-result-open": true,
+        "import-result-shown": true,
+        "import-result-summary": "新增 18 个 · 跳过 4 个 · 失败 1 个",
+        "import-result-rows": [
+          {
+            "kind": 1,
+            "source": "cover-final-v3.png",
+            "existing": "cover-final-v2.png",
+            "distance": 6
+          },
+          {
+            "kind": 0,
+            "source": "dog.jpg",
+            "existing": "dog.jpg",
+            "distance": 0
+          },
+          {
+            "kind": 2,
+            "source": "broken.mov",
+            "existing": "文件损坏，无法读取视频流",
+            "distance": 0
+          }
+        ]
+      }
+    },
+    "settings-default": {
+      "extends": "shell-grid",
+      "props": {
+        "settings-open": true,
+        "settings-shown": true,
+        "app-version": "v0.1.7",
+        "update-status-text": "上次检查：今天 09:12 · 已是最新版本",
+        "settings": [
+          {
+            "key": "",
+            "title": "上框行为",
+            "detail": "",
+            "checked": false,
+            "enabled": false,
+            "header": true
+          },
+          {
+            "key": "activate_on_single_click",
+            "title": "上框触发方式",
+            "detail": "开：单击素材即进入输入框；关：双击才上框",
+            "checked": true,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "suppress_activate_on_asset_click",
+            "title": "点击素材不上浮窗口",
+            "detail": "上框后保持主窗在后面，不抢聊天窗口焦点",
+            "checked": false,
+            "enabled": false,
+            "header": false
+          },
+          {
+            "key": "send_after_paste",
+            "title": "上框后自动发送",
+            "detail": "默认关闭；开启后粘贴完会合成 Enter（可随时关掉）",
+            "checked": false,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "",
+            "title": "导入",
+            "detail": "",
+            "checked": false,
+            "enabled": false,
+            "header": true
+          },
+          {
+            "key": "fast_import_mode",
+            "title": "前台高速导入",
+            "detail": "导入时优先响应进度，缩略图稍后补齐",
+            "checked": true,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "",
+            "title": "外观",
+            "detail": "",
+            "checked": false,
+            "enabled": false,
+            "header": true
+          },
+          {
+            "key": "light_theme",
+            "title": "浅色主题",
+            "detail": "跟随 Fluent 亮色令牌，立即生效",
+            "checked": false,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "ui_animations",
+            "title": "界面动画",
+            "detail": "关闭后浮层与瓦片淡入即时完成",
+            "checked": true,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "",
+            "title": "高级",
+            "detail": "",
+            "checked": false,
+            "enabled": false,
+            "header": true
+          },
+          {
+            "key": "gpu_rendering",
+            "title": "GPU 渲染",
+            "detail": "下次启动生效；花屏时关闭",
+            "checked": false,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "nudge_offscreen_window",
+            "title": "屏外窗口自愈",
+            "detail": "窗口落到屏幕外时自动拉回可见区域",
+            "checked": true,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "auto_elevate_on_launch",
+            "title": "自动以管理员运行",
+            "detail": "需要向提权窗口粘贴时开启",
+            "checked": false,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "verbose_diagnostics",
+            "title": "细粒度诊断日志",
+            "detail": "排障用，日常保持关闭",
+            "checked": false,
+            "enabled": true,
+            "header": false
+          },
+          {
+            "key": "auto_update_check",
+            "title": "自动检查更新",
+            "detail": "每周后台检查一次",
+            "checked": true,
+            "enabled": true,
+            "header": false
+          }
+        ],
+        "target-tunings": [
+          {
+            "target-id": "wechat",
+            "label": "微信",
+            "point-x": "w-72",
+            "point-y": "h-40"
+          }
+        ]
+      }
+    },
+    "settings-logs": {
+      "extends": "shell-grid",
+      "props": {
+        "settings-open": true,
+        "settings-shown": true,
+        "settings": [],
+        "target-tunings": [],
+        "app-version": "v0.1.7",
+        "logs-export-armed": true,
+        "update-status-text": "上次检查：今天 09:12 · 已是最新版本"
+      },
+      "note": "刻意清空 settings 模型，让日志/关于区落在首屏；真实模型下这两区需滚动，布局高度问题要按真实模型复核，勿直接判死。"
+    },
+    "settings-about": {
+      "extends": "shell-grid",
+      "props": {
+        "settings-open": true,
+        "settings-shown": true,
+        "settings": [],
+        "target-tunings": [],
+        "app-version": "v0.1.7",
+        "update-checking": false,
+        "update-status-text": "发现新版本 v0.1.8（发布于 2026-10-22）",
+        "update-status-danger": false,
+        "update-badge": true
+      },
+      "note": "同 settings-logs：清空设置行仅为让「关于」区可见，避免首屏滚动不可达。"
+    },
+    "settings-danger": {
+      "extends": "shell-grid",
+      "props": {
+        "import-menu-open": true,
+        "import-menu-shown": true,
+        "clear-button-text": "再次点击清空全部素材",
+        "clear-button-armed": true
+      }
+    },
+    "tuning": {
+      "extends": "settings-default",
+      "props": {
+        "tuning-open": true,
+        "tuning-selected-id": "wechat",
+        "tuning-selected-label": "微信",
+        "tuning-x-text": "w-72",
+        "tuning-y-text": "h-40",
+        "tuning-error": ""
+      }
+    },
+    "update": {
+      "extends": "shell-grid",
+      "props": {
+        "update-open": true,
+        "update-shown": true,
+        "update-version": "v0.1.8",
+        "update-notes": "· 分类管理支持拖拽排序\n· 日志导出改为两段确认\n· 修复浅色主题下瓦片角标对比度",
+        "update-url": "https://example.invalid/releases/v0.1.8",
+        "update-status-text": "",
+        "update-progress-text": "",
+        "update-apply-error": ""
+      }
+    },
+    "target-ready": {
+      "extends": "shell-grid",
+      "props": {
+        "target-label": "微信 · 文件传输助手",
+        "target-health-color": "#5ac18e",
+        "target-pinned": true,
+        "target-mode": 1
+      }
+    },
+    "target-needs-confirmation": {
+      "extends": "shell-grid",
+      "props": {
+        "target-label": "企业微信 · 产品群",
+        "target-health-color": "#e3b457",
+        "target-pinned": true,
+        "target-mode": 2
+      }
+    },
+    "target-empty": {
+      "extends": "shell-grid",
+      "props": {
+        "target-label": "点击选择聊天窗口",
+        "target-health-color": "#777b80",
+        "target-pinned": false,
+        "target-mode": 0
+      }
+    },
+    "target-choose": {
+      "extends": "shell-grid",
+      "props": {
+        "target-mode": 3,
+        "target-picker-shown": true,
+        "target-choices": [
+          {
+            "selection-key": "wechat:wxid_a",
+            "label": "微信 · 文件传输助手",
+            "default-label": "微信 · 文件传输助手",
+            "status": "在线",
+            "health-color": "#5ac18e",
+            "available": true
+          },
+          {
+            "selection-key": "wework:dept",
+            "label": "企业微信 · 产品群",
+            "default-label": "企业微信 · 产品群",
+            "status": "需确认",
+            "health-color": "#e3b457",
+            "available": true
+          },
+          {
+            "selection-key": "qq:10001",
+            "label": "QQ · 我的电脑",
+            "default-label": "QQ · 我的电脑",
+            "status": "已关闭",
+            "health-color": "#777b80",
+            "available": false
+          }
+        ]
+      }
+    },
+    "target-rename": {
+      "extends": "target-choose",
+      "props": {
+        "target-rename-open": true,
+        "target-rename-default": "微信 · 文件传输助手",
+        "target-rename-text": "文件传输助手"
+      }
+    },
+    "share-devices": {
+      "extends": "shell-grid",
+      "props": {
+        "share-devices-open": true,
+        "share-scan-busy": false,
+        "share-selected-device": 0,
+        "share-devices": [
+          {
+            "name": "DESKTOP-7F3A",
+            "detail": "192.168.1.24:47820",
+            "selected": true
+          },
+          {
+            "name": "Laptop-Studio",
+            "detail": "192.168.1.31:47820",
+            "selected": false
+          }
+        ],
+        "share-summary-text": "发送中：dog.jpg → DESKTOP-7F3A（62%）"
+      }
+    },
+    "share-domains": {
+      "extends": "shell-grid",
+      "props": {
+        "share-domains-open": true,
+        "share-domains-hint": "勾选后，该素材会对域内成员可见（离线成员上线后同步）",
+        "share-asset-domains": [
+          {
+            "id": "grp-design",
+            "name": "设计组",
+            "member-count": 4,
+            "shared": true,
+            "is-personal": false,
+            "selected": false
+          },
+          {
+            "id": "self",
+            "name": "我的设备",
+            "member-count": 1,
+            "shared": false,
+            "is-personal": true,
+            "selected": false
+          }
+        ]
+      }
+    },
+    "share-ctl": {
+      "extends": "shell-grid",
+      "props": {
+        "share-ctl-open": true,
+        "share-ctl-self-id": "AD7Q-2M4K-9XPL-3T6R",
+        "share-ctl-join-code": "",
+        "share-ctl-invite-code": "设计组邀请码：GRP4-8H2N-6WQK",
+        "share-ctl-unseen": 2,
+        "share-ctl-selected-domain": 0,
+        "share-ctl-selected-domain-id": "grp-design",
+        "share-ctl-devices": [
+          {
+            "id": "dev-1",
+            "name": "DESKTOP-7F3A"
+          },
+          {
+            "id": "dev-2",
+            "name": "Laptop-Studio"
+          }
+        ],
+        "share-ctl-domains": [
+          {
+            "id": "grp-design",
+            "name": "设计组",
+            "member-count": 4,
+            "shared": true,
+            "is-personal": false,
+            "selected": true
+          },
+          {
+            "id": "self",
+            "name": "我的设备",
+            "member-count": 1,
+            "shared": false,
+            "is-personal": true,
+            "selected": false
+          }
+        ],
+        "share-ctl-members": [
+          {
+            "id": "dev-1",
+            "name": "DESKTOP-7F3A",
+            "checked": true
+          },
+          {
+            "id": "dev-2",
+            "name": "Laptop-Studio",
+            "checked": true
+          },
+          {
+            "id": "dev-3",
+            "name": "Office-PC",
+            "checked": false
+          }
+        ],
+        "share-face-selected-peer": 0,
+        "share-face-peers": [
+          {
+            "name": "Office-PC",
+            "detail": "12 项可得",
+            "offer-count": 12,
+            "selected": true
+          },
+          {
+            "name": "Laptop-Studio",
+            "detail": "4 项可得",
+            "offer-count": 4,
+            "selected": false
+          }
+        ],
+        "share-face-offers": [
+          {
+            "asset-id": "a-1",
+            "name": "brand-kit.sketch",
+            "kind": 3,
+            "size": "18.4 MB"
+          },
+          {
+            "asset-id": "a-2",
+            "name": "cover-wip.png",
+            "kind": 0,
+            "size": "3.1 MB"
+          },
+          {
+            "asset-id": "a-3",
+            "name": "motion-ref.mp4",
+            "kind": 1,
+            "size": "42.7 MB"
+          }
+        ],
+        "share-face-hint": "索取后需对端同意，素材才会推送过来"
+      }
+    },
+    "share-request": {
+      "extends": "shell-grid",
+      "props": {
+        "share-request-open": true,
+        "share-request-text": "Office-PC 想获取你的 3 项素材：dog.jpg、desk.jpg、sky1.png"
+      }
+    },
+    "share-offer": {
+      "extends": "shell-grid",
+      "props": {
+        "share-offer-open": true,
+        "share-offer-text": "Laptop-Studio 想向你发送 5 项素材（共 86.3 MB）。接收后会存入「收件箱」。"
+      }
+    },
+    "shell-narrow": {
+      "extends": "shell-grid",
+      "window": {
+        "width": 960,
+        "height": 600
+      },
+      "props": {
+        "total-text": "12,480 个素材",
+        "notice-text": "已复制到剪贴板",
+        "notice-tone": 0,
+        "selection-bar": 1,
+        "selection-count": 12,
+        "selection-text": "已选 12 项",
+        "select-mode-active": true
+      }
+    },
+    "theme-light": {
+      "extends": "shell-grid",
+      "props": {
+        "settings-open": false,
+        "settings-shown": false,
+        "selection-bar": 0
+      },
+      "globals": {
+        "Palette.color-scheme": "light",
+        "Theme.bg-app": "#f7f7f8",
+        "Theme.bg-panel": "#ffffff",
+        "Theme.bg-bar": "#ececf0",
+        "Theme.bg-raised": "#ffffff",
+        "Theme.bg-raised-hover": "#f0f0f3",
+        "Theme.bg-raised-press": "#e4e4e9",
+        "Theme.bg-input": "#ffffff",
+        "Theme.line": "#e0e0e6",
+        "Theme.line-strong": "#c8c8d0",
+        "Theme.text": "#1f2328",
+        "Theme.text-2": "#444b52",
+        "Theme.text-3": "#8a9199",
+        "Theme.accent": "#0b7ec2",
+        "Theme.accent-hover": "#0a6faa",
+        "Theme.accent-press": "#095d90",
+        "Theme.accent-ink": "#ffffff",
+        "Theme.accent-soft": "#e3f0fc",
+        "Theme.danger": "#c0343f",
+        "Theme.danger-soft": "#fbe8ea",
+        "Theme.danger-press": "#a92d37",
+        "Theme.warn": "#9a6b10",
+        "Theme.warn-soft": "#f8efd9",
+        "Theme.ok-soft": "#e3f2e8",
+        "Theme.bg-overlay": "#fafafb",
+        "Theme.scrim": "#00000033",
+        "Theme.label-bar-bg": "#ffffffcc",
+        "Theme.label-bar-bg-hover": "#ffffff",
+        "Theme.label-bar-text": "#1f2328"
+      }
+    },
+    "share-summary": {
+      "extends": "shell-grid",
+      "props": {
+        "share-summary-text": "发送中：dog.jpg → DESKTOP-7F3A（62%）；cover-v3.png 排队中"
+      }
+    }
+  }
+}

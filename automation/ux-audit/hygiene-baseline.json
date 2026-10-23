@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-24",
+  "updatedBy": "init",
+  "scope": "crates/app-ui/ui/*.slint",
+  "counts": {
+    "hex_outside_theme": 6,
+    "font_size_literals": 110,
+    "font_size_off_scale": 16,
+    "border_radius_literals": 12,
+    "border_radius_off_scale": 5
+  },
+  "allowed_font_sizes_px": [10, 11, 12, 14, 16],
+  "allowed_radii_px": [4, 7, 8, 999],
+  "notes": "只降不升：每次 ux-audit 修复后把计数下调；升高视为回归，测试失败。hex 扫描排除 theme.slint（令牌唯一来源）。off_scale 指不在 allowed_* 列表内的字面量个数。"
+}

@@ -176,6 +176,7 @@ dependencies = [
  "lru",
  "platform",
  "raw-window-handle",
+ "serde_json",
  "slint",
  "slint-build",
  "ui-viewmodels",
