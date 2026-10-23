@@ -32,3 +32,12 @@
 - 截图：target/ux-audit/shots/M0-C1/after/settings-default.png;target/ux-audit/shots/M0-C1/after/shell-grid.png;target/ux-audit/shots/M0-C1/after/theme-light.png
 - 基线：f222909
 
+## run-20261024-020025 · M0-C2 · done
+
+- 组件：字体阶梯与字号 token
+- 结论：建立 Typography 五档令牌与 TitleLabel/SectionLabel 原语，110 处字号字面量清零；9px/13px 归并、主读数升 display、弹窗与分组标题层级理顺；截断文本 Tooltip 缺口留 M2-C1/M3-C2。
+- Findings：F-003(fixed) 字号字面量 110 处，未形成字体阶梯；F-011(fixed) 上框点位表单使用 9px 字号，低于 caption 下限；F-012(fixed) 13 处弹窗标题停留在 13px 过渡档；F-013(fixed) SectionLabel 用 caption 10px 承载面板与分组结构标题；F-014(fixed) 错误与关键状态文案被压到 caption 10px；F-015(fixed) 主读数沿用 14px，未使用 display 档
+- 门禁：slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(font 0/off 0/hex 0);capture-check=pass;visual=pass
+- 截图：target/ux-audit/shots/M0-C2/after/shell-grid.png;target/ux-audit/shots/M0-C2/after/settings-default.png;target/ux-audit/shots/_states/after/tuning.png;target/ux-audit/shots/_states/after/update.png
+- 基线：113f18a
+

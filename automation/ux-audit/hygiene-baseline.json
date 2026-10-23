@@ -1,12 +1,12 @@
 {
   "version": 1,
   "updatedAt": "2026-10-24",
-  "updatedBy": "init",
+  "updatedBy": "run-20261024-020025 (M0-C2)",
   "scope": "crates/app-ui/ui/*.slint",
   "counts": {
     "hex_outside_theme": 0,
-    "font_size_literals": 110,
-    "font_size_off_scale": 16,
+    "font_size_literals": 0,
+    "font_size_off_scale": 0,
     "border_radius_literals": 12,
     "border_radius_off_scale": 5
   },

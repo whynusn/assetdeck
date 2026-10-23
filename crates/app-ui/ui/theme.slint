@@ -63,6 +63,29 @@ export global Theme {
     in-out property <length> radius-lg: 8px;
 }
 
+// 字体阶梯：界面只消费这里的字号/字重，禁止内联 font-size 字面量（契约 §1.2）。
+// display 只给主读数；title 给面板/弹窗标题；body 给行与正文；label 给按钮/
+// 说明/状态；caption 只留给计数、文件类型等次要元数据。
+export global Typography {
+    out property <length> display: 16px;
+    out property <length> title: 14px;
+    out property <length> body: 12px;
+    out property <length> label: 11px;
+    out property <length> caption: 10px;
+
+    out property <int> regular: 400;
+    out property <int> medium: 500;
+    out property <int> semibold: 600;
+}
+
+// 弹窗/面板标题：14px/600。所有标题共用一处，避免 13px 过渡档回流。
+export component TitleLabel inherits Text {
+    color: Theme.text;
+    font-size: Typography.title;
+    font-weight: Typography.semibold;
+    vertical-alignment: center;
+}
+
 // 图标：统一 24 单位视图盒的描边图形（lucide 风格几何），只吃 commands + 尺寸。
 export component Icon inherits Path {
     in property <color> tint: Theme.text-2;
@@ -198,7 +221,7 @@ export component DangerButton inherits Rectangle {
         Text {
             text: root.text;
             color: root.enabled ? Theme.danger : Theme.text-3;
-            font-size: 12px;
+            font-size: Typography.body;
             vertical-alignment: center;
         }
     }
@@ -212,11 +235,11 @@ export component DangerButton inherits Rectangle {
     }
 }
 
-// 分区小标题：给侧栏/面板分组，字号压到 10px 并调淡，不与内容抢注意力。
+// 分区小标题：结构标题用 label 档并调淡，不与内容抢注意力；caption 留给元数据。
 export component SectionLabel inherits Text {
     color: Theme.text-3;
-    font-size: 10px;
-    font-weight: 600;
+    font-size: Typography.label;
+    font-weight: Typography.semibold;
     vertical-alignment: center;
 }
 
@@ -248,7 +271,8 @@ export component FlatButton inherits Rectangle {
         Text {
             text: root.text;
             color: root.enabled ? Theme.text-2 : Theme.text-3;
-            font-size: 11px;
+            font-size: Typography.label;
+            font-weight: Typography.medium;
             vertical-alignment: center;
         }
     }
@@ -349,14 +373,14 @@ export component MenuItem inherits Rectangle {
             Text {
                 text: root.text;
                 color: Theme.text;
-                font-size: 12px;
+                font-size: Typography.body;
                 overflow: elide;
             }
 
             if root.detail != "": Text {
                 text: root.detail;
                 color: Theme.text-3;
-                font-size: 10px;
+                font-size: Typography.caption;
                 overflow: elide;
             }
         }
@@ -389,13 +413,13 @@ export component SettingRow inherits HorizontalLayout {
         Text {
             text: root.title;
             color: root.enabled ? Theme.text : Theme.text-3;
-            font-size: 12px;
+            font-size: Typography.body;
         }
 
         Text {
             text: root.detail;
             color: Theme.text-3;
-            font-size: 10px;
+            font-size: Typography.label;
             wrap: word-wrap;
         }
     }

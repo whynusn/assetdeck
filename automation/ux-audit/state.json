@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T17:25:39.406Z",
-  "runCount": 2,
+  "updatedAt": "2026-10-23T18:11:45.473Z",
+  "runCount": 3,
   "lastRuns": [
+    {
+      "runId": "run-20261024-020025",
+      "runNumber": 3,
+      "componentId": "M0-C2",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Typography 五档令牌与 TitleLabel/SectionLabel 原语，110 处字号字面量清零；9px/13px 归并、主读数升 display、弹窗与分组标题层级理顺；截断文本 Tooltip 缺口留 M2-C1/M3-C2。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(font 0/off 0/hex 0);capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C2/after/shell-grid.png;target/ux-audit/shots/M0-C2/after/settings-default.png;target/ux-audit/shots/_states/after/tuning.png;target/ux-audit/shots/_states/after/update.png",
+      "baseCommit": "113f18a",
+      "finishedAt": "2026-10-23T18:11:45.469Z"
+    },
     {
       "runId": "run-20261024-010014",
       "runNumber": 2,
@@ -69,7 +81,7 @@
           "name": "字体阶梯与字号 token",
           "priority": 1,
           "dependsOn": [],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint",
             "crates/app-ui/ui/appwindow.slint"
@@ -84,9 +96,9 @@
             "settings-default"
           ],
           "focus": "字号阶梯是否收敛（display/title/body/label/caption）；10/11/12/13/14 混用；层级可辨性；长文本截断与 Tooltip。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-020025",
+          "auditedAtCommit": "113f18a",
+          "notes": "[run-20261024-020025] 建立 Typography 五档令牌与 TitleLabel/SectionLabel 原语，110 处字号字面量清零；9px/13px 归并、主读数升 display、弹窗与分组标题层级理顺；截断文本 Tooltip 缺口留 M2-C1/M3-C2。"
         },
         {
           "id": "M0-C3",
@@ -1618,11 +1630,11 @@
       "title": "字号字面量 110 处，未形成字体阶梯",
       "detail": "font-size 在 appwindow.slint 与 theme.slint 中共 110 处数值字面量，10/11/12/13/14 混用；契约要求 display/title/body/label/caption 五档 token。",
       "evidence": "crates/app-ui/ui/appwindow.slint；crates/app-ui/ui/theme.slint；hygiene-baseline.json",
-      "status": "open",
+      "status": "fixed",
       "createdRun": 0,
-      "closedRun": null,
-      "fix": "",
-      "guard": ""
+      "closedRun": 3,
+      "fix": "theme.slint 新增 Typography 五档字号/三档字重令牌，appwindow/theme 全部 110 处 font-size 字面量改为令牌消费；13px/9px 一并归并",
+      "guard": "ui_hygiene font_size_literals 与 off_scale 基线下调到 0（只降不升）"
     },
     {
       "id": "F-004",
@@ -1721,6 +1733,76 @@
       "closedRun": 2,
       "fix": "成功通知图标改用 Theme.ok；共享域「共享中」改用 Theme.shared，与瓦片共享紫点同语义",
       "guard": "ui_hygiene hex=0；notice-success / share-domains 截图复核"
+    },
+    {
+      "id": "F-011",
+      "componentId": "M0-C2",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "上框点位表单使用 9px 字号，低于 caption 下限",
+      "detail": "x/y 表达式字段标签与客户区原点说明均为 9px，低于契约 §1.2 的 caption 10px 下限；340px 弹窗里说明文字挤成三行且难读。字号表里根本没有 9px 档，属于阶梯外漂移。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:2239,2252,2265；截图 target/ux-audit/shots/_states/before/tuning.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "x/y 表达式标签改 label 11，原点说明改 caption 10，输入框正文改 body 12",
+      "guard": "字号阶仅 10/11/12/14/16，9px 无令牌可用；hygiene=0"
+    },
+    {
+      "id": "F-012",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "13 处弹窗标题停留在 13px 过渡档",
+      "detail": "重命名/移动/共享/属性/更新等 12 个弹窗标题与空态标题都用 13px，契约要求归并到 title 14px；设置面板标题反而只有 10px，导致「主读数 14 / 弹窗标题 13 / 面板标题 10」的层级倒置。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1672,1844,2221,2456,2670,2767,2823,2879,2971,3308,3368,3427,3514；截图 _states/before/rename.png、update.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "12 个弹窗标题与空态标题统一走 TitleLabel（14/600）；设置面板标题由 SectionLabel 升级为 TitleLabel",
+      "guard": "TitleLabel 原语唯一标题入口；13px 字面量已清零"
+    },
+    {
+      "id": "F-013",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "SectionLabel 用 caption 10px 承载面板与分组结构标题",
+      "detail": "SectionLabel 固定 10px/600，被用于设置面板标题「设置」、分组标题「上框行为/外观/高级」和侧栏「分类/素材库」；契约规定 caption 只服务次要元数据，结构标题应使用 label/title 档，当前面板标题与分组标题同级、且比行标题小 2px。",
+      "evidence": "crates/app-ui/ui/theme.slint:216-221；crates/app-ui/ui/appwindow.slint:2024,2050；截图 settings-default.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "SectionLabel 改 label 11/600，只承载结构小标题；面板标题改用 TitleLabel 14/600",
+      "guard": "共享原语一处修改全屏生效；caption 不再承载结构标题"
+    },
+    {
+      "id": "F-014",
+      "componentId": "M0-C2",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "错误与关键状态文案被压到 caption 10px",
+      "detail": "重命名/分类重命名/移动/上框点位的错误行、更新版本与进度、归类提示、导入结果分类标签、迁移说明、设置项说明均为 10px；错误与决策信息使用 caption 档，既违反「caption 不得承载唯一关键信息」，也让失败原因在 316px 面板里难以扫读。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:2147,2189,2272,2507,3320,3380,3527,3567,3714,3799；截图 update.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "错误/更新状态/归类提示/导入结果分类/迁移说明/设置说明统一提升到 label 11；输入框正文 body 12",
+      "guard": "caption 仅保留计数、文件类型、地址、大小等元数据"
+    },
+    {
+      "id": "F-015",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "主读数沿用 14px，未使用 display 档",
+      "detail": "顶栏总数「12,480 素材」是主读数，契约 §1.2 指定 display 16px/600；当前 14px 与弹窗标题同档，主信息在 48px 顶栏里不够立。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:650-655；截图 shell-grid.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "顶栏主读数改用 Typography.display（16/600）",
+      "guard": "display 档只用于主读数；字号令牌唯一来源"
     }
   ]
 }
