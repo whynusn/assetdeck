@@ -6,6 +6,7 @@
 //!   不在设计字阶（10/11/12/14/16）内的个数。
 //! - border_radius_literals / border_radius_off_scale：`border-radius: <n>px`
 //!   字面量与不在圆角阶（4/7/8/999=胶囊）内的个数。
+//! - spacing_off_scale：`padding*` / `spacing` 中不在 4px 网格内的字面量个数。
 //!
 //! 基线与允许值在 automation/ux-audit/hygiene-baseline.json。修完一处后
 //! 必须同步下调基线；基线数字升高 = 回归，直接失败。
@@ -22,6 +23,7 @@ struct Baseline {
     counts: Counts,
     allowed_font_sizes: Vec<f64>,
     allowed_radii: Vec<f64>,
+    allowed_spacing: Vec<f64>,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -31,6 +33,7 @@ struct Counts {
     font_size_off_scale: usize,
     border_radius_literals: usize,
     border_radius_off_scale: usize,
+    spacing_off_scale: usize,
 }
 
 fn load_baseline() -> Baseline {
@@ -60,9 +63,11 @@ fn load_baseline() -> Baseline {
             font_size_off_scale: read("font_size_off_scale"),
             border_radius_literals: read("border_radius_literals"),
             border_radius_off_scale: read("border_radius_off_scale"),
+            spacing_off_scale: read("spacing_off_scale"),
         },
         allowed_font_sizes: read_list("allowed_font_sizes_px"),
         allowed_radii: read_list("allowed_radii_px"),
+        allowed_spacing: read_list("allowed_spacing_px"),
     }
 }
 
@@ -158,6 +163,17 @@ fn measure(baseline: &Baseline) -> Counts {
             count_px_literals(&code, "border-radius", &baseline.allowed_radii);
         counts.border_radius_literals += radius_total;
         counts.border_radius_off_scale += radius_off;
+        for property in [
+            "padding",
+            "padding-left",
+            "padding-right",
+            "padding-top",
+            "padding-bottom",
+            "spacing",
+        ] {
+            let (_, off) = count_px_literals(&code, property, &baseline.allowed_spacing);
+            counts.spacing_off_scale += off;
+        }
     }
     counts
 }
@@ -178,6 +194,7 @@ fn ui_hygiene_counts_never_exceed_baseline() {
         ("font_size_off_scale", current.font_size_off_scale, baseline.counts.font_size_off_scale),
         ("border_radius_literals", current.border_radius_literals, baseline.counts.border_radius_literals),
         ("border_radius_off_scale", current.border_radius_off_scale, baseline.counts.border_radius_off_scale),
+        ("spacing_off_scale", current.spacing_off_scale, baseline.counts.spacing_off_scale),
     ];
     for (name, now, cap) in checks {
         if now > cap {
@@ -207,6 +224,11 @@ fn baseline_scale_cannot_be_silently_widened() {
         baseline.allowed_radii,
         vec![4.0, 7.0, 8.0, 999.0],
         "圆角阶被改动：请同步 design-contract.md §1.3，并用 contract: 提交说明理由"
+    );
+    assert_eq!(
+        baseline.allowed_spacing,
+        vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0],
+        "间距阶被改动：请同步 design-contract.md §1.3，并用 contract: 提交说明理由"
     );
     assert!(
         baseline.counts.font_size_off_scale <= baseline.counts.font_size_literals

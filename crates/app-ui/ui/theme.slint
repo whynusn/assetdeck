@@ -63,6 +63,39 @@ export global Theme {
     in-out property <length> radius-lg: 8px;
 }
 
+// 间距阶梯：4px 基准网格（2px 为半档）。语义内边距按「栏 / 面板 / 弹窗 /
+// 菜单」分档；界面不再写 14px 之类阶梯外值（契约 §1.3）。
+export global Spacing {
+    out property <length> xxs: 2px;
+    out property <length> xs: 4px;
+    out property <length> sm: 6px;
+    out property <length> md: 8px;
+    out property <length> lg: 10px;
+    out property <length> xl: 12px;
+    out property <length> xxl: 16px;
+    out property <length> xxxl: 20px;
+    out property <length> huge: 24px;
+
+    out property <length> bar-pad: 12px;
+    out property <length> panel-pad: 12px;
+    out property <length> dialog-pad: 16px;
+    out property <length> menu-pad: 6px;
+}
+
+// 控件尺寸：高度/图标按钮/开关/行高统一取这里，避免同一 30px 抄几十处。
+export global Metrics {
+    out property <length> row-compact: 28px;
+    out property <length> control: 30px;
+    out property <length> control-primary: 32px;
+    out property <length> icon-button: 30px;
+    out property <length> menu-row: 46px;
+    out property <length> bar: 48px;
+    out property <length> toggle-width: 40px;
+    out property <length> toggle-height: 22px;
+    out property <length> hit-min: 28px;
+    out property <length> lock-area: 30px;
+}
+
 // 字体阶梯：界面只消费这里的字号/字重，禁止内联 font-size 字面量（契约 §1.2）。
 // display 只给主读数；title 给面板/弹窗标题；body 给行与正文；label 给按钮/
 // 说明/状态；caption 只留给计数、文件类型等次要元数据。
@@ -147,8 +180,8 @@ export component IconButton inherits Rectangle {
     in property <length> icon-size: 16px;
     callback clicked();
 
-    width: 30px;
-    height: 30px;
+    width: Metrics.icon-button;
+    height: Metrics.icon-button;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
@@ -192,7 +225,7 @@ export component DangerButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    height: 30px;
+    height: Metrics.control;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
@@ -206,9 +239,9 @@ export component DangerButton inherits Rectangle {
 
     HorizontalLayout {
         alignment: center;
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 6px;
+        padding-left: Spacing.lg;
+        padding-right: Spacing.lg;
+        spacing: Spacing.sm;
 
         Icon {
             y: (parent.height - self.height) / 2;
@@ -251,14 +284,14 @@ export component FlatButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    height: 28px;
+    height: Metrics.row-compact;
     border-radius: Theme.radius;
     background: !root.enabled ? Theme.bg-raised : touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
     animate background { duration: 120ms; }
 
     HorizontalLayout {
         alignment: center;
-        spacing: 5px;
+        spacing: Spacing.sm;
 
         if root.glyph != "": Icon {
             y: (parent.height - self.height) / 2;
@@ -301,9 +334,9 @@ export component Toggle inherits Rectangle {
     in property <bool> enabled: true;
     callback toggled();
 
-    width: 40px;
-    height: 22px;
-    border-radius: 11px;
+    width: Metrics.toggle-width;
+    height: Metrics.toggle-height;
+    border-radius: self.height / 2;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
         : root.checked ? Theme.accent
@@ -319,9 +352,9 @@ export component Toggle inherits Rectangle {
     knob := Rectangle {
         width: 14px;
         height: 14px;
-        border-radius: 7px;
+        border-radius: self.height / 2;
         y: (parent.height - self.height) / 2;
-        x: root.checked ? parent.width - self.width - 4px : 4px;
+        x: root.checked ? parent.width - self.width - Spacing.xs : Spacing.xs;
         background: !root.enabled ? Theme.text-3 : root.checked ? Theme.accent-ink : Theme.text-2;
 
         animate x, background { duration: 140ms; easing: ease-out; }
@@ -344,7 +377,7 @@ export component MenuItem inherits Rectangle {
     in property <string> detail: "";
     callback clicked();
 
-    height: 46px;
+    height: Metrics.menu-row;
     border-radius: Theme.radius;
     background: touch.pressed ? Theme.bg-raised-press
         : touch.has-hover ? Theme.bg-raised-hover
@@ -353,9 +386,9 @@ export component MenuItem inherits Rectangle {
     animate background { duration: 100ms; }
 
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 9px;
+        padding-left: Spacing.lg;
+        padding-right: Spacing.lg;
+        spacing: Spacing.md;
 
         Icon {
             y: (parent.height - self.height) / 2;
@@ -368,7 +401,7 @@ export component MenuItem inherits Rectangle {
         VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
-            spacing: 1px;
+            spacing: Spacing.xxs;
 
             Text {
                 text: root.text;
@@ -403,11 +436,11 @@ export component SettingRow inherits HorizontalLayout {
     in property <bool> enabled: true;
     callback toggled();
 
-    spacing: 12px;
+    spacing: Spacing.xl;
 
     VerticalLayout {
         horizontal-stretch: 1;
-        spacing: 3px;
+        spacing: Spacing.xxs;
         alignment: center;
 
         Text {

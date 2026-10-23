@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T18:11:45.473Z",
-  "runCount": 3,
+  "updatedAt": "2026-10-23T19:17:29.165Z",
+  "runCount": 4,
   "lastRuns": [
+    {
+      "runId": "run-20261024-030013",
+      "runNumber": 4,
+      "componentId": "M0-C3",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Spacing/Metrics 两套令牌（4px 网格、栏/面板/弹窗/菜单内边距、控件/行高/开关/热区尺寸），结构性间距与高度全部改为消费令牌；清零圆角字面量与阶梯外 spacing，通知关闭/共享行按钮/归类候选热区提到 ≥28px。共享中心与设置面板的纵向溢出仍归 M9-C1/M7-C1。",
+      "gates": "slint-check=pass;cargo-check=pass;ui-hygiene=pass(hex 0/font 0/off 0/radius 0/off 0/spacing 0);deps-guard=pass;capture-check=pass(42 states);visual=pass(8 组 before/after)",
+      "shots": "target/ux-audit/shots/M0-C3/after/shell-grid.png;target/ux-audit/shots/M0-C3/after/settings-default.png;target/ux-audit/shots/_states/after/notice-success.png;target/ux-audit/shots/_states/after/selection-bar.png;target/ux-audit/shots/_states/after/share-ctl.png;target/ux-audit/shots/_states/after/classify.png;target/ux-audit/shots/_states/after/properties.png;target/ux-audit/shots/_states/after/rename.png",
+      "baseCommit": "b79d9e5",
+      "finishedAt": "2026-10-23T19:17:29.162Z"
+    },
     {
       "runId": "run-20261024-020025",
       "runNumber": 3,
@@ -105,7 +117,7 @@
           "name": "间距/尺寸/圆角/图标 token",
           "priority": 1,
           "dependsOn": [],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint",
             "crates/app-ui/ui/appwindow.slint"
@@ -123,9 +135,9 @@
             "settings-default"
           ],
           "focus": "间距是否落在 4px 网格；控件高度/图标尺寸/圆角是否成体系；热区 ≥28px；危险按钮隔离。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-030013",
+          "auditedAtCommit": "b79d9e5",
+          "notes": "[run-20261024-030013] 建立 Spacing/Metrics 两套令牌（4px 网格、栏/面板/弹窗/菜单内边距、控件/行高/开关/热区尺寸），结构性间距与高度全部改为消费令牌；清零圆角字面量与阶梯外 spacing，通知关闭/共享行按钮/归类候选热区提到 ≥28px。共享中心与设置面板的纵向溢出仍归 M9-C1/M7-C1。"
         },
         {
           "id": "M0-C4",
@@ -1803,6 +1815,48 @@
       "closedRun": 3,
       "fix": "顶栏主读数改用 Typography.display（16/600）",
       "guard": "display 档只用于主读数；字号令牌唯一来源"
+    },
+    {
+      "id": "F-016",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "间距与控件尺寸没有共享令牌，14/9/7/5/3px 阶梯外值散落",
+      "detail": "栏/面板/弹窗内边距分别写死 14/12/6px，同一 14px 出现 23 次；5px（图标文字间距）、7px（chip 间距）、9px（搜索结果图标/菜单图标间距）、3px（设置行、目标行）、1px（双行行距）都不在 4px 网格；30px 控件高度重复 39 次，通知条 34px 与进度条 32px 不成体系。theme.slint 只有颜色/字号/圆角令牌，没有 Spacing/Metrics，后续每个界面只能继续抄数字。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:643,828,882,1064,1099,1131,1772,1775,1839,2537,3020,3649；crates/app-ui/ui/theme.slint:261,358,410；截图 target/ux-audit/shots/M0-C3/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "theme.slint 新增 Spacing（4px 网格 + 栏/面板/弹窗/菜单四档）与 Metrics（控件/图标按钮/菜单行/栏/开关/热区）令牌；appwindow/theme 的结构性 padding/spacing/高度改为消费令牌，14/9/7/5/3/1px 阶梯外值清零，通知条 34→32 与进度条同档",
+      "guard": "ui_hygiene 新增 spacing_off_scale 计数，基线=0；允许阶固定 0/2/4/6/8/10/12/16/20/24 且禁止静默放宽"
+    },
+    {
+      "id": "F-017",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "圆角仍有 12 处字面量与 5 处阶梯外值，圆形/胶囊靠魔法数",
+      "detail": "border-radius 在 appwindow 与 theme 共 12 处字面量，其中 3.5/5/10/11/14 五处不在圆角阶；7px 类型徽标、999px 结果胶囊、14px 摘要条、11px 开关、20px 勾选圆各写一套。契约要求控件 4、面板 8、胶囊=高度/2，圆角应有唯一来源。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:896,1497,1552,1572,1587,2622,3751；crates/app-ui/ui/theme.slint:306,322；automation/ux-audit/hygiene-baseline.json",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "圆角字面量全部移除：勾选圆/状态点/锁区/摘要条/开关/结果徽标改 width|height/2，类型徽标 7→Theme.radius(4)，面板/弹窗统一 radius-lg；12 处字面量与 5 处阶梯外值归零",
+      "guard": "ui_hygiene border_radius_literals=0、off_scale=0；allowed_radii 仍锁 4/7/8/999 且禁止静默放宽"
+    },
+    {
+      "id": "F-018",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "三处可点击热区低于 28px 下限",
+      "detail": "通知条关闭按钮 22×22、共享中心行内按钮高 24px（个人域/移除/邀请码/删除/索取）、归类候选项行高 26px；契约要求热区 ≥28×28。共享中心按钮夹在 30px 行里显得局促，归类候选项点击时容易点空。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1099,3020-3025,3081-3086,3232,3649；截图 target/ux-audit/shots/_states/before/share-ctl.png、_states/before/classify.png",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "通知条关闭 22→Metrics.hit-min(28)，共享中心行内按钮 24→Metrics.row-compact(28)，归类候选行 26→28（滚动上限同步 178=6×28+5×2）；三处热区均达 ≥28×28",
+      "guard": "热区高度统一消费 Metrics.hit-min/row-compact，禁止再写字面量；notice-success/share-ctl/classify 截图逐张复核"
     }
   ]
 }

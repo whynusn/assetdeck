@@ -41,3 +41,12 @@
 - 截图：target/ux-audit/shots/M0-C2/after/shell-grid.png;target/ux-audit/shots/M0-C2/after/settings-default.png;target/ux-audit/shots/_states/after/tuning.png;target/ux-audit/shots/_states/after/update.png
 - 基线：113f18a
 
+## run-20261024-030013 · M0-C3 · done
+
+- 组件：间距/尺寸/圆角/图标 token
+- 结论：建立 Spacing/Metrics 两套令牌（4px 网格、栏/面板/弹窗/菜单内边距、控件/行高/开关/热区尺寸），结构性间距与高度全部改为消费令牌；清零圆角字面量与阶梯外 spacing，通知关闭/共享行按钮/归类候选热区提到 ≥28px。共享中心与设置面板的纵向溢出仍归 M9-C1/M7-C1。
+- Findings：F-016(fixed) 间距与控件尺寸没有共享令牌，14/9/7/5/3px 阶梯外值散落；F-017(fixed) 圆角仍有 12 处字面量与 5 处阶梯外值，圆形/胶囊靠魔法数；F-018(fixed) 三处可点击热区低于 28px 下限
+- 门禁：slint-check=pass;cargo-check=pass;ui-hygiene=pass(hex 0/font 0/off 0/radius 0/off 0/spacing 0);deps-guard=pass;capture-check=pass(42 states);visual=pass(8 组 before/after)
+- 截图：target/ux-audit/shots/M0-C3/after/shell-grid.png;target/ux-audit/shots/M0-C3/after/settings-default.png;target/ux-audit/shots/_states/after/notice-success.png;target/ux-audit/shots/_states/after/selection-bar.png;target/ux-audit/shots/_states/after/share-ctl.png;target/ux-audit/shots/_states/after/classify.png;target/ux-audit/shots/_states/after/properties.png;target/ux-audit/shots/_states/after/rename.png
+- 基线：b79d9e5
+

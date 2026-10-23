@@ -4,7 +4,7 @@
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
 import { Button, CheckBox, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
-import { Theme, Typography, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
+import { Theme, Typography, Spacing, Metrics, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
 // 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
@@ -636,13 +636,13 @@ export component AppWindow inherits Window {
             // 不写 alignment:start：默认 stretch 下弹性占位才能吃掉剩余宽度，
             // 把右簇推到最右（alignment:start 会把所有元素压到左半边）。
             Rectangle {
-                height: 48px;
+                height: Metrics.bar;
                 background: Theme.bg-bar;
 
                 HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 8px;
+                    padding-left: Spacing.bar-pad;
+                    padding-right: Spacing.bar-pad;
+                    spacing: Spacing.md;
 
                     // —— 左簇：视图读数。计数为主、当前视图为次，句子式黏排
                     //（中点隔开）——旧 chip 描边删掉：计数和视图本是一句话的两段。
@@ -678,7 +678,7 @@ export component AppWindow inherits Window {
                     //（不钉会被 HorizontalLayout 纵向拉满整行，真机截图教训）。
                     search-capsule := Rectangle {
                         y: (parent.height - self.height) / 2;
-                        height: 30px;
+                        height: Metrics.control;
                         min-width: 150px;
                         max-width: 320px;
                         horizontal-stretch: 1;
@@ -700,7 +700,7 @@ export component AppWindow inherits Window {
                         }
 
                         Icon {
-                            x: 9px;
+                            x: Spacing.md;
                             y: (parent.height - self.height) / 2;
                             commands: Glyph.search;
                             tint: search-input.has-focus ? Theme.accent : Theme.text-3;
@@ -758,9 +758,9 @@ export component AppWindow inherits Window {
                         }
 
                         search-input := TextInput {
-                            x: scope-anchor.x + scope-anchor.width + 9px;
+                            x: scope-anchor.x + scope-anchor.width + Spacing.md;
                             y: (parent.height - self.height) / 2;
-                            width: parent.width - self.x - 9px;
+                            width: parent.width - self.x - Spacing.md;
                             height: 18px;
                             font-size: Typography.body;
                             color: Theme.text;
@@ -801,7 +801,7 @@ export component AppWindow inherits Window {
                     select-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: 62px;
-                        height: 30px;
+                        height: Metrics.control;
 
                         select-touch := TouchArea {
                             mouse-cursor: MouseCursor.pointer;
@@ -823,9 +823,9 @@ export component AppWindow inherits Window {
                             animate background, border-color { duration: 100ms; }
 
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                spacing: 5px;
+                                padding-left: Spacing.md;
+                                padding-right: Spacing.md;
+                                spacing: Spacing.sm;
 
                                 Icon {
                                     y: (parent.height - self.height) / 2;
@@ -863,7 +863,7 @@ export component AppWindow inherits Window {
                                 : "切换上框目标窗口";
 
                         y: (parent.height - self.height) / 2;
-                        height: 30px;
+                        height: Metrics.control;
                         width: Math.max(170px, Math.min(300px, target-label.preferred-width + 104px));
                         border-radius: Theme.radius;
                         border-width: 1px;
@@ -877,9 +877,9 @@ export component AppWindow inherits Window {
                         animate background, border-color { duration: 120ms; }
 
                         HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 38px;
-                            spacing: 7px;
+                            padding-left: Spacing.lg;
+                            padding-right: Metrics.lock-area + Spacing.md;
+                            spacing: Spacing.sm;
 
                             Icon {
                                 y: (parent.height - self.height) / 2;
@@ -893,7 +893,7 @@ export component AppWindow inherits Window {
                                 y: (parent.height - self.height) / 2;
                                 width: 7px;
                                 height: 7px;
-                                border-radius: 3.5px;
+                                border-radius: self.width / 2;
                                 background: root.target-health == UiEnums.target-health-green ? Theme.ok
                                     : root.target-health == UiEnums.target-health-yellow ? Theme.warn
                                     : root.target-health == UiEnums.target-health-red ? Theme.danger
@@ -931,7 +931,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             x: parent.width - self.width;
                             y: 0;
-                            width: 30px;
+                            width: Metrics.lock-area;
                             height: parent.height;
 
                             Rectangle {
@@ -977,8 +977,8 @@ export component AppWindow inherits Window {
                     // D80-M2 共享中心入口（管理面 + 发现面合并体）。
                     face-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
-                        width: 30px;
-                        height: 30px;
+                        width: Metrics.icon-button;
+                        height: Metrics.icon-button;
 
                         IconButton {
                             glyph: Glyph.share;
@@ -996,7 +996,7 @@ export component AppWindow inherits Window {
                             y: 1px;
                             width: 8px;
                             height: 8px;
-                            border-radius: 4px;
+                            border-radius: self.width / 2;
                             background: Theme.danger;
                             border-width: 1px;
                             border-color: Theme.bg-bar;
@@ -1005,8 +1005,8 @@ export component AppWindow inherits Window {
 
                     settings-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
-                        width: 30px;
-                        height: 30px;
+                        width: Metrics.icon-button;
+                        height: Metrics.icon-button;
 
                         IconButton {
                             glyph: Glyph.sliders;
@@ -1024,7 +1024,7 @@ export component AppWindow inherits Window {
                             y: 1px;
                             width: 8px;
                             height: 8px;
-                            border-radius: 4px;
+                            border-radius: self.width / 2;
                             background: Theme.danger;
                             border-width: 1px;
                             border-color: Theme.bg-bar;
@@ -1061,15 +1061,15 @@ export component AppWindow inherits Window {
             }
 
             if root.notice-text != "": Rectangle {
-                height: 34px;
+                height: Metrics.control-primary;
                 background: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger-soft
                     : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn-soft
                     : Theme.ok-soft;
 
                 HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 8px;
+                    padding-left: Spacing.bar-pad;
+                    padding-right: Spacing.bar-pad;
+                    spacing: Spacing.md;
 
                     Icon {
                         y: (parent.height - self.height) / 2;
@@ -1096,8 +1096,8 @@ export component AppWindow inherits Window {
                     // 避免一整行长期占用纵向空间。做成轻量的无边框图标，融进色条里。
                     notice-close := Rectangle {
                         y: (parent.height - self.height) / 2;
-                        width: 22px;
-                        height: 22px;
+                        width: Metrics.hit-min;
+                        height: Metrics.hit-min;
                         border-radius: Theme.radius;
                         background: notice-close-touch.has-hover ? Theme.bg-raised-hover : transparent;
                         animate background { duration: 100ms; }
@@ -1124,13 +1124,13 @@ export component AppWindow inherits Window {
             }
 
             if root.progress-visible: Rectangle {
-                height: 32px;
+                height: Metrics.control-primary;
                 background: Theme.bg-panel;
 
                 HorizontalLayout {
-                    padding-left: 14px;
-                    padding-right: 14px;
-                    spacing: 10px;
+                    padding-left: Spacing.bar-pad;
+                    padding-right: Spacing.bar-pad;
+                    spacing: Spacing.lg;
                     alignment: start;
 
                     ProgressIndicator {
@@ -1166,8 +1166,8 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         SectionLabel {
-                            x: 14px;
-                            height: 28px;
+                            x: Spacing.xl;
+                            height: Metrics.row-compact;
                             text: "分类";
                         }
 
@@ -1196,9 +1196,9 @@ export component AppWindow inherits Window {
                                     }
 
                                     HorizontalLayout {
-                                        padding-left: 14px;
-                                        padding-right: 12px;
-                                        spacing: 6px;
+                                        padding-left: Spacing.xl;
+                                        padding-right: Spacing.xl;
+                                        spacing: Spacing.sm;
 
                                         Text {
                                             text: name;
@@ -1254,9 +1254,9 @@ export component AppWindow inherits Window {
                             }
 
                             HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 12px;
-                                spacing: 6px;
+                                padding-left: Spacing.xl;
+                                padding-right: Spacing.xl;
+                                spacing: Spacing.sm;
 
                                 Icon {
                                     y: (parent.height - self.height) / 2;
@@ -1297,8 +1297,8 @@ export component AppWindow inherits Window {
 
                         // 素材库维护区：导入目录 / 导出 / 清空。
                         VerticalLayout {
-                            padding: 10px;
-                            spacing: 8px;
+                            padding: Spacing.lg;
+                            spacing: Spacing.md;
 
                             SectionLabel {
                                 height: 18px;
@@ -1310,7 +1310,7 @@ export component AppWindow inherits Window {
                             // 选中后仍走同一条子进程导入管线（D11/D24 包注册表按扩展名
                             // 分发；.emo 素材包从文件入口混选，不再单列）。
                             import-anchor := Rectangle {
-                                height: 30px;
+                                height: Metrics.control;
 
                                 Button {
                                     width: 100%;
@@ -1326,7 +1326,7 @@ export component AppWindow inherits Window {
                             // 高度必须显式钉死：裸 std Button 会参与纵向布局的
                             // 剩余空间分配，被拉成一百多 px 的高块（渲染实测）。
                             Button {
-                                height: 30px;
+                                height: Metrics.control;
                                 text: "导出为 .emo…";
                                 clicked => {
                                     root.export-emo-requested();
@@ -1494,7 +1494,7 @@ export component AppWindow inherits Window {
                                 height: 22px;
                                 x: parent.width - self.width - 6px;
                                 y: 6px;
-                                border-radius: 7px;
+                                border-radius: Theme.radius;
                                 background: Theme.badge-bg;
 
                                 Icon {
@@ -1549,7 +1549,7 @@ export component AppWindow inherits Window {
                                 y: 6px;
                                 width: 20px;
                                 height: 20px;
-                                border-radius: 10px;
+                                border-radius: self.width / 2;
                                 background: Theme.accent;
 
                                 Icon {
@@ -1569,7 +1569,7 @@ export component AppWindow inherits Window {
                                 y: 32px;
                                 width: 10px;
                                 height: 10px;
-                                border-radius: 5px;
+                                border-radius: self.width / 2;
                                 border-width: 2px;
                                 border-color: Theme.badge-ring;
                                 background: tile.share-badge == UiEnums.share-badge-busy ? Theme.accent
@@ -1584,7 +1584,7 @@ export component AppWindow inherits Window {
                                 y: 46px;
                                 width: 8px;
                                 height: 8px;
-                                border-radius: 4px;
+                                border-radius: self.width / 2;
                                 border-width: 2px;
                                 border-color: Theme.badge-ring;
                                 background: Theme.shared;
@@ -1726,8 +1726,8 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             choices-layout := VerticalLayout {
-                padding: 6px;
-                spacing: 4px;
+                padding: Spacing.menu-pad;
+                spacing: Spacing.xs;
 
                 if root.target-choices.length == 0: Rectangle {
                     height: 56px;
@@ -1768,17 +1768,17 @@ export component AppWindow inherits Window {
                         padding-left: 10px;
                         padding-right: 10px;
                         padding-top: 6px;
-                        padding-bottom: 6px;
-                        spacing: 3px;
+                        padding-bottom: Spacing.sm;
+                        spacing: Spacing.xxs;
 
                         HorizontalLayout {
-                            spacing: 7px;
+                            spacing: Spacing.sm;
 
                             Rectangle {
                                 y: (parent.height - self.height) / 2;
                                 width: 8px;
                                 height: 8px;
-                                border-radius: 4px;
+                                border-radius: self.width / 2;
                                 background: choice.health == UiEnums.target-health-green ? Theme.ok
                                     : choice.health == UiEnums.target-health-yellow ? Theme.warn
                                     : choice.health == UiEnums.target-health-red ? Theme.danger
@@ -1836,7 +1836,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             target-rename-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 TitleLabel {
@@ -1898,8 +1898,8 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             import-menu-layout := VerticalLayout {
-                padding: 6px;
-                spacing: 4px;
+                padding: Spacing.menu-pad;
+                spacing: Spacing.xs;
 
                 // 命名与「导入素材…」按钮错开：按钮是入口（弹本菜单），两项按
                 // 来源命名（文件/文件夹）。.emo 不再单列：文件入口本就混选
@@ -1956,8 +1956,8 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             scope-layout := VerticalLayout {
-                padding: 6px;
-                spacing: 4px;
+                padding: Spacing.menu-pad;
+                spacing: Spacing.xs;
 
                 MenuItem {
                     glyph: Glyph.search;
@@ -2012,8 +2012,8 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
+                padding: Spacing.panel-pad;
+                spacing: Spacing.md;
 
                 // 固定头（不随滚动）：「关闭」必须常驻——D67 起点外部不再
                 // 收起本面板，显式出口只剩这个按钮和 Esc。
@@ -2068,7 +2068,7 @@ export component AppWindow inherits Window {
                         // 包在 VerticalLayout 内（同上方设置行：裸 Rectangle 不
                         // 传播首选高度，渲染实测）。
                         VerticalLayout {
-                            spacing: 5px;
+                            spacing: Spacing.sm;
 
                             if root.target-tunings.length > 0: SectionLabel {
                                 height: 14px;
@@ -2118,7 +2118,7 @@ export component AppWindow inherits Window {
                         // if 直接做布局子项时首选高度不传播，详情折行后
                         // 「关于」标题会贴上来（渲染实测）。
                         VerticalLayout {
-                            spacing: 5px;
+                            spacing: Spacing.sm;
 
                             if root.migrate-legacy-available || root.migrate-legacy-done: SectionLabel {
                                 height: 14px;
@@ -2151,7 +2151,7 @@ export component AppWindow inherits Window {
                         // VM 状态走（检查中/已是最新/发现新版本/失败原因），
                         // 失败才着 danger 色——设置面板不搞情绪化大字。
                         VerticalLayout {
-                            spacing: 5px;
+                            spacing: Spacing.sm;
 
                             SectionLabel {
                                 height: 14px;
@@ -2164,7 +2164,7 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
-                                    spacing: 1px;
+                                    spacing: Spacing.xxs;
 
                                     Text {
                                         text: "素材管理器 \{root.app-version}";
@@ -2210,7 +2210,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             tuning-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 TitleLabel {
@@ -2309,8 +2309,8 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             menu-layout := VerticalLayout {
-                padding: 6px;
-                spacing: 4px;
+                padding: Spacing.menu-pad;
+                spacing: Spacing.xs;
 
                 if root.context-menu-title != "": Text {
                     text: root.context-menu-title;
@@ -2397,8 +2397,8 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             cat-menu-layout := VerticalLayout {
-                padding: 6px;
-                spacing: 4px;
+                padding: Spacing.menu-pad;
+                spacing: Spacing.xs;
 
                 if root.cat-menu-title != "": Text {
                     text: root.cat-menu-title;
@@ -2442,8 +2442,8 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             move-layout := VerticalLayout {
-                padding: 10px;
-                spacing: 6px;
+                padding: Spacing.dialog-pad;
+                spacing: Spacing.sm;
 
                 TitleLabel {
                     text: "移动到分类";
@@ -2467,7 +2467,7 @@ export component AppWindow inherits Window {
                         // preferred（裸包裹层会让整列 preferred 塌成 0）。
                         for name[i] in root.categories: VerticalLayout {
                             if i > 0: Rectangle {
-                                height: 30px;
+                                height: Metrics.control;
                                 border-radius: Theme.radius;
                                 border-width: 1px;
                                 border-color: move-cat-touch.has-hover ? Theme.accent : Theme.line;
@@ -2524,7 +2524,7 @@ export component AppWindow inherits Window {
             x: (root.width - self.width) / 2;
             // D80 追加「共享」后 560px 装不下五个按钮，上限放宽到 620px。
             width: Math.min(620px, root.width - 32px);
-            height: 48px;
+            height: Metrics.bar;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: Theme.line-strong;
@@ -2534,9 +2534,9 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 8px;
+                padding-left: Spacing.bar-pad;
+                padding-right: Spacing.bar-pad;
+                spacing: Spacing.md;
 
                 Text {
                     text: root.selection-text;
@@ -2556,54 +2556,54 @@ export component AppWindow inherits Window {
                 // 高度统一钉 30px（与顶栏/侧栏控件同一档）；批量动作 0 选禁用——
                 // 「已选 0 项」时可点删除只会得到一次空操作报错，禁用即说明。
                 if root.selection-bar == UiEnums.bar-multi: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     text: "全选";
                     clicked => { root.select-all-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-multi: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "移动到分类";
                     clicked => { root.move-selection-requested(); }
                 }
                 // D80 共享入口：与右键菜单 menu-action(5) 殊途同归（壳层同函数）。
                 if root.selection-bar == UiEnums.bar-multi: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "共享";
                     clicked => { root.share-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-multi: DangerButton {
-                    height: 30px;
+                    height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "删除";
                     clicked => { root.delete-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-multi: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     text: "取消";
                     clicked => { root.select-mode-toggled(); }
                 }
 
                 if root.selection-bar == UiEnums.bar-trash: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     text: "全选";
                     clicked => { root.select-all-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-trash: Button {
-                    height: 30px;
+                    height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "恢复";
                     clicked => { root.restore-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-trash: DangerButton {
-                    height: 30px;
+                    height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "彻底删除";
                     clicked => { root.purge-selection-requested(); }
                 }
                 if root.selection-bar == UiEnums.bar-trash: DangerButton {
-                    height: 30px;
+                    height: Metrics.control;
                     text: root.empty-trash-text;
                     armed: root.empty-trash-armed;
                     clicked => { root.empty-trash-requested(); }
@@ -2617,9 +2617,9 @@ export component AppWindow inherits Window {
             property <length> text-max: 480px;
             y: root.height - self.height - 74px;
             x: (root.width - self.width) / 2;
-            width: Math.min(summary-text.preferred-width + 24px, text-max + 24px);
-            height: 28px;
-            border-radius: 14px;
+            width: Math.min(summary-text.preferred-width + Spacing.huge, text-max + Spacing.huge);
+            height: Metrics.row-compact;
+            border-radius: self.height / 2;
             border-width: 1px;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
@@ -2628,8 +2628,8 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             summary-text := Text {
-                x: 12px;
-                width: parent.width - 24px;
+                x: Spacing.xl;
+                width: parent.width - Spacing.huge;
                 text: root.share-summary-text;
                 color: Theme.text-2;
                 font-size: Typography.label;
@@ -2653,7 +2653,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             share-picker-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
@@ -2681,7 +2681,7 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             alignment: center;
-                            spacing: 1px;
+                            spacing: Spacing.xxs;
 
                             Text {
                                 text: device.name;
@@ -2710,19 +2710,19 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "刷新";
                         enabled: !root.share-scan-busy;
                         clicked => { root.share-scan-requested(); }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "取消";
                         clicked => { root.share-devices-closed(); }
                     }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         primary: true;
                         enabled: root.share-selected-device >= 0;
                         text: "共享";
@@ -2747,7 +2747,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             share-offer-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
@@ -2771,12 +2771,12 @@ export component AppWindow inherits Window {
 
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "拒收";
                         clicked => { root.share-offer-reject(); }
                     }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         primary: true;
                         text: "接收";
                         clicked => { root.share-offer-accept(); }
@@ -2800,7 +2800,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             share-request-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
@@ -2824,12 +2824,12 @@ export component AppWindow inherits Window {
 
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "拒绝";
                         clicked => { root.share-request-reject(); }
                     }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         primary: true;
                         text: "发送";
                         clicked => { root.share-request-accept(); }
@@ -2853,7 +2853,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             share-domains-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
@@ -2913,13 +2913,13 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "共享中心…";
                         clicked => { root.share-ctl-open-requested(); }
                     }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "关闭";
                         clicked => { root.share-domains-closed(); }
                     }
@@ -2942,7 +2942,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             share-ctl-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
@@ -2978,7 +2978,7 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 2;
                     }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         primary: true;
                         text: "加入";
                         clicked => { root.share-ctl-join(root.share-ctl-join-code); }
@@ -2998,7 +2998,7 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
                 for device[i] in root.share-ctl-devices: Rectangle {
-                    height: 30px;
+                    height: Metrics.control;
                     border-radius: Theme.radius;
                     background: Theme.bg-raised;
 
@@ -3017,12 +3017,12 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         // M1-c 个人域：单设备专属域（个人域恒 1 成员）。
                         Button {
-                            height: 24px;
+                            height: Metrics.row-compact;
                             text: "个人域";
                             clicked => { root.share-ctl-personal-create(device.id); }
                         }
                         Button {
-                            height: 24px;
+                            height: Metrics.row-compact;
                             text: "移除";
                             clicked => { root.share-ctl-device-remove(device.id); }
                         }
@@ -3041,7 +3041,7 @@ export component AppWindow inherits Window {
                     font-size: Typography.label;
                 }
                 for domain[i] in root.share-ctl-domains: Rectangle {
-                    height: 30px;
+                    height: Metrics.control;
                     border-radius: Theme.radius;
                     border-width: domain.selected ? 1px : 0px;
                     border-color: Theme.accent;
@@ -3078,12 +3078,12 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         // D80-M2 群组域邀请码：点击生成展示（发给对方即可加入）。
                         if !domain.is-personal: Button {
-                            height: 24px;
+                            height: Metrics.row-compact;
                             text: "邀请码";
                             clicked => { root.share-ctl-domain-invite(domain.id); }
                         }
                         Button {
-                            height: 24px;
+                            height: Metrics.row-compact;
                             text: "删除";
                             clicked => { root.share-ctl-domain-remove(domain.id); }
                         }
@@ -3098,7 +3098,7 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "新建群组域";
                         clicked => {
                             root.share-ctl-domain-create(root.share-ctl-new-domain-name);
@@ -3169,7 +3169,7 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             alignment: center;
-                            spacing: 1px;
+                            spacing: Spacing.xxs;
 
                             Text {
                                 text: peer.name;
@@ -3210,7 +3210,7 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             alignment: center;
-                            spacing: 1px;
+                            spacing: Spacing.xxs;
 
                             Text {
                                 text: offer.name;
@@ -3229,7 +3229,7 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
 
                         Button {
-                            height: 24px;
+                            height: Metrics.row-compact;
                             text: "索取";
                             clicked => {
                                 root.share-face-offer-requested(offer.asset-id);
@@ -3241,7 +3241,7 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "刷新发现";
                         clicked => { root.share-face-refresh(); }
                     }
@@ -3253,7 +3253,7 @@ export component AppWindow inherits Window {
 
                     Rectangle { horizontal-stretch: 1; }
                     Button {
-                        height: 30px;
+                        height: Metrics.control;
                         text: "关闭";
                         clicked => { root.share-ctl-closed(); }
                     }
@@ -3276,7 +3276,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             rename-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 TitleLabel {
@@ -3333,7 +3333,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             cat-rename-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 TitleLabel {
@@ -3387,7 +3387,7 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             props-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 HorizontalLayout {
@@ -3462,7 +3462,7 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             update-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 8px;
 
                 HorizontalLayout {
@@ -3600,7 +3600,7 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             classify-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 SectionLabel {
@@ -3625,28 +3625,28 @@ export component AppWindow inherits Window {
                 }
 
                 classify-name-input := LineEdit {
-                    height: 30px;
+                    height: Metrics.control;
                     text: root.classify-argument;
                     placeholder-text: "输入分类名，实时匹配已有分类…";
                     edited(text) => { root.classify-name-changed(text); }
                     accepted(text) => { root.classify-name-changed(text); }
                 }
 
-                // 候选列表：ScrollView 高度钉 min(166px, 内容高)，不钉会塌成
-                // 内建 min-height（update 弹窗同款坑）。166px = 6 行整行裁齐
-                // （行 26px + 间距 2px → 5 行 138px / 6 行 166px）——钉 150px
+                // 候选列表：ScrollView 高度钉 min(178px, 内容高)，不钉会塌成
+                // 内建 min-height（update 弹窗同款坑）。178px = 6 行整行裁齐
+                // （行 28px + 间距 2px → 5 行 148px / 6 行 178px）——钉 150px
                 // 会把第 6 行拦腰截断，文字切一半像渲染坏了；候选封顶 8 条
                 // （MATCH_CAP），超出的靠列表内滚动，弹窗高度恒定。
                 if root.classify-matches.length > 0: ScrollView {
-                    height: Math.min(166px, matches-col.preferred-height);
+                    height: Math.min(178px, matches-col.preferred-height);
                     viewport-width: self.visible-width;
                     viewport-height: matches-col.preferred-height;
 
                     matches-col := VerticalLayout {
-                        spacing: 2px;
+                        spacing: Spacing.xxs;
 
                         for name in root.classify-matches: Rectangle {
-                            height: 26px;
+                            height: Metrics.row-compact;
                             border-radius: Theme.radius;
                             background: name == root.classify-argument ? Theme.accent-soft
                                 : (row-hover.has-hover ? Theme.bg-raised-hover : transparent);
@@ -3712,7 +3712,7 @@ export component AppWindow inherits Window {
             animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
 
             result-layout := VerticalLayout {
-                padding: 14px;
+                padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 SectionLabel {
@@ -3747,8 +3747,8 @@ export component AppWindow inherits Window {
 
                                 Rectangle {
                                     height: 18px;
-                                    width: result-badge.preferred-width + 16px;
-                                    border-radius: 999px;
+                                    width: result-badge.preferred-width + Spacing.xxl;
+                                    border-radius: self.height / 2;
                                     background: row.kind == UiEnums.result-row-failed ? Theme.danger-soft
                                         : row.kind == UiEnums.result-row-similar ? Theme.accent-soft
                                         : Theme.warn-soft;
