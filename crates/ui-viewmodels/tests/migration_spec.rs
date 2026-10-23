@@ -245,12 +245,12 @@ fn migration_preserves_all_legacy_categories() {
     assert_eq!(live.len(), 3, "三条都应入库");
 
     live.sort();
-    // 旧库 category=None 的行 → 清单 auto → 入库落 INBOX_CATEGORY（"待分类"
-    // 字面量，与 library enqueue 缺省一致；分面 COALESCE 同义）。
+    // 旧库 category=None 的行 → 清单 auto → 入库落收件箱（category NULL；
+    // D85 起不再写字面量「待分类」，读取侧按 NULL 显示同名系统项）。
     let mut expected = vec![
         (Some("参考图".to_string()), "raw.txt".to_string()),
         (Some("海报".to_string()), "raw.png".to_string()),
-        (Some("待分类".to_string()), "raw.png".to_string()),
+        (None, "raw.png".to_string()),
     ];
     expected.sort();
 

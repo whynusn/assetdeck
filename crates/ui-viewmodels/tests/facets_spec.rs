@@ -75,8 +75,8 @@ fn categories_and_tags_sorted_with_counts() {
         .collect();
     assert_eq!(
         cats,
-        vec![("测试素材", 2), ("风景", 1)],
-        "分类按名升序 + 计数"
+        vec![(store::INBOX_CATEGORY, 0), ("测试素材", 2), ("风景", 1)],
+        "分类按名升序 + 计数；收件箱是固定系统项（无 NULL 行时计数 0）"
     );
 
     let tags: Vec<(&str, u32)> = facets
@@ -88,6 +88,64 @@ fn categories_and_tags_sorted_with_counts() {
         tags,
         vec![("促销", 2), ("真实闭环", 1)],
         "标签按名升序 + 计数"
+    );
+    cleanup(&root);
+}
+
+/// D85：收件箱是固定系统分面项（CategoryId(0)），成员 = `category IS NULL`
+/// 的活跃行。删除分类处置 NULL 后，素材必须在这里重新可见。
+#[test]
+fn inbox_facet_is_synthesized_from_null_category_rows() {
+    let root = PathBuf::from("target").join("tmp").join("facets-inbox");
+    if root.exists() {
+        let _ = fs::remove_dir_all(&root);
+    }
+    fs::create_dir_all(&root).expect("建库目录失败");
+    let store = Store::open(&root.join("meta.db")).expect("打开 meta.db 失败");
+    let rows: [(&str, &str, Option<&str>); 2] = [
+        (
+            "a0000000-0000-0000-0000-000000000000",
+            "categorized.png",
+            Some("风景"),
+        ),
+        ("b0000000-0000-0000-0000-000000000000", "inbox.png", None),
+    ];
+    for (index, (uuid, file_name, category)) in rows.iter().enumerate() {
+        store
+            .upsert_asset(&AssetMeta {
+                uuid: uuid.to_string(),
+                file_name: file_name.to_string(),
+                rel_path: format!("objects/{uuid}/{file_name}"),
+                category: (*category).map(|c| c.to_string()),
+                tags: vec![],
+                size_bytes: 1,
+                created_at: index as i64,
+                imported_at: index as i64,
+                phash: None,
+                content_hash: None,
+                width: None,
+                height: None,
+            })
+            .expect("写资产元数据失败");
+    }
+    drop(store);
+
+    let (index, resolver) = load_real_library(&root).expect("装载真实库失败");
+    let facets = resolver.facets();
+    let inbox = facets
+        .category_id(store::INBOX_CATEGORY)
+        .expect("收件箱应恒在分面注册表");
+    assert_eq!(inbox.0, 0, "收件箱固定 CategoryId(0)，侧栏下标映射才稳定");
+    let entry = facets
+        .categories()
+        .iter()
+        .find(|e| e.name == store::INBOX_CATEGORY)
+        .expect("收件箱应出现在分类条目中");
+    assert_eq!(entry.count, 1, "NULL 行计入收件箱");
+    assert_eq!(
+        index.evaluate(&Filter::InCategory(inbox)).len(),
+        1,
+        "待分类视图必须能选出 NULL 行"
     );
     cleanup(&root);
 }

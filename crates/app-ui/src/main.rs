@@ -4021,10 +4021,14 @@ fn main() {
     }
 
     // D84 分类右键：命中即置菜单标题/位置并弹菜单。分类名来自自家侧栏列表
-    // （非用户输入），不再校验。
+    // （非用户输入），不再校验。D85：待分类是系统收件箱（category IS NULL），
+    // 不是可改名/删除的分类，右键不弹菜单。
     {
         let crud = crud.clone();
         app.on_cat_right_click(move |name, x, y| {
+            if name.as_str() == classify::INBOX_CATEGORY {
+                return;
+            }
             let Some(ui) = crud.ui.upgrade() else { return };
             ui.set_cat_menu_title(name.clone());
             ui.set_cat_menu_x(x);

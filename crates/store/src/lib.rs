@@ -10,19 +10,24 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 6;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// 未分类资产在分面视图中的归属名（与 library 层落库缺省保持一致）。
+/// 系统收件箱的显示名。**不是**可命名的分类：收件箱身份 = `category IS NULL`，
+/// 任何写入层都不得把该名落成字面量（v6 起存量字面量已迁为 NULL）。
 /// 定义在此避免 store 反向依赖 library（分层：library 依赖 store）。
 pub const INBOX_CATEGORY: &str = "待分类";
 
 #[derive(Debug)]
 pub enum StoreError {
     Sqlite(rusqlite::Error),
-    UnsupportedSchemaVersion { found: i32 },
+    UnsupportedSchemaVersion {
+        found: i32,
+    },
     CategoryExists(String),
+    /// 待分类是系统收件箱（NULL 哨兵），不可重命名/删除，也不许分类改名为它。
+    ReservedInbox,
 }
 
 impl fmt::Display for StoreError {
@@ -34,6 +39,10 @@ impl fmt::Display for StoreError {
                 "库 schema 版本 {found} 高于当前支持的 {SUPPORTED_SCHEMA_VERSION}，拒绝打开以防写坏"
             ),
             StoreError::CategoryExists(name) => write!(f, "分类已存在: {name}"),
+            StoreError::ReservedInbox => write!(
+                f,
+                "「{INBOX_CATEGORY}」是系统收件箱，不是可重命名/删除的普通分类"
+            ),
         }
     }
 }
@@ -258,6 +267,17 @@ impl Store {
         }
         if found < 5 {
             conn.execute_batch(MIGRATION_V5)?;
+        }
+        if found < 6 {
+            // v6（D85）：收件箱身份收敛为 `category IS NULL`。v5 及以前有两套
+            // 表示——导入缺省写字面量「待分类」、删除分类/移动回归写 NULL——
+            // 而分面装载只注册 Some(名) 的行，NULL 行从侧栏消失。这里把字面量
+            // 一次性折成 NULL（含回收站行），此后它只是 NULL 的显示名。
+            // 参数绑定 + 单条语句，避免迁移 SQL 再抄一遍 INBOX_CATEGORY。
+            conn.execute(
+                "UPDATE assets SET category = NULL WHERE category = ?1",
+                params![INBOX_CATEGORY],
+            )?;
         }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
@@ -490,8 +510,10 @@ impl Store {
     /// 窄列改分类（D48「移动到分类」/D50「统一归入」的唯一写口）。
     ///
     /// 同 set_dimensions 的理由：派生/UI 侧只改这一个字段，不读出整行再写回
-    /// （并发下旧快照会覆盖新字段）。`None` = 归待分类（category 置 NULL）。
+    /// （并发下旧快照会覆盖新字段）。`None` = 归待分类（category 置 NULL）；
+    /// 传入字面量 `INBOX_CATEGORY` 同样归 NULL（D85：收件箱没有字面量形态）。
     pub fn set_category(&self, uuid: &str, category: Option<&str>) -> Result<bool> {
+        let category = category.filter(|name| *name != INBOX_CATEGORY);
         let conn = self.lock();
         let n = conn.execute(
             "UPDATE assets SET category = ?2 WHERE uuid = ?1",
@@ -506,7 +528,12 @@ impl Store {
     /// **含回收站行**——回收站素材的 category 同步改，恢复后语义一致。
     /// 新名与旧名相同是合法 no-op（返回 0，不执行 UPDATE）；新名已存在则拒绝
     /// （否则静默合并两个分类，用户无法撤销）。
+    /// **收件箱保留名两侧都拒绝**（D85）：它由 `category IS NULL` 定义，
+    /// 既不能被改名，也不能被别的分类改成这个名字。
     pub fn rename_category(&self, old: &str, new: &str) -> Result<usize> {
+        if old == INBOX_CATEGORY || new == INBOX_CATEGORY {
+            return Err(StoreError::ReservedInbox);
+        }
         if old == new {
             return Ok(0);
         }
@@ -529,7 +556,13 @@ impl Store {
     /// 删除分类：引用该名的资产行 category 置 NULL（读取侧 COALESCE 显示为
     /// 「待分类」），素材本身与对象文件不动。**含回收站行**（同上，恢复后
     /// 不复活已删分类）。返回改写的行数。
+    ///
+    /// 收件箱自身不可删（D85）：它不是一条分类，`clear_category(INBOX)`
+    /// 属于调用方错误，直接拒绝而不是静默 no-op。
     pub fn clear_category(&self, name: &str) -> Result<usize> {
+        if name == INBOX_CATEGORY {
+            return Err(StoreError::ReservedInbox);
+        }
         let conn = self.lock();
         let n = conn.execute(
             "UPDATE assets SET category = NULL WHERE category = ?1",
@@ -560,7 +593,8 @@ impl Store {
     /// 列出去重后的分类及其计数（分面视图入口），**排除回收站**（D46：回收站
     /// 素材不占分类计数）。
     ///
-    /// category IS NULL 归到 `INBOX_CATEGORY`（与 library 层落库缺省一致），
+    /// `category IS NULL` 显示的 `INBOX_CATEGORY` 是**只读映射**（D85）：
+    /// 库内不再存该名字面量，收件箱身份恒为 NULL。
     /// 结果按分类名升序，确定性可测。
     pub fn distinct_categories(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.lock();

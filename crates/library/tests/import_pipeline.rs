@@ -264,7 +264,8 @@ fn manual_category_and_inbox_fallback() {
     wait_for(&lib, &t2, |s| matches!(s, CopyState::Done));
     assert_eq!(
         lib.store().get_asset(&t2.uuid).unwrap().unwrap().category,
-        Some(library::INBOX_CATEGORY.to_string())
+        None,
+        "无分类导入落收件箱 = category NULL（D85：不写字面量「待分类」）"
     );
 }
 

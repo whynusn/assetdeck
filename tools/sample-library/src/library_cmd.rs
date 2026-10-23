@@ -76,8 +76,13 @@ pub(crate) fn execute(cmd: &LibraryCmd) -> Result<(), String> {
         }
         "move-category" => {
             let raw = cmd.value.as_deref().ok_or("move-category 需要 --value <分类名>")?;
-            // 空值 = 归待分类（category NULL，读取侧 COALESCE 显示为待分类）。
-            let category = if raw.is_empty() { None } else { Some(raw) };
+            // 空值 / 收件箱显示名 = 归待分类（D85：收件箱身份是 category NULL，
+            // 字面量「待分类」不得回流入库）。
+            let category = if raw.is_empty() || raw == library::INBOX_CATEGORY {
+                None
+            } else {
+                Some(raw)
+            };
             let mut n = 0usize;
             for uuid in &refs {
                 if lib.store().set_category(uuid, category).map_err(|e| e.to_string())? {

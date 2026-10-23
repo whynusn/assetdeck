@@ -477,6 +477,9 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
     let mut idx = FacetIndex::new();
     let mut uuids = Vec::new();
     let mut category_ids: HashMap<String, CategoryId> = HashMap::new();
+    // D85 系统收件箱：固定 CategoryId(0)，成员 = 活跃的 `category IS NULL` 行。
+    // 先注册保证「CategoryId == 侧栏下标」这条隐式契约在空库/无分类库上也不错位。
+    category_ids.insert(store::INBOX_CATEGORY.to_string(), CategoryId(0));
     let mut tag_ids: HashMap<String, TagId> = HashMap::new();
     // 名称 → 命中计数（按 id 累加），装配 LibraryFacets 时排序为条目表。
     let mut category_counts: HashMap<String, u32> = HashMap::new();
@@ -493,13 +496,25 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
             // 恢复语义走整库重载（与 FacetIndex::unmark_deleted 的 v1 边界一致）。
             (None, Vec::new())
         } else {
-            let next_category_id = category_ids.len() as u32;
-            let category = meta.category.as_deref().map(|name| {
-                *category_counts.entry(name.to_string()).or_insert(0) += 1;
-                *category_ids
-                    .entry(name.to_string())
-                    .or_insert_with(|| CategoryId(next_category_id))
-            });
+            let category = match meta.category.as_deref() {
+                // 历史字面量同样归收件箱：v6 迁移后不应再出现，装载侧兜底
+                // 防止旧库/外部写入长出与系统项同名的「影子分类」。
+                None | Some(store::INBOX_CATEGORY) => {
+                    *category_counts
+                        .entry(store::INBOX_CATEGORY.to_string())
+                        .or_insert(0) += 1;
+                    Some(CategoryId(0))
+                }
+                Some(name) => {
+                    let next_category_id = category_ids.len() as u32;
+                    *category_counts.entry(name.to_string()).or_insert(0) += 1;
+                    Some(
+                        *category_ids
+                            .entry(name.to_string())
+                            .or_insert_with(|| CategoryId(next_category_id)),
+                    )
+                }
+            };
             let next_tag_id = tag_ids.len() as u32;
             let tags = meta
                 .tags

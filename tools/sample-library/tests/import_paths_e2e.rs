@@ -175,8 +175,18 @@ fn force_inbox_lands_in_inbox_category() {
     assert_eq!(
         categories(&lib),
         vec!["待分类".to_string()],
-        "force-inbox 应落待分类（category 置 None → 落库归一）"
+        "force-inbox 应落待分类（显示名为系统项，身份是 NULL）"
     );
+    {
+        let conn = rusqlite::Connection::open(lib.join("meta.db")).unwrap();
+        let stored: Option<String> = conn
+            .query_row("SELECT category FROM assets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            stored, None,
+            "D85：收件箱必须存 NULL，不得写字面量「待分类」"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

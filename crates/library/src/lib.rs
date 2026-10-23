@@ -21,6 +21,7 @@ pub mod trash;
 pub use rules::{CategoryContext, CategoryRule, GroupNameRule, ParentDirectoryRule, RuleChain};
 pub use trash::TRASH_DIR;
 
+/// 系统收件箱显示名（D85）：收件箱身份是 `category IS NULL`，不落字面量。
 pub const INBOX_CATEGORY: &str = "待分类";
 /// 相似提示阈值（D65）：图片 pHash 汉明距离 ≤ 该值时**照常导入**并在结果里
 /// 标注「与已有素材高度相似」。它不再是丢弃判据——pHash 对截图/表情包类
@@ -607,7 +608,7 @@ impl Library {
             uuid: uuid.clone(),
             file_name,
             rel_path: rel_path.clone(),
-            category: Some(req.category.unwrap_or_else(|| INBOX_CATEGORY.to_string())),
+            category: req.category.filter(|name| name != INBOX_CATEGORY),
             tags: req.tags,
             size_bytes,
             created_at,

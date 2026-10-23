@@ -6,7 +6,7 @@
 2. **体感瞬时入库**：enqueue 同步完成 解码→pHash→去重→落库，字节拷贝异步。元数据可见先于拷贝完成（`async_copy_metadata_visible_before_copy_done`）。
 3. **背压上限**：active ≥ capacity 直接 Backpressure（默认 16，测试用 open_with_capacity 注入小值）。
 4. **UI 进程不解码红线在此层的体现**：视频导入只派发 `MediaJob` 给 dispatcher，本 crate 不做任何视频解码；图片解码仅限 pHash 所需的灰度化。
-5. **未分类兜底**：category 为 None 时落「待分类」收件箱（INBOX_CATEGORY），禁止静默丢分类。
+5. **未分类兜底**：category 为 None 时落「待分类」收件箱——落库身份是 `category IS NULL`（D85），禁止静默丢分类，也禁止写「待分类」字面量。
 
 ## 测试要求
 

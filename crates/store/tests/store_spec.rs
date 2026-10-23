@@ -407,6 +407,77 @@ fn v4_database_migrates_in_place_to_v5() {
     assert!(again.get_asset("old-11").unwrap().is_some());
 }
 
+/// v5 旧库打开必须原地升 v6：字面量「待分类」行折成 NULL（收件箱哨兵），
+/// 其余分类原样；回收站行同步折叠（恢复后语义一致）。
+#[test]
+fn v5_database_folds_literal_inbox_into_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy5.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL,
+               file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '',
+               category TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash BLOB,
+               width INTEGER,
+               height INTEGER,
+               deleted INTEGER NOT NULL DEFAULT 0,
+               content_hash BLOB
+             );
+             CREATE TABLE tags (
+               asset_uuid TEXT NOT NULL REFERENCES assets(uuid) ON DELETE CASCADE,
+               tag TEXT NOT NULL,
+               PRIMARY KEY (asset_uuid, tag)
+             );
+             CREATE VIRTUAL TABLE assets_fts USING fts5(uuid UNINDEXED, name, tokenize='trigram');
+             CREATE INDEX idx_assets_phash ON assets(phash);
+             CREATE INDEX idx_assets_content_hash ON assets(content_hash);
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('old-inbox', 'a.png', 'objects/old-inbox/raw.png', '待分类');
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('old-normal', 'b.png', 'objects/old-normal/raw.png', '风景');
+             INSERT INTO assets (uuid, file_name, rel_path, category, deleted) VALUES ('old-trash', 'c.png', 'objects/old-trash/raw.png', '待分类', 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+    }
+
+    let s = Store::open(&db_path).unwrap();
+    assert_eq!(s.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert_eq!(
+        s.get_asset("old-inbox").unwrap().unwrap().category,
+        None,
+        "字面量「待分类」必须折成 NULL 哨兵"
+    );
+    assert_eq!(
+        s.get_asset("old-normal")
+            .unwrap()
+            .unwrap()
+            .category
+            .as_deref(),
+        Some("风景"),
+        "普通分类不得被迁移波及"
+    );
+    assert_eq!(
+        s.get_asset("old-trash").unwrap().unwrap().category,
+        None,
+        "回收站行同步折叠，恢复后不复活字面量"
+    );
+
+    // 重开幂等：UPDATE 已无命中，不报错、不留半态。
+    drop(s);
+    let again = Store::open(&db_path).unwrap();
+    assert_eq!(again.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert_eq!(
+        again.get_asset("old-inbox").unwrap().unwrap().category,
+        None
+    );
+}
+
 /// 内容摘要写读往返；查重只认活跃行——回收站素材不挡新导入（与 pHash 语义一致）。
 #[test]
 fn content_hash_roundtrip_and_lookup_excludes_deleted() {
@@ -644,6 +715,66 @@ fn clear_category_nulls_referencing_rows_and_keeps_assets() {
     assert_eq!(s.all_assets_count().unwrap(), 3);
     s.restore_assets(&["del-b"]).unwrap();
     assert_eq!(s.get_asset("del-b").unwrap().unwrap().category, None);
+}
+
+/// D85 收件箱保留名：不可重命名/删除，也不许普通分类改名成它；普通分类
+/// 之间的重命名照常（产品需求保留）。
+#[test]
+fn inbox_name_is_reserved_but_normal_categories_still_rename() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("res-a", "a.jpg");
+    a.category = Some("海报".to_string());
+    let mut inbox = meta("res-inbox", "b.jpg");
+    inbox.category = None;
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&inbox).unwrap();
+
+    assert_eq!(
+        s.rename_category("海报", "宣传图").unwrap(),
+        1,
+        "普通分类重命名不受影响"
+    );
+    assert!(matches!(
+        s.rename_category(store::INBOX_CATEGORY, "收件箱"),
+        Err(StoreError::ReservedInbox)
+    ));
+    assert!(matches!(
+        s.rename_category("宣传图", store::INBOX_CATEGORY),
+        Err(StoreError::ReservedInbox)
+    ));
+    assert!(matches!(
+        s.clear_category(store::INBOX_CATEGORY),
+        Err(StoreError::ReservedInbox)
+    ));
+    assert_eq!(
+        s.get_asset("res-a").unwrap().unwrap().category.as_deref(),
+        Some("宣传图"),
+        "被拒绝的保留名操作不得留下半改状态"
+    );
+    assert_eq!(s.get_asset("res-inbox").unwrap().unwrap().category, None);
+}
+
+/// D85 写入层归一：CLI/旧脚本直传字面量「待分类」也落 NULL，不产生影子分类。
+#[test]
+fn set_category_normalizes_inbox_literal_to_null() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("norm-a", "a.jpg");
+    a.category = Some("海报".to_string());
+    s.upsert_asset(&a).unwrap();
+
+    assert!(s
+        .set_category("norm-a", Some(store::INBOX_CATEGORY))
+        .unwrap());
+    assert_eq!(s.get_asset("norm-a").unwrap().unwrap().category, None);
+
+    let cats: std::collections::HashMap<_, _> =
+        s.distinct_categories().unwrap().into_iter().collect();
+    assert_eq!(
+        cats.get(store::INBOX_CATEGORY),
+        Some(&1),
+        "字面量写入必须计入收件箱而不是新分类"
+    );
+    assert_eq!(cats.len(), 1);
 }
 
 /// 软删素材改名后再恢复：检索按新名命中（改名不要求先恢复）。

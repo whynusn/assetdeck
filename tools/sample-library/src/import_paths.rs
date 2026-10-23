@@ -34,7 +34,7 @@ pub enum SourceKind {
 pub enum ImportDirective {
     /// 按来源规则（.emo=包内分类、目录=按文件夹名、散文件=待分类）。
     Auto,
-    /// 放入待分类（category 置 None，落库侧归一为 INBOX_CATEGORY）。
+    /// 放入待分类（category 置 None，落库即 NULL 收件箱哨兵，D85）。
     Inbox,
     /// 统一归入指定分类（explicit > 包内规则）。
     Category(String),
