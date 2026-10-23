@@ -5376,6 +5376,7 @@ fn main() {
             ui.set_single_click_activate(s.activate_on_single_click);
             ui.set_send_after_paste(s.send_after_paste);
             ui.set_gpu_rendering(s.gpu_rendering);
+            ui.set_animations_enabled(s.ui_animations);
             // D77 屏外窗口自愈：聚焦器经 Arc 热读，立即生效。
             if key == "nudge_offscreen_window" {
                 nudge_offscreen.store(s.nudge_offscreen_window, Ordering::Relaxed);

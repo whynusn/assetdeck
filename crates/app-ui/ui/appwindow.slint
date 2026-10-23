@@ -4,7 +4,7 @@
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
 import { Button, CheckBox, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
-import { Theme, Typography, Spacing, Metrics, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem, DialogInput } from "theme.slint";
+import { Theme, Typography, Spacing, Metrics, Motion, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem, DialogInput } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
 // 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
@@ -223,7 +223,8 @@ export component AppWindow inherits Window {
     in property <bool> send-after-paste: false;
     in property <bool> settings-open: false;
     in property <bool> gpu-rendering: false;
-    // 界面动画开关（设置面板「界面动画」）：弹层展开的过渡动画时长由此钳到 0。
+    // 界面动画开关（设置面板「界面动画」）：同步到 Motion.enabled，悬停/按压/
+    // 开关/浮层/瓦片淡入的全部过渡时长由此钳到 0。
     in property <bool> animations-enabled: true;
     // 导入菜单（左下角单入口弹层）开合：与 settings-open 同模式，壳层管理。
     in property <bool> import-menu-open: false;
@@ -587,6 +588,15 @@ export component AppWindow inherits Window {
         }
     }
 
+    // 「界面动画」开关同步到共享 Motion 令牌：theme.slint 里的原语读不到本组件
+    // 属性，统一经 Motion.enabled 把全部 animate 时长钳到 0（契约 §1.4）。
+    init => {
+        Motion.enabled = root.animations-enabled;
+    }
+    changed animations-enabled => {
+        Motion.enabled = root.animations-enabled;
+    }
+
     // overlay 宿主：填满窗口。内层先放常规布局，再叠绝对定位浮层。
     // D47 键盘通道：capture 只留 Esc——「关弹层」是否决类动作，必须永远赢。
     // Ctrl+A / Ctrl+V 走非 capture 的 key_pressed 兜底：持焦 TextInput 原生
@@ -697,7 +707,7 @@ export component AppWindow inherits Window {
                             : capsule-hover.has-hover ? Theme.line-strong : Theme.line;
                         background: Theme.bg-input;
 
-                        animate border-color { duration: 120ms; }
+                        animate border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
                         // 垫底探针：悬停提亮描边；点空白处把焦点交给输入区。
                         // 声明在最前（最底层），不抢范围段/输入区的命中。
@@ -829,7 +839,7 @@ export component AppWindow inherits Window {
                             background: root.select-mode-active ? Theme.accent-soft
                                 : select-touch.pressed ? Theme.bg-raised-press
                                 : select-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
-                            animate background, border-color { duration: 100ms; }
+                            animate background, border-color { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                             HorizontalLayout {
                                 padding-left: Spacing.md;
@@ -883,7 +893,7 @@ export component AppWindow inherits Window {
                             : chip-touch.has-hover ? Theme.bg-raised-hover
                             : Theme.bg-raised;
 
-                        animate background, border-color { duration: 120ms; }
+                        animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
                         HorizontalLayout {
                             padding-left: Spacing.lg;
@@ -1109,7 +1119,7 @@ export component AppWindow inherits Window {
                         height: Metrics.hit-min;
                         border-radius: Theme.radius;
                         background: notice-close-touch.has-hover ? Theme.bg-raised-hover : transparent;
-                        animate background { duration: 100ms; }
+                        animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                         Icon {
                             commands: Glyph.close;
@@ -1194,7 +1204,7 @@ export component AppWindow inherits Window {
                                     background: (i - 1) == root.selected-category ? Theme.accent-soft
                                         : (cat-touch.has-hover ? Theme.bg-raised : transparent);
 
-                                    animate background { duration: 100ms; }
+                                    animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                                     // 选中态左侧强调条。
                                     Rectangle {
@@ -1253,7 +1263,7 @@ export component AppWindow inherits Window {
                             height: 36px;
                             background: root.selected-category == -3 ? Theme.accent-soft
                                 : (trash-touch.has-hover ? Theme.bg-raised : transparent);
-                            animate background { duration: 100ms; }
+                            animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                             Rectangle {
                                 x: 0;
@@ -1373,7 +1383,7 @@ export component AppWindow inherits Window {
                             : divider-touch.has-hover ? Theme.line-strong
                             : Theme.line;
 
-                        animate width, background { duration: 100ms; }
+                        animate width, background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
                     }
 
                     divider-touch := TouchArea {
@@ -1437,7 +1447,7 @@ export component AppWindow inherits Window {
                                 // 挂载即有图（缓存命中）时初值就是 1，不重播。
                                 opacity: tile.thumb-fade ? 1.0 : 0.0;
                                 animate opacity {
-                                    duration: root.animations-enabled ? 150ms : 0ms;
+                                    duration: Motion.enabled ? Motion.enter : 0ms;
                                     easing: ease-out;
                                 }
                             }
@@ -1733,7 +1743,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             choices-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -1772,7 +1782,7 @@ export component AppWindow inherits Window {
                         : Theme.bg-raised;
                     opacity: choice.available ? 1.0 : 0.6;
 
-                    animate background, border-color { duration: 100ms; }
+                    animate background, border-color { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                     VerticalLayout {
                         padding-left: 10px;
@@ -1907,7 +1917,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             import-menu-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -1965,7 +1975,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             scope-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -2021,7 +2031,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             VerticalLayout {
                 padding: Spacing.panel-pad;
@@ -3488,7 +3498,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             update-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
@@ -3626,7 +3636,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             classify-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
@@ -3738,7 +3748,7 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: root.animations-enabled ? 150ms : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
 
             result-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;

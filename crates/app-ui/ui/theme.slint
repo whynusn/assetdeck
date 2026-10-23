@@ -117,6 +117,16 @@ export global Typography {
     out property <int> semibold: 600;
 }
 
+// 动效节奏：时长只从这里取，状态类统一 ease-out；关闭「界面动画」时全部归零
+//（契约 §1.4）。原语在 theme.slint 内读不到 appwindow 的属性，由壳层把开关
+// 同步到 Motion.enabled，因此任何 animate 都必须消费这个令牌。
+export global Motion {
+    in-out property <bool> enabled: true;
+    out property <duration> fast: 100ms;   // hover 微反馈
+    out property <duration> state: 120ms;  // 按压 / 选中 / 开关
+    out property <duration> enter: 150ms;  // 浮层入场 / 瓦片淡入
+}
+
 // 弹窗/面板标题：14px/600。所有标题共用一处，避免 13px 过渡档回流。
 export component TitleLabel inherits Text {
     color: Theme.text;
@@ -242,7 +252,7 @@ export component IconButton inherits Rectangle {
             : touch.has-hover ? Theme.bg-raised-hover
             : Theme.bg-raised;
 
-    animate background, border-color { duration: 120ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     Icon {
         width: root.icon-size;
@@ -308,7 +318,7 @@ export component DangerButton inherits Rectangle {
         : root.armed || touch.has-hover ? Theme.danger-soft
         : transparent;
 
-    animate background, border-color { duration: 120ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     HorizontalLayout {
         alignment: center;
@@ -386,7 +396,7 @@ export component FlatButton inherits Rectangle {
     height: Metrics.row-compact;
     border-radius: Theme.radius;
     background: !root.enabled ? Theme.bg-raised : touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
-    animate background { duration: 120ms; }
+    animate background { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     HorizontalLayout {
         alignment: center;
@@ -467,7 +477,7 @@ export component Toggle inherits Rectangle {
             ? (touch.pressed ? Theme.accent-press : Theme.accent)
             : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised : Theme.bg-input);
 
-    animate background, border-color { duration: 140ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     knob := Rectangle {
         width: 14px;
@@ -477,7 +487,7 @@ export component Toggle inherits Rectangle {
         x: root.checked ? parent.width - self.width - Spacing.xs : Spacing.xs;
         background: !root.enabled ? Theme.text-3 : root.checked ? Theme.accent-ink : Theme.text-2;
 
-        animate x, background { duration: 140ms; easing: ease-out; }
+        animate x, background { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
     }
 
     touch := TouchArea {
@@ -530,7 +540,7 @@ export component MenuItem inherits Rectangle {
             ? (root.danger ? Theme.danger-soft : Theme.bg-raised-hover)
             : transparent;
 
-    animate background { duration: 100ms; }
+    animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
     HorizontalLayout {
         padding-left: Spacing.lg;

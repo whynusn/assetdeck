@@ -7,6 +7,8 @@
 //! - border_radius_literals / border_radius_off_scale：`border-radius: <n>px`
 //!   字面量与不在圆角阶（4/7/8/999=胶囊）内的个数。
 //! - spacing_off_scale：`padding*` / `spacing` 中不在 4px 网格内的字面量个数。
+//! - 每个 `animate` 块必须消费 `Motion.enabled`、在关闭动画时归零，并声明
+//!   `easing: ease-out`（契约 §1.4）。
 //!
 //! 基线与允许值在 automation/ux-audit/hygiene-baseline.json。修完一处后
 //! 必须同步下调基线；基线数字升高 = 回归，直接失败。
@@ -176,6 +178,70 @@ fn measure(baseline: &Baseline) -> Counts {
         }
     }
     counts
+}
+
+/// 提取每个 `animate` 关键字之后的花括号块（已去行注释）。
+fn animate_blocks(src: &str) -> Vec<String> {
+    fn word_char(c: Option<char>) -> bool {
+        c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    }
+
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = src[from..].find("animate") {
+        let pos = from + rel;
+        from = pos + "animate".len();
+        if word_char(src[..pos].chars().next_back()) || word_char(src[from..].chars().next()) {
+            continue;
+        }
+        let Some(open_rel) = src[from..].find('{') else {
+            continue;
+        };
+        let open = from + open_rel;
+        let mut depth = 0usize;
+        for (idx, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        out.push(src[pos..open + idx + 1].to_string());
+                        from = open + idx + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn all_animations_consume_motion_tokens() {
+    let mut blocks = 0;
+    let mut offenders = Vec::new();
+    for (name, source) in ui_sources() {
+        let code = strip_line_comments(&source);
+        for block in animate_blocks(&code) {
+            blocks += 1;
+            if !block.contains("Motion.enabled")
+                || !block.contains(": 0ms")
+                || !block.contains("easing: ease-out")
+            {
+                offenders.push(format!(
+                    "{name}: {}",
+                    block.split_whitespace().collect::<Vec<_>>().join(" ")
+                ));
+            }
+        }
+    }
+    assert!(blocks > 0, "没有扫到任何 animate 块，守卫失效");
+    assert!(
+        offenders.is_empty(),
+        "animate 必须消费 Motion 令牌、关闭动画时归零并声明 ease-out（契约 §1.4）：\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]

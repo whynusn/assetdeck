@@ -338,7 +338,7 @@ impl AppSettings {
             "send_after_paste" => "即将支持：上框目前止步于输入框，不会自动发送。",
             "gpu_rendering" => "重启后生效。默认关闭：GPU 档拖拽窗口易卡顿。",
             "light_theme" => "深浅主题立即切换，无需重启。",
-            "ui_animations" => "关闭后弹层立即展开，不播过渡动画。",
+            "ui_animations" => "关闭后所有过渡与淡入即时完成。",
             "fast_import_mode" => "多线程高速导入；关闭后转后台慢速，不抢前台。",
             "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
             "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",

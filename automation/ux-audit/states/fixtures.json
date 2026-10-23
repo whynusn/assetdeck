@@ -656,7 +656,7 @@
           {
             "key": "ui_animations",
             "title": "界面动画",
-            "detail": "关闭后浮层与瓦片淡入即时完成",
+            "detail": "关闭后所有过渡与淡入即时完成",
             "checked": true,
             "enabled": true,
             "header": false

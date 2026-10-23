@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T22:11:14.047Z",
-  "runCount": 7,
+  "updatedAt": "2026-10-23T23:10:17.762Z",
+  "runCount": 8,
   "lastRuns": [
+    {
+      "runId": "run-20261024-070013",
+      "runNumber": 8,
+      "componentId": "M0-C7",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Motion 动效令牌并让全部 22 处 animate 受界面动画开关控制：关闭时悬停/按压/开关/浮层/瓦片淡入一律 0ms，状态过渡统一 ease-out；补齐开关热更新与设置文案。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(3 组 before/after；动效关断按代码路径+Motion 守卫核对，静态截图不可见)",
+      "shots": "target/ux-audit/shots/M0-C7/after/settings-default.png;target/ux-audit/shots/M0-C7/after/classify.png;target/ux-audit/shots/M0-C7/after/shell-grid.png",
+      "baseCommit": "e613cfe",
+      "finishedAt": "2026-10-23T23:10:17.759Z"
+    },
     {
       "runId": "run-20261024-060013",
       "runNumber": 7,
@@ -270,7 +282,7 @@
           "name": "动效节奏与 animations-enabled",
           "priority": 1,
           "dependsOn": [],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/appwindow.slint",
             "crates/app-ui/src/main.rs"
@@ -285,9 +297,9 @@
             "shell-grid"
           ],
           "focus": "动效时长 100–160ms；关闭动画时全部归零；无定时器轮询；不阻塞输入。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-070013",
+          "auditedAtCommit": "e613cfe",
+          "notes": "[run-20261024-070013] 建立 Motion 动效令牌并让全部 22 处 animate 受界面动画开关控制：关闭时悬停/按压/开关/浮层/瓦片淡入一律 0ms，状态过渡统一 ease-out；补齐开关热更新与设置文案。"
         },
         {
           "id": "M0-C8",
@@ -2187,6 +2199,62 @@
       "closedRun": null,
       "fix": "",
       "guard": ""
+    },
+    {
+      "id": "F-040",
+      "componentId": "M0-C7",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "界面动画开关只钳住浮层入场，14 处原语与悬停动效仍照播",
+      "detail": "animations-enabled 仅被 8 处浮层/瓦片淡入消费；共享原语的 IconButton/DangerButton/FlatButton/Toggle/MenuItem 以及检索框、顶栏按钮、目标胶囊、通知关闭、分类行、回收站行、分隔条、目标候选行共 14 处 animate 完全不看开关。根因是 theme.slint 没有 Motion 令牌层，原语读不到 appwindow 的属性。关闭动画的用户（含前庭敏感）在每次 hover/press 仍看到过渡，设置形同虚设，违反契约 §1.4。",
+      "evidence": "crates/app-ui/ui/theme.slint:245,311,389,470,480,533；crates/app-ui/ui/appwindow.slint:700,832,886,1112,1197,1256,1376,1775；截图 target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "theme.slint 新增 Motion 全局（enabled/fast/state/enter），22 处 animate 全部改为 Motion.enabled ? 令牌 : 0ms；appwindow 的 init/changed 把 animations-enabled 同步到 Motion.enabled，共享原语与悬停动效在关闭动画时全部归零。",
+      "guard": "ui_hygiene 新增 all_animations_consume_motion_tokens：逐个 animate 块断言引用 Motion.enabled、含 : 0ms 且声明 ease-out。"
+    },
+    {
+      "id": "F-041",
+      "componentId": "M0-C7",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "动效时长散落四档，13 处未声明 easing 走 Slint 默认 linear",
+      "detail": "22 处 animate 的时长字面量为 100/120/140/150ms 四档，没有共享令牌；其中 13 处省略 easing（Slint 默认 linear），状态切换与按压反馈呈匀速，与 9 处 ease-out 的浮层/开关手感不一致。契约 §1.4 只允许 ease-out（入场/状态）与线性（滚动/进度），要求时长可达令牌化。开关 140ms 与同属状态切换的 120ms 也无统一口径。",
+      "evidence": "crates/app-ui/ui/theme.slint:245,311,389,470,533；crates/app-ui/ui/appwindow.slint:700,832,886,1112,1197,1256,1376,1775",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "动效时长收口为 Motion.fast(100)/state(120)/enter(150) 三档；13 处缺失的 easing 统一补 ease-out，开关 140ms 归入 state 档（仍在契约 120–140 内）。",
+      "guard": "同上的 animate 块守卫锁死 ease-out；时长只能引用 Motion 令牌，新增 animate 无法绕过。"
+    },
+    {
+      "id": "F-042",
+      "componentId": "M0-C7",
+      "severity": "P3",
+      "rootCause": "copy",
+      "title": "界面动画说明只承诺弹层，且截图夹具文案与产品文案不一致",
+      "detail": "产品文案是「关闭后弹层立即展开，不播过渡动画。」，只提到弹层；夹具却写「关闭后浮层与瓦片淡入即时完成」——同一设置两句不同承诺，截图证据与真实产品漂移。修复后该开关会统一关闭悬停/按压/开关/浮层/瓦片淡入全部过渡，说明应覆盖全量动效。",
+      "evidence": "crates/ui-viewmodels/src/settings.rs:341；automation/ux-audit/states/fixtures.json:659；target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "产品文案改为「关闭后所有过渡与淡入即时完成」，settings-default 夹具同步为同一句（去掉句号以适配行宽），截图证据与产品一致。",
+      "guard": "capture --check 校验夹具引用完整性；settings-default after 截图复核文案单行不换行。"
+    },
+    {
+      "id": "F-043",
+      "componentId": "M0-C7",
+      "severity": "P1",
+      "rootCause": "viewmodel",
+      "title": "界面动画开关切换后不热更新，必须重启才生效",
+      "detail": "on_setting_toggled 只把 single_click_activate/send_after_paste/gpu_rendering 回填到窗口属性，animations_enabled 只在启动时 set 一次（main.rs:2708）。用户在设置里关掉「界面动画」后，当前会话的浮层入场、瓦片淡入和全部悬停过渡仍按旧值播放，直到重启；设置行也没有「下次启动生效」的提示，属于承诺与行为不一致。",
+      "evidence": "crates/app-ui/src/main.rs:2708,5364-5430（on_setting_toggled 缺少 set_animations_enabled）；截图 target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "on_setting_toggled 的热字段回填补上 ui.set_animations_enabled(s.ui_animations)；切换开关后当前会话立即生效，无需重启。",
+      "guard": "animations_enabled 与 single_click/send_after_paste/gpu_rendering 同列热字段回填；Motion.enabled 经 changed 联动归零（无静态截图可验证，按代码路径核对）。"
     }
   ]
 }

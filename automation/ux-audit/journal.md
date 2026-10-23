@@ -77,3 +77,12 @@
 - 截图：target/ux-audit/shots/M0-C6/after/{shell-grid,settings-default,theme-light}.png；补充验证 target/ux-audit/shots/_states/after/{rename-error,target-choose,tuning,import-result,classify}.png
 - 基线：4b94654
 
+## run-20261024-070013 · M0-C7 · done
+
+- 组件：动效节奏与 animations-enabled
+- 结论：建立 Motion 动效令牌并让全部 22 处 animate 受界面动画开关控制：关闭时悬停/按压/开关/浮层/瓦片淡入一律 0ms，状态过渡统一 ease-out；补齐开关热更新与设置文案。
+- Findings：F-040(fixed) 界面动画开关只钳住浮层入场，14 处原语与悬停动效仍照播；F-041(fixed) 动效时长散落四档，13 处未声明 easing 走 Slint 默认 linear；F-042(fixed) 界面动画说明只承诺弹层，且截图夹具文案与产品文案不一致；F-043(fixed) 界面动画开关切换后不热更新，必须重启才生效
+- 门禁：slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(3 组 before/after；动效关断按代码路径+Motion 守卫核对，静态截图不可见)
+- 截图：target/ux-audit/shots/M0-C7/after/settings-default.png;target/ux-audit/shots/M0-C7/after/classify.png;target/ux-audit/shots/M0-C7/after/shell-grid.png
+- 基线：e613cfe
+
