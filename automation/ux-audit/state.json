@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T20:11:41.140Z",
-  "runCount": 5,
+  "updatedAt": "2026-10-23T21:12:58.660Z",
+  "runCount": 6,
   "lastRuns": [
+    {
+      "runId": "run-20261024-050012",
+      "runNumber": 6,
+      "componentId": "M0-C5",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立键盘焦点基线：共享 FocusRing 让按钮/开关/菜单项可 Tab 聚焦并支持 Enter/Space 激活，DialogInput 让弹窗打开即聚焦（单输入弹窗 Enter 确认、重命名全选），modal-open 归零统一归还壳层焦点；焦点陷阱与菜单方向键导航留档 F-029/F-030。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C5/after/*.png",
+      "baseCommit": "ad6f5a0",
+      "finishedAt": "2026-10-23T21:12:58.657Z"
+    },
     {
       "runId": "run-20261024-040014",
       "runNumber": 5,
@@ -191,7 +203,7 @@
           "dependsOn": [
             "M0-C4"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint",
             "crates/app-ui/ui/appwindow.slint"
@@ -210,9 +222,9 @@
             "rename"
           ],
           "focus": "键盘焦点是否可见且与 hover 可区分；Tab 顺序；Esc 链；关闭后焦点归还；输入框持焦时快捷键让路。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-050012",
+          "auditedAtCommit": "ad6f5a0",
+          "notes": "[run-20261024-050012] 建立键盘焦点基线：共享 FocusRing 让按钮/开关/菜单项可 Tab 聚焦并支持 Enter/Space 激活，DialogInput 让弹窗打开即聚焦（单输入弹窗 Enter 确认、重命名全选），modal-open 归零统一归还壳层焦点；焦点陷阱与菜单方向键导航留档 F-029/F-030。"
         },
         {
           "id": "M0-C6",
@@ -1964,6 +1976,76 @@
       "evidence": "crates/app-ui/ui/theme.slint:432-468；target/ux-audit/shots/M0-C4/before/settings-default.png",
       "status": "open",
       "createdRun": 5,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-026",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "共享原语无键盘焦点：Tab 不可达、Enter/Space 不激活、无焦点视觉",
+      "detail": "IconButton/FlatButton/Toggle/DangerButton/MenuItem 只有 TouchArea，没有 FocusScope：顶栏按钮、设置面板 6 个开关、右键菜单项、底部操作条全部只能鼠标操作；键盘用户无法完成设置、菜单与批量动作。契约 §2.1 要求 focus 可见且与 hover 可区分，§2.2 要求 Tab 顺序与键盘可达，§5 要求可键盘完成主流程。DangerButton/Toggle 的 disabled 语义也未与焦点联动。",
+      "evidence": "crates/app-ui/ui/theme.slint:213-219,273-279,324-330,373-379,439-444；截图 target/ux-audit/shots/M0-C5/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "theme.slint 新增共享 FocusRing，并给 IconButton/DangerButton/FlatButton/Toggle/MenuItem 加 forward-focus 的 FocusScope：focus_gained(reason) 仅在非 pointer-click 时点亮焦点环（与 hover/选中几何可区分），Enter/Space 触发 clicked/toggled，disabled 时 FocusScope 不参与遍历。按钮环外扩 3px、开关用胶囊环、菜单行内嵌 0px。视觉证据见 target/ux-audit/shots/M0-C5/after/focus-btn.png、focus-toggle.png、focus-menu.png。",
+      "guard": "ui_hygiene 保持字面量零基线；新增交互原语必须同时提供 FocusScope+可见焦点态，由 M0-C5 焦点基线截图与 ui_hygiene 回归双重守护。"
+    },
+    {
+      "id": "F-027",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "弹窗打开不聚焦输入框，单输入弹窗 Enter 不确认",
+      "detail": "重命名/分类重命名/目标重命名/归类/上框点位的 LineEdit 都没有打开即聚焦，键盘用户在弹窗里打字无效，必须先点一下输入框；rename/cat-rename/target-rename 的 LineEdit 也未接 accepted，Enter 无反应。契约 §2.2 要求弹窗打开后焦点进入弹窗、单输入弹窗 Enter=确认。重命名还应初始全选原名（M5-C1 判据）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1853,2236,3297,3354,3638；截图 target/ux-audit/shots/M0-C5/before/rename.png、classify.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "theme.slint 新增共享 DialogInput（继承 LineEdit）：init 中 focus()，select-on-open 时 select-all()。重命名/分类重命名/目标重命名改用 DialogInput 并接 accepted 确认，重命名类全选原名；归类输入聚焦但不把 Enter 接到导入（保留三按钮显式决策）；上框点位 x 聚焦、y 用 auto-focus:false。视觉证据见 after/focus-dialog.png 与 after/rename.png（原名已全选）、after/classify.png（输入框聚焦）。",
+      "guard": "capture after 的 rename/classify 固定复核「弹窗输入框默认聚焦」；新弹窗输入必须使用 DialogInput，单输入弹窗必须接 accepted。"
+    },
+    {
+      "id": "F-028",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "platform",
+      "title": "浮层关闭后焦点不归还，全局 Esc/Ctrl+A/Ctrl+V 通道失效",
+      "detail": "key-root 只在启动时由壳层 focus 一次；弹窗打开后焦点进入输入框，弹窗关闭时输入框随条件元素销毁，Slint 清空焦点，之后按键不再送达 key-root——Esc 关不了菜单、Ctrl+A/Ctrl+V 不响应，直到用户再点一次界面。契约 §2.2 要求关闭后焦点归还。修复应在壳层单一位置监听 modal-open 归零，而不是每个关闭分支各补一次 focus。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:588-611；crates/app-ui/src/main.rs:5927；截图 target/ux-audit/shots/M0-C5/before/shell-grid.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "在壳层单一位置监听 changed modal-open：所有浮层收拢（modal-open 变 false）时调用 key-root.focus()，把焦点归还全局键盘通道；不再逐个关闭分支补 focus。key-root 的 Esc capture 与 Ctrl+A/Ctrl+V bubble 逻辑保持不变。",
+      "guard": "浮层开关统一汇总到 modal-open，关闭路径不得各自散落 focus()；新增浮层必须并入 modal-open 表达式。"
+    },
+    {
+      "id": "F-029",
+      "componentId": "M0-C5",
+      "severity": "P2",
+      "rootCause": "platform",
+      "title": "模态弹窗没有焦点陷阱，Tab 可落到背景控件",
+      "detail": "遮罩只挡鼠标；弹窗打开后 Tab 仍可遍历背景的检索框与（新增焦点后的）顶栏/侧栏控件，焦点会离开弹窗。正确修法是在弹层层级统一维护「可用焦点域」（全局 modal 层 + in-modal 标记），而不是给每个控件加特判。归属 M4-C5（弹窗通用规范）/M10-C4（键盘全链路），本次只建基线并留档。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:564-579,588-611",
+      "status": "open",
+      "createdRun": 6,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-030",
+      "componentId": "M0-C5",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "菜单项只能 Tab 到达，无方向键导航与打开即聚焦",
+      "detail": "MenuItem 获得焦点后 Up/Down 不移动、菜单打开时焦点不进入首项；键盘用户要 Tab 穿过整个文档才能到菜单项。正确修法是菜单容器级焦点索引（同 Slint 内建 Menu 的 current-highlight），涉及范围/导入/素材右键/分类右键四个菜单，归属 M4-C4。本次先让菜单项可聚焦并可用 Enter/Space 触发。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1940-1987,1879-1936；截图 target/ux-audit/shots/M0-C5/before/scope-menu.png",
+      "status": "open",
+      "createdRun": 6,
       "closedRun": null,
       "fix": "",
       "guard": ""

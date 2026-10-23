@@ -59,3 +59,12 @@
 - 截图：target/ux-audit/shots/M0-C4/after/settings-default.png;target/ux-audit/shots/M0-C4/after/shell-grid.png;target/ux-audit/shots/M0-C4/after/selection-bar.png;target/ux-audit/shots/M0-C4/after/context-menu.png;target/ux-audit/shots/_states/after/theme-light.png;target/ux-audit/shots/_states/after/notice-error.png;target/ux-audit/shots/_states/after/import-result.png
 - 基线：80a548a
 
+## run-20261024-050012 · M0-C5 · done
+
+- 组件：焦点可见性与键盘可达基线
+- 结论：建立键盘焦点基线：共享 FocusRing 让按钮/开关/菜单项可 Tab 聚焦并支持 Enter/Space 激活，DialogInput 让弹窗打开即聚焦（单输入弹窗 Enter 确认、重命名全选），modal-open 归零统一归还壳层焦点；焦点陷阱与菜单方向键导航留档 F-029/F-030。
+- Findings：F-026(fixed) 共享原语无键盘焦点：Tab 不可达、Enter/Space 不激活、无焦点视觉；F-027(fixed) 弹窗打开不聚焦输入框，单输入弹窗 Enter 不确认；F-028(fixed) 浮层关闭后焦点不归还，全局 Esc/Ctrl+A/Ctrl+V 通道失效；F-029(open) 模态弹窗没有焦点陷阱，Tab 可落到背景控件；F-030(open) 菜单项只能 Tab 到达，无方向键导航与打开即聚焦
+- 门禁：slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;capture-check=pass;visual=pass
+- 截图：target/ux-audit/shots/M0-C5/after/*.png
+- 基线：ad6f5a0
+

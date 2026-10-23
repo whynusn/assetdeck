@@ -1,3 +1,5 @@
+import { LineEdit } from "std-widgets.slint";
+
 // 设计令牌：颜色/圆角集中一处，避免各处硬编码色值漂移。
 //
 // 取值刻意贴合内置 fluent 暗色（背景 #1C1C1C、次级面 #2C2C2C、强调 #60CDFF、
@@ -138,6 +140,44 @@ export component Icon inherits Path {
     height: 16px;
 }
 
+// 键盘焦点环：只随键盘聚焦出现（指针点击不显示），1px accent。按钮/开关
+// 外扩 3px，与选中态（贴边 accent 描边）在几何上可区分；行类用 outset: 0
+// 内嵌，避免与相邻菜单行粘连（契约 §2.1 focus）。
+export component FocusRing inherits Rectangle {
+    in property <bool> active: false;
+    in property <length> target-width: 0px;
+    in property <length> target-height: 0px;
+    in property <length> outset: 3px;
+    in property <length> ring-radius: Theme.radius + 2px;
+
+    visible: root.active;
+    x: -root.outset;
+    y: -root.outset;
+    width: root.target-width + 2 * root.outset;
+    height: root.target-height + 2 * root.outset;
+    background: transparent;
+    border-width: 1px;
+    border-color: Theme.accent;
+    border-radius: root.ring-radius;
+}
+
+// 弹窗输入框：挂载即接管焦点（契约 §2.2「弹窗打开后焦点进入弹窗」）。
+// 重命名类单输入弹窗用 select-on-open 全选原名，直接输入即覆盖；
+// auto-focus=false 供同一弹窗的第二个字段使用（上框点位 y 表达式）。
+export component DialogInput inherits LineEdit {
+    in property <bool> auto-focus: true;
+    in property <bool> select-on-open: false;
+
+    init => {
+        if (root.auto-focus) {
+            root.focus();
+            if (root.select-on-open) {
+                root.select-all();
+            }
+        }
+    }
+}
+
 // 图标字形表：集中放 path commands，调用点只引名字，避免同一图形多处抄写。
 export global Glyph {
     out property <string> search: "M18 11a7 7 0 1 1-14 0a7 7 0 1 1 14 0M20 20l-4.6-4.6";
@@ -184,6 +224,9 @@ export component IconButton inherits Rectangle {
     in property <length> icon-size: 16px;
     callback clicked();
 
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
+
     width: Metrics.icon-button;
     height: Metrics.icon-button;
     border-radius: Theme.radius;
@@ -218,6 +261,26 @@ export component IconButton inherits Rectangle {
         }
     }
 
+    // 键盘可达（契约 §2.2）：Tab 聚焦、Enter/Space 激活；焦点环只随键盘出现。
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+    }
+
     Tooltip {
         // Tooltip.text 是 styled-text，字符串需显式转换。
         text: @markdown("\{root.tip}");
@@ -231,6 +294,9 @@ export component DangerButton inherits Rectangle {
     in property <bool> armed: false;
     in property <bool> enabled: true;
     callback clicked();
+
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
 
     height: Metrics.control;
     border-radius: Theme.radius;
@@ -277,6 +343,25 @@ export component DangerButton inherits Rectangle {
             root.clicked();
         }
     }
+
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+    }
 }
 
 // 分区小标题：结构标题用 label 档并调淡，不与内容抢注意力；caption 留给元数据。
@@ -294,6 +379,9 @@ export component FlatButton inherits Rectangle {
     in property <string> tip: "";
     in property <bool> enabled: true;
     callback clicked();
+
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
 
     height: Metrics.row-compact;
     border-radius: Theme.radius;
@@ -329,6 +417,25 @@ export component FlatButton inherits Rectangle {
         }
     }
 
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+    }
+
     if root.tip != "": Tooltip {
         // Tooltip.text 是 styled-text，字符串需显式转换。
         text: @markdown("\{root.tip}");
@@ -344,6 +451,9 @@ export component Toggle inherits Rectangle {
     in property <bool> checked: false;
     in property <bool> enabled: true;
     callback toggled();
+
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
 
     width: Metrics.toggle-width;
     height: Metrics.toggle-height;
@@ -377,6 +487,27 @@ export component Toggle inherits Rectangle {
             root.toggled();
         }
     }
+
+    // Space 切换开关（契约 §2.2）；Enter 也接受，和按钮语义一致。
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+        ring-radius: (root.height + 6px) / 2;
+    }
 }
 
 // 菜单行：弹层里的单条动作（图标 + 标题 + 次要说明）。无边框、悬停铺淡底——
@@ -387,6 +518,9 @@ export component MenuItem inherits Rectangle {
     in property <string> detail: "";
     in property <bool> danger: false;
     callback clicked();
+
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
 
     height: Metrics.menu-row;
     border-radius: Theme.radius;
@@ -441,6 +575,27 @@ export component MenuItem inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    // 方向键导航属菜单容器职责（M4-C4）；基线先保证 Tab 可达 + Enter/Space 触发。
+    focus-scope := FocusScope {
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+        outset: 0px;
+        ring-radius: Theme.radius;
     }
 }
 

@@ -4,7 +4,7 @@
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
 import { Button, CheckBox, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
-import { Theme, Typography, Spacing, Metrics, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem } from "theme.slint";
+import { Theme, Typography, Spacing, Metrics, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem, DialogInput } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
 export { Theme } from "theme.slint";
 // 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
@@ -577,6 +577,15 @@ export component AppWindow inherits Window {
         || root.share-request-open
         || root.share-domains-open || root.share-ctl-open
         || root.update-open;
+
+    // 浮层全部收拢后把焦点还给壳层根：弹窗输入框随条件元素销毁会清空焦点，
+    // 不归还则 Esc/Ctrl+A/Ctrl+V 全局通道静默失效（契约 §2.2「关闭后焦点归还」）。
+    // 触发控件多为瓦片/菜单项等不可稳定聚焦的元素，回根是无歧义的落点。
+    changed modal-open => {
+        if (!root.modal-open) {
+            key-root.focus();
+        }
+    }
 
     // overlay 宿主：填满窗口。内层先放常规布局，再叠绝对定位浮层。
     // D47 键盘通道：capture 只留 Esc——「关弹层」是否决类动作，必须永远赢。
@@ -1850,9 +1859,10 @@ export component AppWindow inherits Window {
                     overflow: elide;
                 }
 
-                target-rename-input := LineEdit {
+                target-rename-input := DialogInput {
                     text: root.target-rename-text;
                     placeholder-text: "别名（留空保存 = 恢复默认名）";
+                    accepted(text) => { root.target-rename-confirmed(text); }
                 }
 
                 HorizontalLayout {
@@ -2233,7 +2243,7 @@ export component AppWindow inherits Window {
                             color: Theme.text-3;
                             font-size: Typography.label;
                         }
-                        tuning-x-input := LineEdit {
+                        tuning-x-input := DialogInput {
                             text: root.tuning-x-text;
                             font-size: Typography.body;
                             placeholder-text: "如 8 或 WINDOW_WIDTH - 8";
@@ -2246,10 +2256,11 @@ export component AppWindow inherits Window {
                             color: Theme.text-3;
                             font-size: Typography.label;
                         }
-                        tuning-y-input := LineEdit {
+                        tuning-y-input := DialogInput {
                             text: root.tuning-y-text;
                             font-size: Typography.body;
                             placeholder-text: "如 WINDOW_HEIGHT - 8";
+                            auto-focus: false;
                         }
                     }
                 }
@@ -3294,9 +3305,11 @@ export component AppWindow inherits Window {
                     text: "重命名";
                 }
 
-                rename-input := LineEdit {
+                rename-input := DialogInput {
                     text: root.rename-current;
                     placeholder-text: "新名称（只改显示名，不动磁盘路径）";
+                    select-on-open: true;
+                    accepted(text) => { root.rename-confirmed(text); }
                 }
 
                 if root.rename-error != "": Text {
@@ -3351,9 +3364,11 @@ export component AppWindow inherits Window {
                     text: "重命名分类";
                 }
 
-                cat-rename-input := LineEdit {
+                cat-rename-input := DialogInput {
                     text: root.cat-rename-current;
                     placeholder-text: "新分类名";
+                    select-on-open: true;
+                    accepted(text) => { root.cat-rename-confirmed(text); }
                 }
 
                 if root.cat-rename-error != "": Text {
@@ -3635,7 +3650,7 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                classify-name-input := LineEdit {
+                classify-name-input := DialogInput {
                     height: Metrics.control;
                     text: root.classify-argument;
                     placeholder-text: "输入分类名，实时匹配已有分类…";
