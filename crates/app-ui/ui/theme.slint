@@ -34,7 +34,7 @@ export global Theme {
     in-out property <color> accent-press: #4bb2e0;
     in-out property <color> accent-ink: #06131a;
     in-out property <color> accent-soft: #1f3a47;
-    in-out property <color> danger: #e0666f;
+    in-out property <color> danger: #e4747d;
     in-out property <color> danger-soft: #352124;
     in-out property <color> danger-press: #2a1c1f;
     // 危险填充态（danger-press）上的文字/图标：浅色主题的填充红需要反白。
@@ -53,7 +53,7 @@ export global Theme {
     in-out property <color> scrim: #00000066;
 
     // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值。
-    in-out property <color> label-bar-bg: #00000080;
+    in-out property <color> label-bar-bg: #00000099;
     in-out property <color> label-bar-bg-hover: #000000cc;
     in-out property <color> label-bar-text: #ffffff;
     in-out property <color> badge-bg: #00000099;
@@ -563,7 +563,10 @@ export component MenuItem inherits Rectangle {
 
             if root.detail != "": Text {
                 text: root.detail;
-                color: root.danger && touch.pressed ? Theme.danger-ink : Theme.text-3;
+                // 浅色按压面比常态更深，副行随按压升到 text-2，避免按下反而更难读。
+                color: touch.pressed
+                    ? (root.danger ? Theme.danger-ink : Theme.text-2)
+                    : Theme.text-3;
                 font-size: Typography.label;
                 overflow: elide;
             }

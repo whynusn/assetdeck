@@ -1531,7 +1531,8 @@ export component AppWindow inherits Window {
                                     width: parent.width - 12px;
                                     text: tile.label;
                                     color: Theme.label-bar-text;
-                                    font-size: Typography.caption;
+                                    // 文件名是素材主标识，走 body 档；caption 只留给元数据。
+                                    font-size: Typography.body;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
@@ -1806,7 +1807,8 @@ export component AppWindow inherits Window {
                         Text {
                             text: choice.status;
                             color: Theme.text-3;
-                            font-size: Typography.caption;
+                            // 在线/需确认/已关闭是选择依据，不能压到 caption 档。
+                            font-size: Typography.label;
                             overflow: elide;
                         }
                     }
@@ -2268,7 +2270,8 @@ export component AppWindow inherits Window {
                 Text {
                     text: "客户区左上角为原点，逻辑像素（96 DPI 基准）；支持 + - * / 括号与 WINDOW_WIDTH / WINDOW_HEIGHT";
                     color: Theme.text-3;
-                    font-size: Typography.caption;
+                    // 操作指令与错误说明同级，用 label 档保证小弹窗内可读。
+                    font-size: Typography.label;
                     wrap: word-wrap;
                 }
 

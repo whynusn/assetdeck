@@ -106,7 +106,7 @@ impl ThemeProvider for DarkThemeProvider {
             accent_press: 0xFF4BB2E0,
             accent_ink: 0xFF06131A,
             accent_soft: 0xFF1F3A47,
-            danger: 0xFFE0666F,
+            danger: 0xFFE4747D,
             danger_soft: 0xFF352124,
             danger_press: 0xFF2A1C1F,
             danger_ink: 0xFFFFFFFF,
@@ -118,7 +118,7 @@ impl ThemeProvider for DarkThemeProvider {
             shared_soft: 0xFF3A2740,
             bg_overlay: 0xFF2C2C2C,
             scrim: 0x66000000,
-            label_bar_bg: 0x80000000,
+            label_bar_bg: 0x99000000,
             label_bar_bg_hover: 0xCC000000,
             label_bar_text: 0xFFFFFFFF,
             badge_bg: 0x99000000,
@@ -153,7 +153,7 @@ impl ThemeProvider for LightThemeProvider {
             text: 0xFF1F2328,
             text_2: 0xFF444B52,
             text_3: 0xFF62696F,
-            accent: 0xFF0B7EC2,
+            accent: 0xFF0F6CBD,
             accent_hover: 0xFF0A6FAA,
             accent_press: 0xFF095D90,
             accent_ink: 0xFFFFFFFF,
@@ -162,7 +162,7 @@ impl ThemeProvider for LightThemeProvider {
             danger_soft: 0xFFFBE8EA,
             danger_press: 0xFFA92D37,
             danger_ink: 0xFFFFFFFF,
-            warn: 0xFF9A6B10,
+            warn: 0xFF805A0B,
             warn_soft: 0xFFF8EFD9,
             ok: 0xFF1F7A4D,
             ok_soft: 0xFFE3F2E8,
@@ -245,12 +245,27 @@ mod tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
+    /// 半透明前景压到底色上的合成结果（用于名称条/徽标这类叠图文字）。
+    fn composite_over(fg: u32, bg: u32) -> u32 {
+        let alpha = ((fg >> 24) & 0xFF) as f64 / 255.0;
+        let channel = |shift: u32| {
+            let front = ((fg >> shift) & 0xFF) as f64;
+            let back = ((bg >> shift) & 0xFF) as f64;
+            (front * alpha + back * (1.0 - alpha)).round() as u32
+        };
+        (0xFF << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+    }
+
     #[test]
-    fn text_3_and_semantic_text_meet_contrast_floor() {
+    fn text_3_is_readable_on_every_static_surface() {
         for tokens in [DarkThemeProvider.theme(), LightThemeProvider.theme()] {
             for (surface, color) in [
+                ("bg-app", tokens.bg_app),
+                ("bg-panel", tokens.bg_panel),
+                ("bg-bar", tokens.bg_bar),
                 ("bg-raised", tokens.bg_raised),
                 ("bg-raised-hover", tokens.bg_raised_hover),
+                ("bg-input", tokens.bg_input),
                 ("bg-overlay", tokens.bg_overlay),
             ] {
                 let ratio = contrast(tokens.text_3, color);
@@ -260,13 +275,56 @@ mod tests {
                     tokens.id
                 );
             }
-            for (semantic, color) in [("ok", tokens.ok), ("shared", tokens.shared)] {
-                let ratio = contrast(color, tokens.bg_overlay);
+        }
+    }
+
+    /// 语义色既要用在描边/状态点（3:1），也会作为文字压在 soft 底或浮层上（4.5:1）。
+    #[test]
+    fn semantic_text_on_soft_and_overlay_meet_contrast_floor() {
+        for tokens in [DarkThemeProvider.theme(), LightThemeProvider.theme()] {
+            for (name, color, surface) in [
+                ("accent/bg-overlay", tokens.accent, tokens.bg_overlay),
+                ("accent/accent-soft", tokens.accent, tokens.accent_soft),
+                ("warn/bg-overlay", tokens.warn, tokens.bg_overlay),
+                ("warn/warn-soft", tokens.warn, tokens.warn_soft),
+                ("danger/bg-overlay", tokens.danger, tokens.bg_overlay),
+                ("danger/bg-raised", tokens.danger, tokens.bg_raised),
+                ("danger/danger-soft", tokens.danger, tokens.danger_soft),
+                ("ok/bg-overlay", tokens.ok, tokens.bg_overlay),
+                ("shared/bg-overlay", tokens.shared, tokens.bg_overlay),
+            ] {
+                let ratio = contrast(color, surface);
                 assert!(
                     ratio >= 4.5,
-                    "{}: {semantic} 对 bg-overlay 只有 {ratio:.2}",
+                    "{}: {name} 只有 {ratio:.2}:1（契约 §5 要求 4.5:1）",
                     tokens.id
                 );
+            }
+        }
+    }
+
+    /// 名称条/类型徽标是半透明底压缩略图：按最亮（纯白）与最暗（纯黑）图片合成后验证。
+    #[test]
+    fn tile_overlay_text_readable_on_bright_and_dark_thumbnails() {
+        for tokens in [DarkThemeProvider.theme(), LightThemeProvider.theme()] {
+            for backdrop in [0xFFFFFFFF, 0xFF000000] {
+                for (name, bg, text) in [
+                    ("label-bar", tokens.label_bar_bg, tokens.label_bar_text),
+                    (
+                        "label-bar-hover",
+                        tokens.label_bar_bg_hover,
+                        tokens.label_bar_text,
+                    ),
+                    ("badge", tokens.badge_bg, tokens.badge_text),
+                ] {
+                    let composite = composite_over(bg, backdrop);
+                    let ratio = contrast(text, composite);
+                    assert!(
+                        ratio >= 4.5,
+                        "{}: {name} 在合成底 {composite:08x} 上只有 {ratio:.2}:1",
+                        tokens.id
+                    );
+                }
             }
         }
     }

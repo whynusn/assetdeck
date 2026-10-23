@@ -68,3 +68,12 @@
 - 截图：target/ux-audit/shots/M0-C5/after/*.png
 - 基线：ad6f5a0
 
+## run-20261024-060013 · M0-C6 · done
+
+- 组件：对比度与可读性
+- 结论：对比度与可读性达标：修正暗色危险色与名称条 alpha、浅色 accent/warn 语义色，提升瓦片文件名与状态说明字号，修复菜单按压副行；新增 3 组对比度测试守护。
+- Findings：F-031(fixed) 暗色危险色作为错误文字在浮层上仅 4.19:1；F-032(fixed) 暗色瓦片名称条在亮缩略图上对比不足（4.00:1）；F-033(fixed) 浅色 accent/warn 作为语义文字压 soft/浮层不足；F-034(fixed) 瓦片文件名用 caption 10px 承载主标识；F-035(fixed) 目标候选状态与上框点位说明压在 caption 10px；F-036(fixed) MenuItem 副行在浅色按压面上对比降到 4.40:1；F-037(open) 共享/传输状态点只靠颜色区分，缺少非颜色线索；F-038(open) 目标候选不可用行整体 0.6 透明，状态原因低于可读阈值；F-039(open) 目标胶囊就绪态仅用绿点表达，无文字冗余
+- 门禁：slint-viewer --check 通过；cargo check -p app-ui -p ui-viewmodels 通过；cargo test -p ui-viewmodels 通过（含新增 3 组对比度测试）；deps_guard 6 项通过；ui_hygiene 2 项通过；capture --check 42 状态通过
+- 截图：target/ux-audit/shots/M0-C6/after/{shell-grid,settings-default,theme-light}.png；补充验证 target/ux-audit/shots/_states/after/{rename-error,target-choose,tuning,import-result,classify}.png
+- 基线：4b94654
+
