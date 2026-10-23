@@ -3955,7 +3955,7 @@ pub mod activation_guard {
         lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_MOUSEACTIVATE {
-            let hit_test = (lparam as usize & 0xFFFF) as usize; // LOWORD = 命中测试结果
+            let hit_test = lparam as usize & 0xFFFF; // LOWORD = 命中测试结果
             let mouse_message = ((lparam as usize >> 16) & 0xFFFF) as u32; // HIWORD = 鼠标消息
             if let Some(result) = activation_decision(
                 SUPPRESS_ENABLED.load(Ordering::Relaxed),
