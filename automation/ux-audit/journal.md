@@ -16,3 +16,10 @@
 - 卫生 ratchet 指标扩为 5 项：hex 6、font-size 字面量 110（非字阶 16）、border-radius 字面量 12（非圆角阶 5）；基线在 `hygiene-baseline.json`，允许阶写进 `ui_hygiene.rs` 防止悄悄放宽。
 - 截图实测确认 F-001/F-002 现象；另记录候选问题（分享中心弹窗在 700px 高度下内容裁切、菜单删除项无危险色、设置面板滚动无可见提示）留待对应组件运行处理。
 - 截图实测新增 finding F-004（M7-C6，P1/layout）：设置面板「关于」区正文被裁切且无滚动余量；1200px 高窗口复现，证据 `target/ux-audit/shots/_states/before/settings-default-tall.png`。
+## run-20261024-003547 · M0-C8 · done
+
+- 组件：UI 卫生 ratchet 护栏
+- 结论：初始化自检：begin/complete/journal/lock 与卫生度测试全链路通过
+- 门禁：ui-hygiene=pass(hex 6/font 110/off16/radius 12/off5);capture-check=pass(42 states);state-validate=pass
+- 基线：780dd9a
+

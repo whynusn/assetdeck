@@ -5,9 +5,22 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T23:42:27+08:00",
-  "runCount": 0,
-  "lastRuns": [],
+  "updatedAt": "2026-10-23T16:35:50.818Z",
+  "runCount": 1,
+  "lastRuns": [
+    {
+      "runId": "run-20261024-003547",
+      "runNumber": 1,
+      "componentId": "M0-C8",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "初始化自检：begin/complete/journal/lock 与卫生度测试全链路通过",
+      "gates": "ui-hygiene=pass(hex 6/font 110/off16/radius 12/off5);capture-check=pass(42 states);state-validate=pass",
+      "shots": true,
+      "baseCommit": "780dd9a",
+      "finishedAt": "2026-10-23T16:35:50.814Z"
+    }
+  ],
   "current": null,
   "modules": [
     {
@@ -219,9 +232,9 @@
           ],
           "states": [],
           "focus": "硬编码色值/字号/圆角计数只降不升；基线随修复同步下调。",
-          "lastRun": "init",
-          "auditedAtCommit": "8e944a9",
-          "notes": "初始化建立；基线见 hygiene-baseline.json。"
+          "lastRun": "run-20261024-003547",
+          "auditedAtCommit": "780dd9a",
+          "notes": "初始化建立；基线见 hygiene-baseline.json。\n[run-20261024-003547] 初始化自检：begin/complete/journal/lock 与卫生度测试全链路通过"
         }
       ]
     },

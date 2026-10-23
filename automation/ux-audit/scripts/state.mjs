@@ -402,8 +402,8 @@ function journalEntry(state, run, component, status, summary, gates, shots, extr
   if (related.length > 0) {
     lines.push(`- Findings：${related.map((finding) => `${finding.id}(${finding.status}) ${finding.title}`).join('；')}`);
   }
-  if (gates) lines.push(`- 门禁：${gates}`);
-  if (shots) lines.push(`- 截图：${shots}`);
+  if (typeof gates === 'string' && gates) lines.push(`- 门禁：${gates}`);
+  if (typeof shots === 'string' && shots) lines.push(`- 截图：${shots}`);
   lines.push(`- 基线：${run.baseCommit || 'unknown'}`);
   if (extra) lines.push(`- 备注：${extra}`);
   lines.push('');
@@ -629,7 +629,7 @@ for (let i = 0; i < rest.length; i += 1) {
   } else {
     const key = arg.slice(2);
     const next = rest[i + 1];
-    if (next && !next.startsWith('--')) {
+    if (next !== undefined && !next.startsWith('--')) {
       options[key] = next;
       i += 1;
     } else {

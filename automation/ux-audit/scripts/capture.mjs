@@ -80,7 +80,6 @@ function resolveState(name, seen = new Set()) {
   const base = raw.extends ? resolveState(raw.extends, seen) : { props: {}, globals: {}, file: null };
   return {
     name,
-    tags: raw.tags ?? [],
     file: raw.file ?? base.file,
     window: raw.window ?? base.window ?? null,
     props: { ...base.props, ...(raw.props ?? {}) },
