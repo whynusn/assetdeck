@@ -92,6 +92,13 @@ pub struct AppSettings {
     /// detail：管理员下 Explorer 拖入导入被 UIPI 拦截（OLE 跨完整性级别无解）。
     #[serde(default)]
     pub auto_elevate_on_launch: bool,
+    /// D83 素材点击免激活：true（默认）= 左键点素材格不把本窗口弹到最前
+    /// （平台层 WM_MOUSEACTIVATE 豁免），避免与目标应用重叠时「本窗上浮 →
+    /// 上框目标上浮」的连续层序翻转闪烁；右键与素材以外的区域照常上浮。
+    /// 代价：本窗不获得键盘焦点（Esc/Ctrl+A 仍发给目标应用）。
+    /// false = 恢复系统默认激活行为（所有点击都上浮）。
+    #[serde(default = "default_suppress_activate_on_asset_click")]
+    pub suppress_activate_on_asset_click: bool,
     /// 目标「上框点位」的 UI 覆盖（D76.4）：key = 目标 id（如 qianniu）。
     /// 空 = 该目标用画像链上的值（手编 user.toml 或内置）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -99,6 +106,10 @@ pub struct AppSettings {
 }
 
 fn default_nudge_offscreen_window() -> bool {
+    true
+}
+
+fn default_suppress_activate_on_asset_click() -> bool {
     true
 }
 
@@ -136,8 +147,11 @@ impl AppSettings {
     ///
     /// 拼接语义：装配层把它追加在 profiles.user.toml 内容之后交给
     /// `targets::load_profiles`——同 id 字段级后写胜出，因此优先级为
-    /// 设置面板 > 手编 user.toml > 内置。首行自带换行，手编文件即使以
-    /// 无换行的表结尾也不会粘连。无覆盖时返回空串（调用方跳过拼接）。
+    /// 设置面板 > 手编 user.toml > 内置。
+    ///
+    /// 注意：覆盖形态是单个 `[profiles.input_point]`，按字段级替换语义会
+    /// **整体替换**该目标的 input_points 列表——内置的多点兜底随之失效，
+    /// 只保留面板里编辑的这一个点；「重置」移除覆盖后恢复内置列表。
     pub fn synthesized_profiles_toml(&self) -> String {
         if self.input_point_overrides.is_empty() {
             return String::new();
@@ -224,6 +238,7 @@ impl Default for AppSettings {
             dismissed_version: String::new(),
             nudge_offscreen_window: default_nudge_offscreen_window(),
             auto_elevate_on_launch: false,
+            suppress_activate_on_asset_click: default_suppress_activate_on_asset_click(),
             input_point_overrides: BTreeMap::new(),
         }
     }
@@ -286,6 +301,7 @@ impl AppSettings {
             "auto_update_check" => self.auto_update_check,
             "nudge_offscreen_window" => self.nudge_offscreen_window,
             "auto_elevate_on_launch" => self.auto_elevate_on_launch,
+            "suppress_activate_on_asset_click" => self.suppress_activate_on_asset_click,
             _ => false,
         }
     }
@@ -303,6 +319,7 @@ impl AppSettings {
             "auto_update_check" => Some(&mut self.auto_update_check),
             "nudge_offscreen_window" => Some(&mut self.nudge_offscreen_window),
             "auto_elevate_on_launch" => Some(&mut self.auto_elevate_on_launch),
+            "suppress_activate_on_asset_click" => Some(&mut self.suppress_activate_on_asset_click),
             _ => None,
         }
     }
@@ -326,6 +343,7 @@ impl AppSettings {
             "verbose_diagnostics" => "排查问题时临时开启，记录高频调试细节。",
             "auto_update_check" => "启动后静默检查新版本（一天最多一次）；面板下方可随时手动检查。",
             "nudge_offscreen_window" => "窗口滑出屏幕时上框前自动拉回，立即生效。",
+            "suppress_activate_on_asset_click" => "与目标应用重叠时左键点素材不弹本窗到最前，避免层序闪烁（右键照常上浮）；此时键盘焦点仍在目标应用。立即生效。",
             "auto_elevate_on_launch" => "开启即弹 UAC 以管理员重启，可向管理员运行的目标注入；代价：无法再从资源管理器拖入素材。",
             _ => "",
         }
@@ -367,6 +385,12 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
     SettingSpec::new(
         "activate_on_single_click",
         "上框触发方式",
+        "上框行为",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
+        "suppress_activate_on_asset_click",
+        "点击素材不上浮窗口",
         "上框行为",
         SettingKind::Toggle,
     ),
@@ -457,6 +481,7 @@ mod tests {
             dismissed_version: String::new(),
             nudge_offscreen_window: false,
             auto_elevate_on_launch: false,
+            suppress_activate_on_asset_click: true,
             input_point_overrides: BTreeMap::new(),
         };
         let views = settings.describe();
@@ -492,6 +517,7 @@ mod tests {
                 "auto_update_check" => settings.auto_update_check,
                 "nudge_offscreen_window" => settings.nudge_offscreen_window,
                 "auto_elevate_on_launch" => settings.auto_elevate_on_launch,
+                "suppress_activate_on_asset_click" => settings.suppress_activate_on_asset_click,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(
@@ -503,8 +529,12 @@ mod tests {
         // 标题行紧邻各自组首行：header 之后紧跟该组第一条设置。
         assert!(views[0].header, "首项之前应有分组标题");
         assert!(!views[1].header && views[1].key == "activate_on_single_click");
-        assert_eq!(views[2].key, "send_after_paste", "同组连续排列");
-        assert!(views[3].header, "分组切换处插入标题");
+        assert!(
+            !views[2].header && views[2].key == "suppress_activate_on_asset_click",
+            "D83 新设置同组排列"
+        );
+        assert_eq!(views[3].key, "send_after_paste", "同组连续排列");
+        assert!(views[4].header, "分组切换处插入标题");
     }
 
     #[test]
@@ -535,6 +565,39 @@ mod tests {
             "侧栏宽度参与持久化 round-trip"
         );
         assert!(loaded.ui_animations, "ui_animations 参与持久化 round-trip");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// D83 素材点击免激活：默认开（新方案即默认，用户拍板），settings.toml
+    /// 缺字段回落默认；关闭态参与持久化 round-trip。
+    #[test]
+    fn suppress_activate_on_asset_click_defaults_on_and_roundtrips() {
+        assert!(
+            AppSettings::default().suppress_activate_on_asset_click,
+            "新方案（点素材不上浮）应为默认值"
+        );
+
+        let dir = PathBuf::from("target")
+            .join("tmp")
+            .join("settings-suppress-activate");
+        let path = dir.join("settings.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("建临时目录失败");
+
+        // 缺字段回落默认开。
+        fs::write(&path, "light_theme = true").expect("写设置失败");
+        assert!(AppSettings::load(&path).suppress_activate_on_asset_click);
+
+        let settings = AppSettings {
+            suppress_activate_on_asset_click: false,
+            ..AppSettings::default()
+        };
+        settings.save(&path).expect("写设置失败");
+        let loaded = AppSettings::load(&path);
+        assert!(
+            !loaded.suppress_activate_on_asset_click,
+            "关闭态 round-trip"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

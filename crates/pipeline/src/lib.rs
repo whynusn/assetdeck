@@ -1,17 +1,16 @@
-//! 粘贴管线：格式协商 → 剪贴板 → 焦点校验 → 注入 → auto-send 开关（默认关）。
+//! 粘贴管线：格式协商 → 剪贴板 → 焦点校验 → 注入（绝不合成 Enter）。
 //!
-//! D8 红线：「双击 = 素材进输入框」止步于此；回车直发（auto_send）是管线
-//! 末端的独立布尔开关且**默认关**，任何重构不得把 Enter 合成并入主路径。
+//! D8 红线（2026-09-15 清理后由**结构**保证）：「双击 = 素材进输入框」止步于此；
+//! 注入序列只含 Ctrl+V 和弦，不含回车——M6 的 auto_send 布尔开关整代删除
+//! （生产零调用者），任何改动不得把 0x0D 放回注入路径。
 //!
-//! 失败语义是降级而非中断：除剪贴板写入失败（唯一硬失败 → [`PasteOutcome::Failed`]）
+//! 失败语义是降级而非中断：除剪贴板写入失败（唯一硬失败 → [`TargetPasteOutcome::Failed`]）
 //! 外，其余一律返回可呈现的降级结果，交由调用方 UI 弹 toast。
 
 pub mod feedback;
 pub mod negotiate;
 
 use std::time::Instant;
-
-use serde::{Deserialize, Serialize};
 
 use platform::{
     ClipboardPayload, ClipboardSink, FocusOutcome, FocusWatcher, ForegroundRelation, InputFocuser,
@@ -21,16 +20,15 @@ use targets::{NotReadyReason, Profile, ReadinessMode, TargetBinding, TargetTrack
 
 pub use feedback::{FeedbackAction, FeedbackSeverity, PasteFeedback};
 pub use negotiate::{
-    negotiate, negotiate_detailed, AssetKind, AssetPayload, Negotiated, NegotiationProfile,
-    TargetProfile,
+    negotiate_detailed, AssetPayload, Negotiated, NegotiationProfile, PayloadKind,
 };
 
 /// 虚拟键码：Ctrl（与 Win32 VK_CONTROL 同值；D12 平台事实）。
 pub const VK_CONTROL: u16 = 0x11;
 /// 虚拟键码：字母 V。Win32 头文件对字母键无常量，惯例取 ASCII 大写码。
 pub const VK_V: u16 = 0x56;
-/// 虚拟键码：回车。auto_send 关闭时注入序列绝不出现
-/// （守卫测试 auto_send_off_never_synththesizes_enter 锁定）。
+/// 虚拟键码：回车。产品注入路径绝不出现——注入序列在结构上只含
+/// Ctrl+V 和弦（守卫测试 core_upload_path_never_synthesizes_enter 锁定）。
 pub const VK_RETURN: u16 = 0x0D;
 
 /// Ctrl+V 和弦序列：Ctrl↓ V↓ V↑ Ctrl↑。
@@ -46,30 +44,7 @@ fn chord_paste() -> Vec<u16> {
     ]
 }
 
-/// 回车序列：Enter↓ Enter↑。仅在 auto_send 显式开启时追加到注入序列末端。
-fn chord_enter() -> Vec<u16> {
-    vec![VK_RETURN, VK_RETURN | platform::KEY_UP]
-}
-
-/// 管线配置。D8 红线：`auto_send` 默认值必须为 false
-/// （快照测试 auto_send_flag_defaults_off 锁定序列化形态）。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PasteConfig {
-    pub auto_send: bool,
-}
-
-/// 管线结果。降级不是 Err——用枚举结果表达，让调用方 UI 呈现 toast。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PasteOutcome {
-    /// 已写剪贴板并完成注入（Ctrl+V，及开启时的 Enter）。
-    Injected,
-    /// 仅复制成功。reason 说明未注入的原因，供 toast 文案。
-    CopiedOnly { reason: String },
-    /// 硬失败。唯一来源：剪贴板写入失败。
-    Failed(String),
-}
-
-/// M8 目标路由路径的结果。兼容层仍返回 [`PasteOutcome`]，产品路径使用本枚举。
+/// 产品上框路径的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetPasteOutcome {
     Injected { verified: bool },
@@ -77,14 +52,8 @@ pub enum TargetPasteOutcome {
     Failed { feedback: PasteFeedback },
 }
 
-/// 管线的平台依赖集合：三个 trait 对象由装配层（app-ui）注入；
+/// 管线的平台依赖集合：六个 trait 对象由装配层（app-ui）注入；
 /// 测试以带共享操作日志的 mock 实现替换。
-pub struct PipelineDeps<'a> {
-    pub clipboard: &'a mut dyn ClipboardSink,
-    pub focus: &'a dyn FocusWatcher,
-    pub injector: &'a mut dyn KeyInjector,
-}
-
 pub struct TargetPipelineDeps<'a> {
     pub clipboard: &'a mut dyn ClipboardSink,
     pub focus: &'a dyn FocusWatcher,
@@ -96,35 +65,19 @@ pub struct TargetPipelineDeps<'a> {
     pub focuser: &'a dyn InputFocuser,
 }
 
-/// 一次「唤起面板 → 选素材 → 粘贴」的会话状态。
+/// 一次「锁定目标 → 上框」的会话状态：持有常驻追踪器锁定的热目标。
 ///
-/// 编排顺序（D8 锁定，操作日志断言对象）：
-/// `write_clipboard → is_alive(previous) → inject Ctrl+V → [auto_send] inject Enter`
+/// 编排顺序（操作日志断言对象，见 target_routing_spec）：
+/// `negotiate_detailed → write_clipboard → would_send 红线 → activate →
+/// focus → readiness → 前台漂移复检 → inject Ctrl+V`
+#[derive(Default)]
 pub struct PasteSession {
-    config: PasteConfig,
-    /// 唤起面板时刻的前一前台窗口（焦点校验锚点）。
-    previous_foreground: Option<platform::WindowHandle>,
     target: Option<TargetBinding>,
 }
 
 impl PasteSession {
-    pub fn new(config: PasteConfig) -> Self {
-        Self {
-            config,
-            previous_foreground: None,
-            target: None,
-        }
-    }
-
-    /// 面板唤起时调用：记录此刻的前一前台窗口（D8 红线——后续焦点校验以此为锚，
-    /// 宁可少发、不可误发到错误窗口）。
-    pub fn begin_panel(&mut self, focus: &dyn FocusWatcher) {
-        self.previous_foreground = Some(focus.foreground());
-    }
-
-    /// 只读测试钩子：上一记录的前台窗口（仿 library::set_paused 先例）。
-    pub fn previous_foreground(&self) -> Option<platform::WindowHandle> {
-        self.previous_foreground
+    pub fn new() -> Self {
+        Self { target: None }
     }
 
     /// 从常驻追踪器锁定本次上框目标。面板前台本身不会参与目标选择。
@@ -138,48 +91,6 @@ impl PasteSession {
 
     pub fn target(&self) -> Option<&TargetBinding> {
         self.target.as_ref()
-    }
-
-    pub fn paste(&mut self, req: &AssetPayload<'_>, deps: &mut PipelineDeps<'_>) -> PasteOutcome {
-        // 1. 格式协商：无映射即降级（尚未触碰剪贴板，无副作用）。
-        let payload: ClipboardPayload<'_> = match negotiate(req, TargetProfile::ImGeneric) {
-            Some(p) => p,
-            None => {
-                return PasteOutcome::CopiedOnly {
-                    reason: "素材类型无可用剪贴板格式".to_string(),
-                }
-            }
-        };
-        // 2. 红线：先写剪贴板，后切焦点/注入（顺序颠倒会粘出旧内容）。
-        //    写入失败是整条管线唯一的硬失败。
-        if let Err(e) = deps.clipboard.write(&payload) {
-            return PasteOutcome::Failed(e.to_string());
-        }
-        // 3. 红线：焦点校验目标是唤起面板时记录的「前一前台窗口」；
-        //    失败/无记录一律降级仅复制，禁止重试后强注。
-        let Some(target) = self.previous_foreground else {
-            return PasteOutcome::CopiedOnly {
-                reason: "唤起面板前未记录前台窗口".to_string(),
-            };
-        };
-        if !deps.focus.is_alive(target) {
-            return PasteOutcome::CopiedOnly {
-                reason: "前一前台窗口已失活".to_string(),
-            };
-        }
-        // 4. 兼容 M6 的旧入口。M8 产品路径使用 paste_targeted()，其核心链路不调用 send()。
-        if let Err(e) = deps.injector.inject(&chord_paste()) {
-            // 注入失败但复制已完成：降级呈现，不算硬失败。
-            return PasteOutcome::CopiedOnly {
-                reason: format!("注入失败: {e}"),
-            };
-        }
-        if let Err(e) = self.send(deps.injector) {
-            return PasteOutcome::CopiedOnly {
-                reason: format!("自动发送失败: {e}"),
-            };
-        }
-        PasteOutcome::Injected
     }
 
     /// M8 核心路径：只负责把素材放入已锁定目标的输入框，绝不自动发送。
@@ -208,12 +119,29 @@ impl PasteSession {
                 payload, format, ..
             } => (payload, format, true),
             Negotiated::Unsupported => {
+                // D82 文件载荷的降级语义：目标未声明 file 行（或尚无热目标，
+                // 落到通用画像）时不注入，但文件仍写剪贴板供用户手动粘贴。
+                // 这是「日志导出」在未实测目标上的唯一安全落点——既不放行
+                // 可能落空的 Ctrl+V，也不让用户拿不到日志文件。
+                if req.kind == PayloadKind::File && !req.source_path.as_os_str().is_empty() {
+                    let payload = ClipboardPayload::Files(vec![req.source_path.clone()]);
+                    if let Err(error) = deps.clipboard.write(&payload) {
+                        return TargetPasteOutcome::Failed {
+                            feedback: PasteFeedback::failed(target_label, error.to_string()),
+                        };
+                    }
+                    return copied_only(
+                        target_label,
+                        NotReadyReason::PayloadUnsupported,
+                        "目标画像未声明 file 行，已复制文件供手动粘贴",
+                    );
+                }
                 return TargetPasteOutcome::Failed {
                     feedback: PasteFeedback::failed(
                         target_label,
                         "画像声明的剪贴板格式均无法承载当前素材",
                     ),
-                }
+                };
             }
         };
         if let Err(error) = deps.clipboard.write(&payload) {
@@ -398,14 +326,6 @@ impl PasteSession {
             verified,
         );
         TargetPasteOutcome::Injected { verified }
-    }
-
-    /// 自动发送是显式独立命令。M8 的 paste_targeted() 不调用本方法。
-    pub fn send(&self, injector: &mut dyn KeyInjector) -> platform::Result<()> {
-        if self.config.auto_send {
-            injector.inject(&chord_enter())?;
-        }
-        Ok(())
     }
 }
 

@@ -22,6 +22,7 @@ pub const INBOX_CATEGORY: &str = "待分类";
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     UnsupportedSchemaVersion { found: i32 },
+    CategoryExists(String),
 }
 
 impl fmt::Display for StoreError {
@@ -32,6 +33,7 @@ impl fmt::Display for StoreError {
                 f,
                 "库 schema 版本 {found} 高于当前支持的 {SUPPORTED_SCHEMA_VERSION}，拒绝打开以防写坏"
             ),
+            StoreError::CategoryExists(name) => write!(f, "分类已存在: {name}"),
         }
     }
 }
@@ -496,6 +498,44 @@ impl Store {
             params![uuid, category],
         )?;
         Ok(n > 0)
+    }
+
+    /// 分类重命名：单条 UPDATE 批量改写引用旧名的资产行。
+    ///
+    /// 分类不是独立表（D3：分面按资产元数据聚合），「改名」即改写所有引用行。
+    /// **含回收站行**——回收站素材的 category 同步改，恢复后语义一致。
+    /// 新名与旧名相同是合法 no-op（返回 0，不执行 UPDATE）；新名已存在则拒绝
+    /// （否则静默合并两个分类，用户无法撤销）。
+    pub fn rename_category(&self, old: &str, new: &str) -> Result<usize> {
+        if old == new {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assets WHERE category = ?1)",
+            params![new],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(StoreError::CategoryExists(new.to_string()));
+        }
+        let n = conn.execute(
+            "UPDATE assets SET category = ?1 WHERE category = ?2",
+            params![new, old],
+        )?;
+        Ok(n)
+    }
+
+    /// 删除分类：引用该名的资产行 category 置 NULL（读取侧 COALESCE 显示为
+    /// 「待分类」），素材本身与对象文件不动。**含回收站行**（同上，恢复后
+    /// 不复活已删分类）。返回改写的行数。
+    pub fn clear_category(&self, name: &str) -> Result<usize> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE assets SET category = NULL WHERE category = ?1",
+            params![name],
+        )?;
+        Ok(n)
     }
 
     /// 窄列改名（D48 重命名）。UPDATE file_name 自动触发 FTS 重排（v1 触发器），

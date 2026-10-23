@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps, VK_RETURN};
+use pipeline::{AssetPayload, PayloadKind, TargetPipelineDeps, VK_RETURN};
 use platform::{
     ClipboardPayload, ClipboardSink, FocusOutcome, FocusPlan, FocusWatcher, InputFocuser,
     KeyInjector, ReadinessProbe, ReadinessSignal, Result, WindowActivator, WindowHandle,
@@ -167,7 +167,7 @@ fn selected_cold_target_reaches_exact_hwnd_and_never_synthesizes_enter() {
         focuser: &focuser,
     };
     let payload = AssetPayload {
-        kind: AssetKind::Text,
+        kind: PayloadKind::Text,
         png_bytes: &[],
         source_path: PathBuf::new(),
         text: "target-routing-probe".to_string(),
@@ -213,7 +213,7 @@ fn no_selected_target_still_copies_before_friendly_feedback() {
         focuser: &focuser,
     };
     let payload = AssetPayload {
-        kind: AssetKind::Text,
+        kind: PayloadKind::Text,
         png_bytes: &[],
         source_path: PathBuf::new(),
         text: "copy-first".to_string(),

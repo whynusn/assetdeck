@@ -25,10 +25,10 @@ use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
     AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, ControlError,
     DarkThemeProvider, DomainKind, FacetIndex, Filter, InputPointOverride, LightThemeProvider,
-    RealAssetResolver, SearchProvider, SendItem, ShareAction, ShareControlVm, ShareRegistry,
-    ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode, TargetBarSnapshot,
-    TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
-    ThemeTokens, TuningTarget,
+    PayloadKind, RealAssetResolver, SearchProvider, SendItem, ShareAction, ShareControlVm,
+    ShareRegistry, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode,
+    TargetBarSnapshot, TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps,
+    ThemeProvider, ThemeTokens, TuningTarget,
 };
 
 use task_runner::ChildTask;
@@ -446,13 +446,54 @@ impl CrudCtx {
             args.push("--value".into());
             args.push(value.to_string());
         }
-        ui.set_progress_visible(true);
-        ui.set_progress_percent(0.0);
-        ui.set_progress_text(label.into());
         logging::info!(
             "库写子命令 action={action} items={} label={label}",
             uuids.len()
         );
+        self.run_lib_task(&ui, args, label);
+    }
+
+    /// 分类级库写子命令（D84 rename-category/delete-category）：按分类名寻址，
+    /// 无 uuid 清单——写口是单条 UPDATE 批量改写引用行，逐件清单要起 N 次
+    /// 事务（10 万行分类不可取）。进度/收尾与 uuid 清单路径共用 run_lib_task。
+    fn spawn_category_cmd(&self, action: &str, value: &str, value2: Option<&str>, label: &str) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.importing.load(Ordering::SeqCst) {
+            show_notice(
+                &ui,
+                TargetNoticeTone::Warning,
+                "正在导入/生成缩略图，请等进度条结束后再操作".to_string(),
+            );
+            return;
+        }
+        let root = self
+            .library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        let mut args: Vec<String> = vec![
+            "--cmd".into(),
+            action.into(),
+            "--library".into(),
+            root,
+            "--value".into(),
+            value.to_string(),
+        ];
+        if let Some(v2) = value2 {
+            args.push("--value2".into());
+            args.push(v2.to_string());
+        }
+        logging::info!("分类库写子命令 action={action} value={value} label={label}");
+        self.run_lib_task(&ui, args, label);
+    }
+
+    /// 组装并后台跑一条库写子进程：进度条起跑，进度/收尾经回调弹回 UI 线程
+    /// （子进程线程只许 Fn+Send，Rc 型上下文一律经 ui 句柄转接，不能直捕）。
+    fn run_lib_task(&self, ui: &AppWindow, args: Vec<String>, label: &str) {
+        ui.set_progress_visible(true);
+        ui.set_progress_percent(0.0);
+        ui.set_progress_text(label.into());
 
         let weak = ui.as_weak();
         let weak_progress = weak.clone();
@@ -1864,6 +1905,12 @@ fn mount_when_window_ready(
         Ok(()) => logging::info!("恢复重绘守卫已安装（hwnd={hwnd:#x}）"),
         Err(error) => logging::warn!("恢复重绘守卫安装失败：{error}（不影响常规重绘）"),
     }
+    // D83 素材点击免激活：WM_MOUSEACTIVATE 裁决（点素材不上浮，根治与目标
+    // 应用重叠时的层序闪烁）。开关/hover 态经静态热读，设置面板即时生效。
+    match platform::win32::activation_guard::install(hwnd) {
+        Ok(()) => logging::info!("素材点击免激活已注册（hwnd={hwnd:#x}）"),
+        Err(error) => logging::warn!("素材点击免激活注册失败：{error}（激活行为维持系统默认）"),
+    }
 }
 
 /// 总数文案 + 空态文案的唯一出口。
@@ -2788,6 +2835,10 @@ fn main() {
     };
     // D77 屏外窗口自愈开关：聚焦器经 Arc 共享，设置面板运行中热翻转。
     let nudge_offscreen = Arc::new(AtomicBool::new(settings.borrow().nudge_offscreen_window));
+    // D83 素材点击免激活（默认开）：窗口 proc 静态热读，这里回填启动值。
+    platform::win32::activation_guard::set_suppress_enabled(
+        settings.borrow().suppress_activate_on_asset_click,
+    );
     let routing = Rc::new(RefCell::new(
         TargetRoutingRuntime::new(
             BUILTIN_PROFILES,
@@ -2861,6 +2912,14 @@ fn main() {
         let crud = crud.clone();
         app.on_libcmd_finished(move |success, message, label| {
             crud.reload_after_cmd(success, message.as_str(), label.as_str());
+            // D84 分类级写操作（重命名/删除）会整体重排 CategoryId（装载按
+            // 遍历序重新分配），当前分类视图的 id 已失效——统一回落「全部」，
+            // 避免停留在错误/空的分类视图。其他子命令不动当前视图（既有语义）。
+            if (label == "删除分类" || label == "重命名分类")
+                && matches!(crud.filter(), Filter::InCategory(_))
+            {
+                crud.apply_filter(Filter::All, "全部".into());
+            }
         });
     }
 
@@ -3038,7 +3097,8 @@ fn main() {
         });
     }
 
-    // D79 粘贴导入（key-root 捕获 Ctrl+V，文本输入持焦时已让位）：读剪贴板
+    // D79 粘贴导入（key-root bubble 兜底 Ctrl+V：弹层关闭、持焦输入未认领时
+    // 才到壳层）：读剪贴板
     // CF_HDROP 走与拖入同一导入流。提权会话收不到 Explorer 拖入（UIPI 硬拦
     // OLE），这是与拖入等价的键盘入口；普通会话同样可用。剪贴板无文件列表
     // （如刚复制过素材图片）按「没有可导入内容」静默忽略。
@@ -3079,7 +3139,7 @@ fn main() {
         });
     }
 
-    // Ctrl+A（key-root 捕获，检索框聚焦时已让位）：等价「全选」。
+    // Ctrl+A（key-root bubble 兜底：弹层关闭、持焦输入未认领时才到壳层）：等价「全选」。
     {
         let crud = crud.clone();
         app.on_key_a_pressed(move || {
@@ -3090,6 +3150,8 @@ fn main() {
 
     // 目标重命名弹层的 pending 键：Esc 关闭链（下方）要 clone，故声明在链前。
     let pending_target_rename: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // D84 分类重命名弹窗的 pending 旧名：确认/Esc 关闭链都要 clone，同上声明在链前。
+    let pending_cat_rename: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     // Esc：关闭链（归类弹窗→更新→菜单级→重命名→属性→目标重命名→设置
     // →清空选区退多选）。D67：全部浮层可 Esc 收起——点外部不再关工作流
@@ -3098,6 +3160,7 @@ fn main() {
         let crud = crud.clone();
         let import_flow = import_flow.clone();
         let pending_target_rename = pending_target_rename.clone();
+        let pending_cat_rename = pending_cat_rename.clone();
         app.on_escape_pressed(move || {
             let Some(ui) = crud.ui.upgrade() else { return };
             // D80 共享报价弹窗在最上层：Esc = 拒收（必须回 worker 一个裁决，
@@ -3151,7 +3214,13 @@ fn main() {
                 ui.set_scope_menu_open(false);
                 return;
             }
-            if ui.get_context_menu_open() {
+            if ui.get_cat_menu_open() {
+                ui.set_cat_menu_open(false);
+            } else if ui.get_cat_rename_open() {
+                pending_cat_rename.replace(None);
+                ui.set_cat_rename_open(false);
+                ui.set_cat_rename_error("".into());
+            } else if ui.get_context_menu_open() {
                 ui.set_context_menu_open(false);
             } else if ui.get_move_menu_open() {
                 ui.set_move_menu_open(false);
@@ -3951,6 +4020,100 @@ fn main() {
         });
     }
 
+    // D84 分类右键：命中即置菜单标题/位置并弹菜单。分类名来自自家侧栏列表
+    // （非用户输入），不再校验。
+    {
+        let crud = crud.clone();
+        app.on_cat_right_click(move |name, x, y| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            ui.set_cat_menu_title(name.clone());
+            ui.set_cat_menu_x(x);
+            ui.set_cat_menu_y(y);
+            ui.set_cat_menu_open(true);
+        });
+    }
+
+    // D84 分类菜单动作：0=重命名（打开分类重命名弹窗）1=删除（引用行归
+    // 待分类，对象文件不动）。菜单标题即命中分类名（右键时设定，菜单开着
+    // 不变）；动作只可能从开着的菜单触发，读标题即取命中。
+    {
+        let crud = crud.clone();
+        let pending_cat_rename = pending_cat_rename.clone();
+        app.on_cat_menu_action(move |id| {
+            let Some(ui) = crud.ui.upgrade() else { return };
+            ui.set_cat_menu_open(false);
+            let name = ui.get_cat_menu_title().to_string();
+            if name.is_empty() {
+                return;
+            }
+            match id {
+                0 => {
+                    pending_cat_rename.borrow_mut().replace(name.clone());
+                    ui.set_cat_rename_current(name.into());
+                    ui.set_cat_rename_error("".into());
+                    ui.set_cat_rename_open(true);
+                }
+                1 => {
+                    // 菜单可能滞留旧库态（旧名已被删/改）：改 0 行是自然
+                    // no-op，无需预查库。
+                    crud.spawn_category_cmd("delete-category", &name, None, "删除分类");
+                }
+                _ => {}
+            }
+        });
+    }
+
+    // D84 分类重命名确认：校验在壳层（Slint 无 trim 内建）——非空、无路径
+    // 分隔、不与现有分类重名（重名会静默合并两分类，误操作不可逆）。
+    // 与旧名相同是合法 no-op（改 0 行），直接关弹窗。
+    {
+        let crud = crud.clone();
+        let pending_cat_rename = pending_cat_rename.clone();
+        app.on_cat_rename_confirmed(move |new_name| {
+            let name = new_name.as_str().trim().to_string();
+            let invalid = name.is_empty() || name.contains('/') || name.contains('\\');
+            if invalid {
+                if let Some(ui) = crud.ui.upgrade() {
+                    ui.set_cat_rename_error("分类名不能为空或含路径分隔符".into());
+                }
+                return;
+            }
+            let Some(old) = pending_cat_rename.borrow_mut().take() else {
+                if let Some(ui) = crud.ui.upgrade() {
+                    ui.set_cat_rename_open(false);
+                }
+                return;
+            };
+            let Some(ui) = crud.ui.upgrade() else { return };
+            if name != old {
+                let exists = crud
+                    .resolver
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|r| r.facets().categories().iter().any(|e| e.name == name));
+                if exists {
+                    ui.set_cat_rename_error("已存在同名分类".into());
+                    pending_cat_rename.borrow_mut().replace(old);
+                    return;
+                }
+            }
+            ui.set_cat_rename_open(false);
+            crud.spawn_category_cmd("rename-category", &old, Some(&name), "重命名分类");
+        });
+    }
+
+    {
+        let crud = crud.clone();
+        let pending_cat_rename = pending_cat_rename.clone();
+        app.on_cat_rename_canceled(move || {
+            pending_cat_rename.borrow_mut().take();
+            if let Some(ui) = crud.ui.upgrade() {
+                ui.set_cat_rename_open(false);
+                ui.set_cat_rename_error("".into());
+            }
+        });
+    }
+
     // 属性「打开所在文件夹」：explorer /select 定位（与日志目录入口同法）。
     {
         let crud = crud.clone();
@@ -4398,7 +4561,7 @@ fn main() {
                         }
                     } else {
                         let payload = AssetPayload {
-                            kind: AssetKind::Text,
+                            kind: PayloadKind::Text,
                             png_bytes: &[],
                             source_path: std::path::PathBuf::new(),
                             text: format!("演示素材 #{}", asset_id.0),
@@ -4445,6 +4608,12 @@ fn main() {
             paste_asset(&ui, id);
         });
     }
+
+    // D83 素材格 hover 态喂入平台层（WM_MOUSEACTIVATE 免激活裁决用，
+    // changed has-hover 事件驱动，无轮询）。
+    app.on_tile_hover_changed(move |over| {
+        platform::win32::activation_guard::set_pointer_over_asset(over);
+    });
 
     // 过滤面板 v1：全部(-1)/分类(0..) → set_filter 并回到顶。记住当前分类过滤，
     // 供清空检索时回落。选择分类会清掉检索框。
@@ -4626,6 +4795,8 @@ fn main() {
             // 叠在面板上的上框点位弹窗随面板一起收（D76.5）。
             ui.set_tuning_open(false);
             ui.set_tuning_selected_id("".into());
+            // 日志导出的两段确认装填态随面板一起复位（D82）。
+            ui.set_logs_export_armed(false);
         });
     }
 
@@ -4787,6 +4958,7 @@ fn main() {
             ui.set_scope_menu_shown(false);
             ui.set_scope_menu_open(false);
             ui.set_context_menu_open(false);
+            ui.set_cat_menu_open(false);
             ui.set_move_menu_open(false);
             if ui.get_target_mode() == ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
                 let mut routing = routing.borrow_mut();
@@ -4806,22 +4978,70 @@ fn main() {
         });
     }
 
-    // D38 一键打开日志目录：资源管理器直接定位，导出=整目录拷贝/压缩。
+    // D38 一键打开日志：资源管理器直接**选中本次会话的日志文件**——目录里
+    // 保留最近 8 份（每进程一份），打开目录容易点开上一次会话的旧日志
+    // （「日志要等退出才写完」误判的根源；D82 实证写入是实时落盘）。
     {
         let ui = app.as_weak();
         app.on_open_logs_requested(move || {
             let Some(ui) = ui.upgrade() else { return };
-            match logging::logs_dir() {
-                Some(dir) => {
-                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
-                    logging::info!("打开日志目录 {}", dir.display());
+            match logging::active_log_path() {
+                Some(path) => {
+                    // /select 的路径必须**单独加引号**：explorer 自行解析命令行，
+                    // 整参数引号（std .arg 的 MSVCRT 转义产物）会被无视并回退
+                    // 打开「文档」（D82 实测）；raw_arg 原样传参绕开转义。
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new("explorer.exe")
+                        .raw_arg(format!("/select,\"{}\"", path.display()))
+                        .spawn();
+                    logging::info!("打开日志文件 {}", path.display());
                 }
-                None => show_notice(
+                None => match logging::logs_dir() {
+                    Some(dir) => {
+                        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                        logging::info!("打开日志目录 {}", dir.display());
+                    }
+                    None => show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        "日志尚未初始化（本次运行未生成日志文件）".to_string(),
+                    ),
+                },
+            }
+        });
+    }
+
+    // D82 日志导出：把本次会话日志文件交给上框管线。画像声明了 file 行
+    // （且实测确认不会即发）才注入；未声明/无热目标时管线降级为「仅复制」，
+    // 日志文件仍在剪贴板里，用户可在聊天框手动 Ctrl+V。两段确认的装填态
+    // 在此复位。
+    {
+        let ui = app.as_weak();
+        let routing = routing.clone();
+        app.on_export_logs_requested(move || {
+            let Some(ui) = ui.upgrade() else { return };
+            ui.set_logs_export_armed(false);
+            let Some(path) = logging::active_log_path() else {
+                show_notice(
                     &ui,
                     TargetNoticeTone::Warning,
                     "日志尚未初始化（本次运行未生成日志文件）".to_string(),
-                ),
-            }
+                );
+                return;
+            };
+            logging::flush();
+            logging::info!("导出日志 path={}", path.display());
+            // 日志导出走与素材上框完全相同的 paste 入口（D82 统一）：File 载荷
+            // 进协商表；未声明 file 行时管线写剪贴板并返回 CopiedOnly。
+            let payload = AssetPayload {
+                kind: PayloadKind::File,
+                png_bytes: &[],
+                source_path: path,
+                text: String::new(),
+            };
+            let notice = routing.borrow_mut().paste(&payload);
+            logging::info!("导出日志完成 tone={:?} text={}", notice.tone, notice.text);
+            show_notice(&ui, notice.tone, notice.text);
         });
     }
 
@@ -5155,6 +5375,12 @@ fn main() {
             // D77 屏外窗口自愈：聚焦器经 Arc 热读，立即生效。
             if key == "nudge_offscreen_window" {
                 nudge_offscreen.store(s.nudge_offscreen_window, Ordering::Relaxed);
+            }
+            // D83 素材点击免激活：窗口 proc 静态热读，立即生效。
+            if key == "suppress_activate_on_asset_click" {
+                platform::win32::activation_guard::set_suppress_enabled(
+                    s.suppress_activate_on_asset_click,
+                );
             }
             // D78 自动提权：开启且当前未提权 → 立即交棒重启（等价于应用内
             // 「以管理员重启」一键入口，不用去右键菜单找）。UAC 被拒则设置

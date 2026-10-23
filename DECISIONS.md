@@ -74,9 +74,10 @@
   2. 双倍磁盘占用 → **pHash 导入去重从可选升级为必做**，重复拖入不得重复占盘。
 
 ### D8 auto-send 解耦形态
-- **管线**：`触发(双击/热键) → 资产解析 → 格式协商(CF_HDROP/PNG/DIB/text) → 剪贴板写入 → 焦点校验 → 合成 Ctrl+V → [开关] 合成 Enter`
-- **行为定义**：双击素材至少完成到「素材进入对话框」；回车直发是管线末端的独立布尔开关，**默认关**。
-- **焦点校验规则**：热键唤起面板时记录「前一前台窗口」；选择素材后先校验该窗口仍存活再注入 Ctrl+V；校验失败降级为仅复制并 toast 提示。
+- **管线**：`触发(双击/热键) → 资产解析 → 格式协商(CF_HDROP/PNG/DIB/text) → 剪贴板写入 → 焦点校验 → 合成 Ctrl+V`
+- **行为定义**：双击素材至少完成到「素材进入对话框」；「只上框不发送」是红线。
+- **2026-09-15 收敛（本段取代上一行的「[开关] 合成 Enter」）**：M6 的 auto_send 布尔开关整代删除（生产零调用者，`PasteSession::paste`/`PipelineDeps`/`PasteOutcome`/`chord_enter`/`begin_panel` 同批）。红线由**结构**保证而非开关默认值：注入序列只含 Ctrl+V 和弦，`VK_RETURN` 常量保留仅作守卫测试的比对参照（`core_upload_path_never_synthesizes_enter`）。任何改动不得把 0x0D 放回注入路径。
+- **焦点校验规则**：热键唤起面板时记录「前一前台窗口」；选择素材后先校验该窗口仍存活再注入 Ctrl+V；校验失败降级为仅复制并 toast 提示。（此规则已随 M8 常驻 TargetTracker 落地取代：粘性热目标 + 激活 + 聚焦 + 就绪度探测，见 D13。）
 
 ### D9 技术栈：Rust + Slint
 - **⚠️ 三项已记录风险**：
@@ -980,6 +981,24 @@ if (click_count % 2) == 1 {
 - **误判成因（两个）**：① 保存成功的可观测性为零——点位改没改，粘贴成功时画面完全一样（新旧点位都落在 composer），只有故意填坏值看失败才能"看见"；WeChat 更甚（`already` 步恒命中，input_point 根本不被消费）。② 手编 `profiles.user.toml` / settings.toml 的确**只在启动时读**——手编渠道要重启是既有设计。补救：保存/恢复默认成功路径补 INFO 日志（此前零留痕，本次排查全靠 mtime 反推），提示语明示「即时生效（无需重启）」。
 - **GPU/CPU 渲染开关维持重启生效**：渲染档在建窗前经 BackendSelector 一次性选定（Slint 无运行时换渲染器能力，换档=拆窗重建，状态迁移成本不成比例）；设置行文案本就写明「重启后生效」，不改。
 
+### D82 日志导出与「只复制」降级（2026-10-22 实现，2026-10-23 审查收紧）
+
+- **目标**：设置面板一键把本次会话日志文件交给聊天框，问题反馈不再手工找日志。两段确认防误触；「打开日志」入口改为在资源管理器选中**本次会话的日志文件**（`active_log_path` + `explorer /select`，路径单独加引号 raw_arg）。
+- **载荷**：新增 `PayloadKind::File` / `FormatKind::File` / `FormatPolicy.file`，日志文件走与素材相同的协商表与 paste 入口；`AssetPayload.kind` 不再复用 `domain::AssetKind`，避免 File 变体外溢到库语义。
+- **红线收紧（2026-10-23）**：在真机实测「目标粘贴文件是否直接发送」之前，内置画像**不得声明** `file` 行（微信也不例外）。未声明时管线不硬失败，而是把文件写进剪贴板并返回 `CopiedOnly`（`NotReadyReason::PayloadUnsupported`），提示用户手动 Ctrl+V——既不注入可能落空/即发的 Ctrl+V，也不让用户拿不到日志。`real_im_profiles` 增加「无内置画像声明未验证 file」守卫。
+- **UI/协议**：按钮改为「定位本次日志」「复制本次日志」；分类级子命令 `rename-category`/`delete-category` 收尾补一条 PROGRESS（affected/affected）；File 载荷跳过 750ms 连击合并（日志路径稳定，重复导出是明确请求，不是双击尾随）。
+- **验证缺口**：微信文件粘贴的即发/停输入框行为仍需真机取证；取证后按结论启用 `file` 与 `paste_sends.file`。
+
+### D82.1 三代锚点收敛为 input_point 单一表达式配置面（2026-09-15，用户拍板清理）
+
+- **收敛决策**：top-down 比例锚（`input_anchor`/`FocusAnchor`）、bottom-up 底距锚（`input_anchor_bottom`/`BottomUpAnchor`）与表达式点击点三代坐标模型并存是化石层。收敛为表达式单一配置面：比例 r → `WINDOW_WIDTH * ⌊1000r⌋ / 1000`（y 同式）、底距 d → `WINDOW_HEIGHT - d`。**几何等价的证明是线性缩放**：r×物理尺寸 ≡ (r×逻辑尺寸)×DPI 缩放，故在旧安全区间 [0.02,0.98] 内迁移不改落点（±1px 取整差；区间外旧路径点击时夹紧，迁移同样夹紧）。`AnchorGeometry` 三变体枚举退化为单结构（x_logical/y_logical），platform 的 `click_point_in_client` 三套锚点数学只剩「逻辑→物理 DPI 放大 + 夹进客户区」一条路径。
+- **一次性迁移（本机无 profiles.user.toml，实为保险）**：`ProfilePatch` 保留旧字段仅作 serde 解析，`resolve_patch` 期转等价表达式进 `input_points` 列表后即不存在于 `Profile` 上。D74 优先序保持：声明底部锚时优先于比例锚迁移；同一点击点精确重复自动去重（pdd 的 input_point 与旧底部锚同点）。
+- **策略词汇兼容**：`FocusStrategyStep::Anchor` 变体保留（旧用户画像 `focus_strategy = ["already","anchor"]` 仍可解析），映射为 `FocusStep::InputPointClick`；`focus_plan` 把所有 InputPointClick 级折叠成一次（保留首个点击级位置；所有人共用同一份点列表，第二个点击级只会重放整张列表）。**缺省顺序升级**：`["already","uia","anchor"]` → `["already","uia","input_point"]`——缺省第三级不再要求配置，画像未声明点时平台层自动跳过该级；为此 `InputPointMissing` 守卫收紧为「**显式声明**了 input_point 级才要求配置」（缺省顺序不查，否则所有未配点的画像在升级上炸掉——bench 契约测试当场抓住过）。
+- **逐点兜底**：`FocusPlan.input_point_expr: Option` → `input_points: Vec`，`InputPointClick` 级对列表逐点求值并单击，首个命中即止。内置画像改写：微信两点（右下角内缩 + 旧比例锚 0.66/0.85 等价式）、千牛两点（输入框内部 + 旧 D74 底距锚 127 等价式）、pdd 单点（与旧底部锚同点，旧比例锚 0.49/0.92 被等价覆盖、不再保留）。`anchor_click_observed()` 判据从 AnchorClick 改查 InputPointClick。
+- **M6 auto_send 整代删除同批**（见 D8 收敛段）：`PasteSession::paste`/`PipelineDeps`/`PasteOutcome`/`PasteConfig`/`chord_enter`/`begin_panel`/`negotiate` 便捷入口/`TargetProfile` 枚举全删（生产零调用者）；bench 闭环探针改走 M8 入口（`negotiate_detailed` + `Profile::generic()` + 未持热目标降级），bench-harness 新增 workspace 内 targets 依赖。
+- **落点**：platform lib.rs/win32.rs、targets profile.rs/lib.rs、pipeline lib.rs/negotiate.rs、ui-viewmodels target_bar_vm/target_runtime_spec、profiles/profiles.builtin.toml、bench closed_loop、focus_probe（--click/--anchor-bottom 旧 CLI 惯例保留、内部转等价表达式进 InputPointClick 计划）、tests（锚点数学改迁移等价式断言、画像解析改迁移测试）。
+- **2026-10-23 审查修正**：恢复旧锚点加载期范围校验（`InvalidAnchor`/`InvalidAnchorBottom`，NaN 一并拒绝），迁移时把比例夹回旧 `[0.02, 0.98]` 安全区间——「几何等价」只在安全区间内成立，贴边值旧路径也会夹紧。用户旧锚点覆盖改为**插到首个主点之后**（不再排在内置兜底点之后，旧语义是替换兜底点）。`focus_plan` 折叠**所有** InputPointClick 级（不只相邻；所有点击级共用同一份点列表，保留第二级只会重放整张列表）。设置面板调点会整体替换该目标的 `input_points`（内置多点兜底失效），已在 tip/文档写明「保存后只使用这一个点、重置恢复兜底」。`focus_probe --click` 恢复 0.02/0.98 夹紧。
+
 ### D77 跨机拼多多失效根因 + 三件产品化修复（2026-09-06，他机日志分析）
 
 - **根因判定（ZhangYue 机日志）**：拼多多 37 分钟 ~30 次上框全部 `click: None`——点击从未发出，被自有守卫拒绝；同机千牛/微信正常；focus 阶段仅 2–16ms（排除 300ms×6 命中测试超时=窗口挂起）；y=-120 深处也拒（排除 resize 边框几何）。首要嫌疑：**拼多多以管理员运行而本应用没有**——UIPI 把我们向高完整性进程发的 WM_NCHITTEST 探针与 SendInput 注入静默拦截（快速失败、注入器层面"成功"但事件被丢弃），粘贴落空。热重载在其机器工作正常（保存留痕齐全），点位改什么都无效因为点击根本不发生。
@@ -1114,6 +1133,23 @@ if (click_count % 2) == 1 {
 **M0 实测要害（回环 E2E 逼出来的 QUIC 收发时序纪律）**：① 连接句柄 drop 即拆链——`finish()` 后还躺在本端发送队列里的字节会随 drop 丢失；终行（REJECT/DELIVERED/NACK）写出必须 `finish()` + 显式冲刷窗（`FLUSH_GRACE` 300ms）再返回，DELIVERED 路径此前全靠 remove_dir_all 的偶然 await 才赶上冲刷；② 未 finish 的 SendStream 被 drop = 流 RESET，在途字节同灭；③ `conn.closed()` 与 drain-to-EOF 在快退路径上均不可靠，终行投递的唯一可信模式 = finish + 有界冲刷窗 + 只许最后一个读者关连接。④ 扫描收口走 `SCAN_DONE` 事件行（UI 撤扫描态靠事件不靠定时器）。⑤ mDNS 起不来降级不致命（本机仍可被直连），SCAN 回警示行。
 
 **M0 留给 M1 的口子**：installer 防火墙 UDP 入站规则（同网段收推送依赖；M0 先手测放行）；遥测归因档位字段已埋（engine 事件流），上报通道 M1 再议；pkarr 信令/portmapper 启用/配对码按分期计划。
+
+### D83 素材点击免激活：重叠窗口层序闪烁根治（2026-09-25，用户提案 + 拍板做成设置默认开）
+
+- **问题**：素材管理器与目标应用窗口重叠（本窗在下）时，用户点素材：mousedown 系统默认激活把本窗顶到最前 → 双击触发上框、管线激活目标应用把它顶回最前——短时间两次层序翻转 = 明显闪烁不适。两次翻转里「目标上浮」是注入的结构性前提（前台校验，动不得），能消除的只有本窗自己的上浮。
+- **方案（用户提案，评审采纳）**：点击落在素材格上时豁免本次窗口激活（层序不动），素材格以外的点击维持系统默认上浮。这是唯一干净的切点——mousedown 那刻必须立刻决定激活与否，此时无法预知这是单击还是双击（双击由时间窗事后判定），判据只能落在元素级「光标在不在素材格上」。**必然推论（非可选项）**：单击选中素材同样不上浮；选中高亮在露出条带仍可见。
+- **机制**：子类化主窗口（`platform::win32::activation_guard`，paint_guard/dropfiles 同款 SetWindowLongPtrW 链 + WM_NCDESTROY 还原，第三条链按安装序自然串接），拦截 `WM_MOUSEACTIVATE`(0x0021)：命中「设置开关开 + 素材格 hover + HTCLIENT」三条件返回 `MA_NOACTIVATE`，否则走默认链。lParam 低字命中测试守卫保证标题栏/边框拖拽永远不受影响。**点击照常投递**（WM_LBUTTONDOWN/DBLCLK 与激活无关），Slint 交互与双击判定无损；OLE 拖拽（DoDragDrop）不依赖激活，不受影响。
+- **状态走线**：裁决纯函数 `activation_decision`（测试锁三条件缺一不可）；两个静态热读位——开关 = 设置 `suppress_activate_on_asset_click`（**默认开**，2026-09-25 用户拍板「新方案即默认」；「上框行为」组新行「点击素材不上浮窗口」，立即生效），hover 态 = Slint 素材格 `tile-touch` 的 `changed has-hover` → `tile-hover-changed` 回调喂入（事件驱动无轮询；WM_MOUSEACTIVATE 先于 Slint 收到点击，只能用移动期积累的 hover 态，误判代价 = 单次不上浮，再点非素材区即恢复）。
+- **装配**：`mount_when_window_ready` 里与拖入/重绘守卫并列注册；启动值在建窗前自 settings 回填；设置面板翻转即存即生效。上框链路零改动。
+- **已知边界**：滚动后 hover 态若 Slint 未重评估（几何变化下的 hover 传播未实证），极端情形一次点击不上浮——可接受；真机验收待做（重点：重叠场景双击上框无闪烁、单击选中、非素材区上浮、关开关恢复全量上浮）。
+- **2026-10-23 审查修正**：裁决读取 `WM_MOUSEACTIVATE` lParam 高字的鼠标消息，仅 `WM_LBUTTONDOWN`/`WM_LBUTTONDBLCLK` 免激活；右键/中键维持上浮——否则窗口内的上下文菜单会被目标应用遮住。`WM_NCDESTROY` 同时清空 `INSTALLED`/`ORIGINAL_PROC`，窗口若在进程内重建可重新挂载。帮助文案写明固有代价：免激活期间键盘焦点仍在目标应用，Esc/Ctrl+A 不会到本窗，直到点击非素材区。
+
+### D84 分类右键重命名/删除（2026-10-22 实现，2026-10-23 审查补护栏）
+
+- **语义**：分类不是独立表（D3）；重命名 = 单条 UPDATE 改写所有引用行（**含回收站行**）；删除 = 引用行 `category` 置 NULL（素材回待分类，对象文件不动）。10 万行不能逐件起事务，写口固定为单条 SQL。
+- **入口**：侧栏分类右键 → 重命名/删除；独立重命名弹窗；Esc 链与挡板纳入 `modal-open`；分类级子命令 `rename-category`/`delete-category`（`--value`/`--value2`），写口仍走 sample-library 子进程（单写者纪律）。
+- **护栏（2026-10-23）**：store 层 `rename_category` 同名返回 0（不执行 UPDATE）；新名已存在返回 `StoreError::CategoryExists`，禁止静默合并（UI facets 预检之外的最后一道门）。分类级子命令收尾补 PROGRESS（affected/affected）。重命名/删除后若当前在分类视图，壳层回落「全部」（CategoryId 按装载遍历序重排，旧 id 已失效）。
+- **已知边界**：仅存在于回收站行的分类不出现在侧栏（`load_real_library` 对 deleted 行不注册分面，既有语义），无法从 UI 改名/删除；导出/名册仍按活跃行口径。
 
 ### 未来规划（用户已拍板纳入，未排期）
 

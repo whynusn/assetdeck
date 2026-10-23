@@ -550,6 +550,102 @@ fn set_category_narrow_update_perturbs_nothing_else() {
     assert!(!s.set_category("missing", Some("x")).unwrap());
 }
 
+/// D84 分类重命名：引用旧名的所有行（含回收站行）批量跟随到新名，
+/// 其余分类不动；无引用改 0 行。
+#[test]
+fn rename_category_rewrites_all_referencing_rows() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("cat-a", "a.jpg");
+    a.category = Some("海报".to_string());
+    let mut b = meta("cat-b", "b.jpg");
+    b.category = Some("海报".to_string());
+    let mut c = meta("cat-c", "c.jpg");
+    c.category = Some("贴纸".to_string());
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&b).unwrap();
+    s.upsert_asset(&c).unwrap();
+    s.soft_delete_assets(&["cat-b"]).unwrap();
+
+    assert_eq!(s.rename_category("海报", "宣传图").unwrap(), 2);
+    assert_eq!(
+        s.get_asset("cat-a").unwrap().unwrap().category.as_deref(),
+        Some("宣传图")
+    );
+    // 回收站行同步改名：恢复后不复活旧分类。
+    assert_eq!(
+        s.get_asset("cat-b").unwrap().unwrap().category.as_deref(),
+        Some("宣传图")
+    );
+    assert_eq!(
+        s.get_asset("cat-c").unwrap().unwrap().category.as_deref(),
+        Some("贴纸"),
+        "其余分类不动"
+    );
+    assert_eq!(
+        s.rename_category("不存在", "x").unwrap(),
+        0,
+        "无引用改 0 行"
+    );
+}
+
+/// D84 分类重命名护栏：同名是 0 行 no-op；新名已存在时拒绝，禁止静默合并
+/// 两个分类（UI 层虽已预检，store 层仍守住单写入口的最后一道门）。
+#[test]
+fn rename_category_same_name_is_noop_and_existing_name_is_rejected() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("dup-a", "a.jpg");
+    a.category = Some("海报".to_string());
+    let mut b = meta("dup-b", "b.jpg");
+    b.category = Some("贴纸".to_string());
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&b).unwrap();
+
+    assert_eq!(s.rename_category("海报", "海报").unwrap(), 0, "同名 no-op");
+    assert!(matches!(
+        s.rename_category("海报", "贴纸"),
+        Err(StoreError::CategoryExists(name)) if name == "贴纸"
+    ));
+    assert_eq!(
+        s.get_asset("dup-a").unwrap().unwrap().category.as_deref(),
+        Some("海报"),
+        "被拒绝的改名不得留下半改状态"
+    );
+    assert_eq!(
+        s.get_asset("dup-b").unwrap().unwrap().category.as_deref(),
+        Some("贴纸")
+    );
+}
+
+/// D84 删除分类：引用行 category 置 NULL（读取侧归待分类），素材行本身
+/// 不动；回收站行同样置 NULL，恢复后不复活已删分类。
+#[test]
+fn clear_category_nulls_referencing_rows_and_keeps_assets() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("del-a", "a.jpg");
+    a.category = Some("旧分类".to_string());
+    let mut b = meta("del-b", "b.jpg");
+    b.category = Some("旧分类".to_string());
+    let mut c = meta("del-c", "c.jpg");
+    c.category = Some("贴纸".to_string());
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&b).unwrap();
+    s.upsert_asset(&c).unwrap();
+    s.soft_delete_assets(&["del-b"]).unwrap();
+
+    assert_eq!(s.clear_category("旧分类").unwrap(), 2);
+    assert_eq!(s.get_asset("del-a").unwrap().unwrap().category, None);
+    assert_eq!(s.get_asset("del-b").unwrap().unwrap().category, None);
+    assert_eq!(
+        s.get_asset("del-c").unwrap().unwrap().category.as_deref(),
+        Some("贴纸"),
+        "其余分类不动"
+    );
+    // 行本身不动：素材仍在库，恢复后归待分类。
+    assert_eq!(s.all_assets_count().unwrap(), 3);
+    s.restore_assets(&["del-b"]).unwrap();
+    assert_eq!(s.get_asset("del-b").unwrap().unwrap().category, None);
+}
+
 /// 软删素材改名后再恢复：检索按新名命中（改名不要求先恢复）。
 #[test]
 fn renamed_deleted_asset_searchable_after_restore() {

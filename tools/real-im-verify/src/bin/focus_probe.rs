@@ -2010,12 +2010,10 @@ fn run_corner_probe(
                 use platform::{FocusPlan, FocusStep, InputFocuser, InputPointExpr};
                 let plan = FocusPlan {
                     steps: vec![FocusStep::InputPointClick],
-                    anchor: None,
-                    anchor_bottom: None,
-                    input_point_expr: Some(InputPointExpr {
+                    input_points: vec![InputPointExpr {
                         x: expr_x.clone(),
                         y: expr_y.clone(),
-                    }),
+                    }],
                     caret_identity: None,
                 };
                 let report =
@@ -2432,9 +2430,9 @@ unsafe extern "system" fn list_top_window(window: HWND, _lparam: LPARAM) -> BOOL
     BOOL(1)
 }
 
-/// 只做「激活 → 锚点点击 → 信号复测」，跳过探测电池（避免 UIA 误聚焦污染现场）。
-/// 打印客户区尺寸与锚点的屏幕坐标，供截图比对定位是否准确。
-/// `--anchor-bottom x_ratio,y_from_bottom` 走产品 anchor_bottom 代码路径。
+/// 只做「激活 → 点击点单击 → 信号复测」，跳过探测电池（避免 UIA 误聚焦污染现场）。
+/// 打印客户区尺寸与点击点的表达式，供截图比对定位是否准确。
+/// `--anchor-bottom x_ratio,y_from_bottom` 走产品点击点代码路径（旧参数转等价表达式）。
 fn run_click_only(
     hwnd: HWND,
     hwnd_value: isize,
@@ -2445,8 +2443,7 @@ fn run_click_only(
 ) {
     use platform::win32::{Win32InputFocuser, Win32WindowActivator};
     use platform::{
-        BottomUpAnchor, FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowActivator,
-        WindowHandle,
+        FocusPlan, FocusStep, InputFocuser, InputPointExpr, WindowActivator, WindowHandle,
     };
 
     let (x_ratio, y_ratio) = click.unwrap_or((0.5, 0.5));
@@ -2492,52 +2489,38 @@ fn run_click_only(
     let client_w = rc.right - rc.left;
     let client_h = rc.bottom - rc.top;
     let clamp = |ratio: f32| ratio.clamp(0.02, 0.98);
-    let plan = if let Some((bx, y_from_bottom)) = bottom {
-        // 底部锚预览与产品 click_point_in_client 同式（物理像素 → 屏幕点）。
-        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
-        let scale = dpi.max(1) as f32 / 96.0;
-        // 与产品 click_point_in_client 逐式对齐（偏移先取整），预览即落点。
-        let offset = (y_from_bottom * scale).round() as i32;
-        let mut point = windows::Win32::Foundation::POINT {
-            x: rc.left + (client_w as f32 * clamp(bx)).round() as i32,
-            y: rc.top + (client_h as f32 - offset as f32).round() as i32,
-        };
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut point);
-        }
-        println!(
-            "click_point bottom_up=({bx},{y_from_bottom}) dpi={dpi} client={client_w}x{client_h} screen=({},{})",
-            point.x, point.y
-        );
-        FocusPlan {
-            steps: vec![FocusStep::AnchorClick],
-            anchor: None,
-            anchor_bottom: Some(BottomUpAnchor {
-                x_ratio: bx,
-                y_from_bottom,
-            }),
-            input_point_expr: None,
-            caret_identity: None,
+    // --click/--anchor-bottom 的 CLI 惯例保留（比例/底距写法），但产品路径已是
+    // 表达式点击点：在此把旧参数转成等价表达式再进计划（2026-09-15 收敛）。
+    let expr = if let Some((bx, y_from_bottom)) = bottom {
+        // 底距写法：x 比例、y 锚定底边（逻辑像素）。
+        InputPointExpr {
+            x: format!(
+                "WINDOW_WIDTH * {} / 1000",
+                (f64::from(clamp(bx)) * 1000.0).round() as i64
+            ),
+            y: format!("WINDOW_HEIGHT - {}", y_from_bottom.round() as i64),
         }
     } else {
-        let mut point = windows::Win32::Foundation::POINT {
-            x: rc.left + (client_w as f32 * clamp(x_ratio)).round() as i32,
-            y: rc.top + (client_h as f32 * clamp(y_ratio)).round() as i32,
-        };
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut point);
+        // 比例写法：x/y 都按比例迁移。
+        InputPointExpr {
+            x: format!(
+                "WINDOW_WIDTH * {} / 1000",
+                (f64::from(clamp(x_ratio)) * 1000.0).round() as i64
+            ),
+            y: format!(
+                "WINDOW_HEIGHT * {} / 1000",
+                (f64::from(clamp(y_ratio)) * 1000.0).round() as i64
+            ),
         }
-        println!(
-            "click_point ratio=({x_ratio},{y_ratio}) client={client_w}x{client_h} screen=({},{})",
-            point.x, point.y
-        );
-        FocusPlan {
-            steps: vec![FocusStep::AnchorClick],
-            anchor: Some(FocusAnchor { x_ratio, y_ratio }),
-            anchor_bottom: None,
-            input_point_expr: None,
-            caret_identity: None,
-        }
+    };
+    println!(
+        "click_point expr x={} y={} client={client_w}x{client_h}",
+        expr.x, expr.y
+    );
+    let plan = FocusPlan {
+        steps: vec![FocusStep::InputPointClick],
+        input_points: vec![expr],
+        caret_identity: None,
     };
     let started = Instant::now();
     let report = Win32InputFocuser::default().focus_input(WindowHandle(hwnd_value), &plan);
@@ -2954,23 +2937,31 @@ fn main() {
     probe_msaa(hwnd, "-post");
 
     if let Some((x, y)) = click {
-        println!("--- anchor click ---");
+        println!("--- click point ---");
         use platform::win32::Win32InputFocuser;
-        use platform::{FocusAnchor, FocusPlan, FocusStep, InputFocuser, WindowHandle};
+        use platform::{FocusPlan, FocusStep, InputFocuser, InputPointExpr, WindowHandle};
+        // 旧比例 CLI 参数转等价表达式再进计划（2026-09-15 收敛）。
+        // 与旧 FocusAnchor 路径一致，先夹到 0.02..=0.98 安全区间再迁移。
+        let x = x.clamp(0.02, 0.98);
+        let y = y.clamp(0.02, 0.98);
         let plan = FocusPlan {
-            steps: vec![FocusStep::AnchorClick],
-            anchor: Some(FocusAnchor {
-                x_ratio: x,
-                y_ratio: y,
-            }),
-            anchor_bottom: None,
-            input_point_expr: None,
+            steps: vec![FocusStep::InputPointClick],
+            input_points: vec![InputPointExpr {
+                x: format!(
+                    "WINDOW_WIDTH * {} / 1000",
+                    (f64::from(x) * 1000.0).round() as i64
+                ),
+                y: format!(
+                    "WINDOW_HEIGHT * {} / 1000",
+                    (f64::from(y) * 1000.0).round() as i64
+                ),
+            }],
             caret_identity: None,
         };
         let started = Instant::now();
         let report = Win32InputFocuser::default().focus_input(WindowHandle(hwnd_value), &plan);
         println!(
-            "probe=anchor_click outcome={:?} attempts={:?} us={}",
+            "probe=input_point_click outcome={:?} attempts={:?} us={}",
             report.outcome,
             report.attempts,
             started.elapsed().as_micros()

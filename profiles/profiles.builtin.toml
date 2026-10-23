@@ -22,23 +22,19 @@
 # 这段开销在对方进程内，我们的 timing[paste] 量不到，只体现为用户看到的卡顿。
 # png 保留在末位是兜底：素材不在本地库内（无可交路径）时仍能上框。
 #
-# input_anchor 是「激活窗口后把键盘焦点送进输入框」的兜底锚点（客户区宽高比例）。
-# 实测事实：SetForegroundWindow 之后焦点停在窗口根控件（Qt 自绘 / CEF 都不暴露可
-# SetFocus 的输入框），Ctrl+V 会落空。平台层先试 UIA SetFocus，失败才对锚点做一次
-# 左键单击。比例值由 2026-08-24 真机截图量取，随窗口缩放仍成立。
+# input_point 是「激活窗口后把键盘焦点送进输入框」的点击式坐标（单一表达式
+# 配置面，客户区逻辑像素，变量 WINDOW_WIDTH/WINDOW_HEIGHT 实时求值；表数组 =
+# 多点逐个兜底，首个命中即止）。实测事实：SetForegroundWindow 之后焦点停在
+# 窗口根控件（Qt 自绘 / CEF 都不暴露可 SetFocus 的输入框），Ctrl+V 会落空。
+# 2026-09-15 收敛：旧 input_anchor（比例）/ input_anchor_bottom（D74 底距）
+# 两代锚点模型已删除——两者都能被表达式等价表达（线性缩放下 r×宽 ≡
+# WINDOW_WIDTH*r/1000、底距 d ≡ WINDOW_HEIGHT-d），旧用户画像的锚点字段在
+# 解析期一次性迁移为等价表达式。
 #
-# input_anchor_bottom（D74，2026-09-04）是升级版锚点：客户区底边向上的物理像素
-# 距离（96 DPI 基准声明，运行时按 GetDpiForWindow 缩放），声明后优先于 input_anchor。
-# 为什么换模型：2026-09-03 测试用户「报成功但没落框」实锤了比例锚的失效机理——
-# 聊天应用的底栏（工具栏/合规提示条）是**定高**的，比例 y 随窗高线性上漂，窗口
-# 高过 ~1300 物理像素后比例点就越过输入框落进消息列表，Ctrl+V 落空但全程报成功。
-# 锚定底边则与窗高完全解耦。已量取的画像逐一回填；未量取的（微信，登录窗口未能
-# 自动进入）保留比例锚，量取前不动。
-#
-# focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "anchor"]。
+# focus_strategy 声明聚焦级别顺序，省略即取缺省 ["already", "uia", "input_point"]。
 # 概念动作是「把焦点放入目标应用的输入框」；级别=可选用的机制清单，哪个机制
 # 对哪个目标有效是**观测事实数据**，不是代码分支——拼多多实测无法以任何点击
-# 恢复焦点，其画像就只有 ["already", "anchor"]，零代码差异。
+# 恢复焦点，其画像就只有 ["already", "input_point"]，零代码差异。
 # 微信 / 千牛显式去掉 "uia"：实测这两个目标的 UIA 子树里可写 Edit/Document 候选数为 0
 # （微信 descendant count=2、千牛 91 个全不可写），该级别必然失败，白付 22~83ms。
 # pdd 2026-09-01 真机实测同样裁掉 "uia"（editable=0，且 prop 条件变体 109~124ms，
@@ -71,25 +67,32 @@ paste_sends = { image = [], video = [], text = [], other = [] }
 # 搜索框/气泡等）时接手，日常为不执行的兜底。input_point 见 2026-09-05 实测：
 # 右下角内缩点 10/10 轮恢复 composer（UIA class=mmui::ChatInputField）；
 # 贴角 0px 会被尺寸调整边框吞掉（HTCLIENT 守卫已内建）。
-focus_strategy = ["already", "input_point", "anchor"]
+focus_strategy = ["already", "input_point"]
 
-# 微信 4.0 主窗口 1342x971 时输入框位于底部图标行之上、正文列中部偏右。
-[profiles.input_anchor]
-x_ratio = 0.66
-y_ratio = 0.85
-
-# 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是右下角
-# 内缩 8 逻辑像素（=12 物理像素@150% DPI，实测有效带 4~20 物理像素的中段）。
+# 点击式聚焦机制的坐标参数（2026-09-05 真机实测；2026-09-15 收敛为 input_point
+# 单一表达式配置面，旧 input_anchor 比例锚迁为等价表达式）：本机版式的有效点是
+# 右下角内缩 8 逻辑像素（=12 物理像素@150% DPI，实测有效带 4~20 物理像素的中段）。
 # 你的设备版式若不同，直接改写表达式（变量 WINDOW_WIDTH/WINDOW_HEIGHT =
-# 客户区逻辑宽高，实时求值；四角内缩与窗口内任意一点是同一配置面）。
-[profiles.input_point]
+# 客户区逻辑宽高，实时求值）。表数组 = 多点逐个兜底，首个命中即止。
+[[profiles.input_point]]
 x = "WINDOW_WIDTH - 8"
 y = "WINDOW_HEIGHT - 8"
+
+# 旧比例锚 0.66/0.85 的等价表达式（微信主窗口 1342x971 时输入框位于底部图标行
+# 之上、正文列中部偏右）：右下角内缩点失败时按序兜底，与旧 anchor 级行为一致。
+[[profiles.input_point]]
+x = "WINDOW_WIDTH * 660 / 1000"
+y = "WINDOW_HEIGHT * 850 / 1000"
 
 [profiles.formats]
 image = ["files", "png"]
 video = ["files"]
 text = ["text"]
+# D82 日志导出：文件引用行默认不声明。在真机实测「微信粘贴文件是否停在
+# 输入框」之前不得放行注入——未声明时管线走「只复制、可手动粘贴」降级，
+# 不碰「只上框不发送」红线。验证后再启用 file = ["files"] 并同步补
+# paste_sends.file 的实测结论。
+# file = ["files"]
 other = []
 
 [[profiles]]
@@ -123,20 +126,25 @@ paste_sends = { image = [], video = ["files"], text = [], other = [] }
 # 恢复 composer（左下角是原生侧栏），只有点进中栏输入框本体内部才出 caret
 #（9/10 轮 + 粘贴截图复核）。caret_semantic 保留在前面：composer 已获焦时
 # 零动作直接确认，最快路径。
-focus_strategy = ["already", "caret_semantic", "input_point", "anchor"]
+focus_strategy = ["already", "caret_semantic", "input_point"]
 
-# 千牛接待中心 1845x1200 时会话输入框在中栏下部；锚点必须落在中栏，
-# 右侧是「千牛工单」面板，点错会把焦点送进工单搜索框。
-[profiles.input_anchor]
-x_ratio = 0.394
-y_ratio = 0.787
+# 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是中栏
+# 输入框内部（底边向上 75 逻辑像素 = 831 物理像素@150% DPI、实测 caret 复现带
+# 780~860 的中部；x 取输入框中部 413 逻辑 = 620 物理实测点）。x 必须给绝对值
+# 而非窗口比例——右侧是「千牛工单」面板，比例会漂进工单；左下角边角内缩在本机
+# 实测无效（见 focus_strategy 注释）。你的机型若实测边角有效，改成
+# x="8" y="WINDOW_HEIGHT - 8" 即可，无需改代码。
+[[profiles.input_point]]
+x = "413"
+y = "WINDOW_HEIGHT - 75"
 
-# D74 底部锚（2026-09-04 真机量取）：文本区在客户区底边向上 80~295 物理像素
-# 之间（工具栏图标行之上），取带中心 ≈127 逻辑像素；
-# x 沿用比例锚的 0.394（中栏中部，避开右侧工单面板）。
-[profiles.input_anchor_bottom]
-x_ratio = 0.394
-y_from_bottom = 127
+# 旧底部锚（D74，2026-09-04 真机量取）的等价表达式兜底：文本区在客户区底边
+# 向上 80~295 物理像素之间（工具栏图标行之上），取带中心 ≈127 逻辑像素；
+# x 沿用旧比例锚的 0.394（中栏中部，避开右侧工单面板）。与 2026-09-15 收敛前
+# 的 anchor 级行为一致：input_point 失败时按序兜底。
+[[profiles.input_point]]
+x = "WINDOW_WIDTH * 394 / 1000"
+y = "WINDOW_HEIGHT - 127"
 
 # caret 语义确认的身份声明（caret_semantic 级用）：点击输入框后原生 caret 所在点
 # 的 MSAA role/name。与缺省值相同，显式写出便于用户按自己的千牛变体改写
@@ -148,16 +156,6 @@ y_from_bottom = 127
 [profiles.caret_semantic]
 expected_role = 7
 expected_name = "编辑"
-
-# 点击式聚焦机制的坐标参数（2026-09-05 真机实测）：本机版式的有效点是中栏
-# 输入框内部（底边向上 75 逻辑像素 = 831 物理像素@150% DPI、实测 caret 复现带
-# 780~860 的中部；x 取输入框中部 413 逻辑 = 620 物理实测点）。x 必须给绝对值
-# 而非窗口比例——右侧是「千牛工单」面板，比例会漂进工单；左下角边角内缩在本机
-# 实测无效（见 focus_strategy 注释）。你的机型若实测边角有效，改成
-# x="8" y="WINDOW_HEIGHT - 8" 即可，无需改代码。
-[profiles.input_point]
-x = "413"
-y = "WINDOW_HEIGHT - 75"
 
 [profiles.formats]
 image = ["files", "png"]
@@ -193,28 +191,15 @@ paste_sends = { image = [], video = [], text = [], other = [] }
 # 实测（2026-09-05 生产日志 ×4）：CEF 主窗口，激活后焦点停在根控件/浮动提示，
 # already 级必然 Unavailable。点击式恢复用 input_point（与底部锚完全同点，
 # 生产实贴 3/4 verified），旧底部锚保留为后备。
-focus_strategy = ["already", "input_point", "anchor"]
+focus_strategy = ["already", "input_point"]
 
-# 客服输入框锚点（1875x1185 客户区实测量取，2026-09-01）：文本区在会话列
-# 下部、工具栏图标行之下、黄色合规提示条之上，客户区比例 x 0.29~0.69 /
-# y 0.88~0.96，锚点取文本区中心；发送按钮在 x≈0.63 起，横向有余量。
-[profiles.input_anchor]
-x_ratio = 0.49
-y_ratio = 0.92
-
-# D74 底部锚（2026-09-03 借号真机量取）：文本区在底边向上 55~150 物理像素
-# 之间（工具栏行之上、合规提示条之下），取带中心 ≈66 逻辑像素；x 沿用 0.49。
-# 注意：此值只在真机上做过几何量取，端到端实贴 E2E 因账号收回未跑（2026-09-04），
-# 用户侧拿到账号后需补一次受控实贴复核。——已补：2026-09-05 生产日志实贴
-# 4 次（3 次 verified=true），该点生产有效。
-[profiles.input_anchor_bottom]
-x_ratio = 0.49
-y_from_bottom = 66
-
-# 点击式聚焦机制（D76.3 同构迁移）：与底部锚完全同点（0.49×宽、底边向上
-# 66 逻辑像素），等价迁到统一表达式配置面，用户设备可自行微调。
-# 拼多多是 CEF 网页布局，x 随窗口宽度等比缩放（比例即实测行为），y 锚定底边。
-# 注意：拼多多实测无法以「边角点击」恢复焦点（D76.1），此点为输入框本体内部。
+# 点击式聚焦机制（D76.3 同构迁移；2026-09-15 收敛后旧锚字段已删除）：与旧
+# 底部锚完全同点（0.49×宽、底边向上 66 逻辑像素）的等价表达式，用户设备可
+# 自行微调。拼多多是 CEF 网页布局，x 随窗口宽度等比缩放（比例即实测行为），
+# y 锚定底边（WINDOW_HEIGHT 表达式）。注意：拼多多实测无法以「边角点击」恢复
+# 焦点（D76.1），此点为输入框本体内部。旧比例锚 0.49/0.92 与底部锚 0.49/66
+# 均被此点等价覆盖（D74 优先序下比例锚本就 dead weight），不再保留。
+# 生产实贴依据：2026-09-05 日志实贴 4 次（3 次 verified=true），该点生产有效。
 [profiles.input_point]
 x = "WINDOW_WIDTH * 49 / 100"
 y = "WINDOW_HEIGHT - 66"

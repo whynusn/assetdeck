@@ -60,12 +60,13 @@ pub use update_check::{
 };
 pub use uuid;
 
-pub use pipeline::{AssetKind, AssetPayload, TargetPipelineDeps};
+pub use pipeline::{AssetPayload, PayloadKind, TargetPipelineDeps};
 pub use target_runtime::{TargetRoutingRuntime, TargetRuntimeDeps};
 pub use targets::{AliasMap, Health as TargetHealth, ProfileError as TargetProfileError};
 
 /// 壳层（app-ui）依赖白名单只有本 crate + slint，装配所需的领域类型经此转发。
 pub use domain::{
-    Asset, AssetId, CategoryId, Filter, SortDirection, SortField, SortSpec, Sorter, TagId,
+    Asset, AssetId, AssetKind, CategoryId, Filter, SortDirection, SortField, SortSpec, Sorter,
+    TagId,
 };
 pub use index::FacetIndex;

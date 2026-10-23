@@ -35,6 +35,10 @@ fn defaults_are_conservative() {
         !s.auto_elevate_on_launch,
         "默认不自动提权（D78）：UAC 每次启动弹窗 + 管理员下拖入导入失效，须用户显式选择"
     );
+    assert!(
+        s.suppress_activate_on_asset_click,
+        "默认开素材点击免激活（D83，用户拍板新方案即默认）"
+    );
 }
 
 #[test]
@@ -55,6 +59,7 @@ fn save_then_load_roundtrips() {
         dismissed_version: "v0.2.0".into(),
         nudge_offscreen_window: false,
         auto_elevate_on_launch: true,
+        suppress_activate_on_asset_click: false,
         input_point_overrides: BTreeMap::new(),
     };
     s.save(&path).expect("写设置失败");
@@ -63,6 +68,10 @@ fn save_then_load_roundtrips() {
     assert!(
         loaded.auto_elevate_on_launch,
         "自动提权参与持久化 round-trip"
+    );
+    assert!(
+        !loaded.suppress_activate_on_asset_click,
+        "素材点击免激活参与持久化 round-trip（D83）"
     );
     let _ = fs::remove_dir_all(&dir);
 }

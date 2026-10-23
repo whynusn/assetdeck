@@ -12,17 +12,6 @@ export { Theme } from "theme.slint";
 // 即可在运行时整体翻转明暗——这是「浅色主题切不全」问题的正解（D37）。
 export { Palette }
 
-// 文本输入聚焦计数（D79）：key-root 捕获的 Ctrl+A / Ctrl+V 必须向所有文本
-// 输入让位（否则输入框内的全选/粘贴被键盘根抢走）。各输入就地挂 changed
-// has-focus 钩子增减计数——计数而非布尔的理由：聚焦切换事件顺序不定，
-// 计数对「A 失焦与 B 获焦交错」天然幂等，布尔写法会出现闪断。
-export global TextInputFocus {
-    private property <int> focused-count: 0;
-    public function focus-gained() { focused-count += 1; }
-    public function focus-lost() { focused-count = Math.max(0, focused-count - 1); }
-    public function any() -> bool { return focused-count > 0; }
-}
-
 // UI 共享枚举常量：消灭 .slint 里的魔法数字（综合分析报告「三.9」）。
 // 数字值与 app-ui/src/ui_enums.rs 的映射保持一致。
 export global UiEnums {
@@ -380,6 +369,8 @@ export component AppWindow inherits Window {
     callback viewport-resized();
     callback double-clicked(int);
     callback tile-clicked(int);
+    // D83 素材点击免激活：素材格 hover 态喂给平台层（WM_MOUSEACTIVATE 裁决）。
+    callback tile-hover-changed(bool);
     // D47 选区交互：瓦片 pointer-event 拆件（up 左键带修饰 = tile-modified-click；
     // up 右键 = tile-right-click 带瓦片绝对坐标供菜单定位）。坐标是窗口逻辑像素。
     callback tile-modified-click(int, bool, bool);
@@ -408,13 +399,29 @@ export component AppWindow inherits Window {
     // 重命名弹窗确认（新名；壳层 trim 校验非空/无路径分隔）与取消。
     callback rename-confirmed(string);
     callback rename-canceled();
+    // D84 分类右键：up 右键带命中分类名与绝对坐标（同瓦片右键模式）；
+    // 菜单动作回传 0=重命名 1=删除（删除=素材回待分类，不动文件）。
+    callback cat-right-click(string, length, length);
+    in property <bool> cat-menu-open: false;
+    in property <length> cat-menu-x: 0px;
+    in property <length> cat-menu-y: 0px;
+    in property <string> cat-menu-title: ""; // 命中分类名
+    callback cat-menu-action(int);
+    // 分类重命名弹窗（新名；壳层校验非空/无路径分隔/不与现有分类重名）。
+    in property <bool> cat-rename-open: false;
+    in property <string> cat-rename-current: "";
+    in property <string> cat-rename-error: "";
+    callback cat-rename-confirmed(string);
+    callback cat-rename-canceled();
     callback properties-folder-requested();
     callback properties-closed();
-    // Ctrl+A / Esc 键盘通道：FocusScope 捕获后转发，业务判定在壳层。
+    // Ctrl+A / Esc 键盘通道：Esc 走 capture（永远赢），Ctrl+A 走 bubble 兜底
+    //（见 key-root 注释），业务判定在壳层。
     callback key-a-pressed();
     callback escape-pressed();
-    // D79 粘贴导入：Ctrl+V（无文本输入持焦时截获）→ 壳层读剪贴板 CF_HDROP
-    // 走与拖入同一导入流。提权会话收不到 Explorer 拖入（UIPI），这是等价入口。
+    // D79 粘贴导入：Ctrl+V bubble 兜底（弹层关闭且无人认领时）→ 壳层读剪贴板
+    // CF_HDROP 走与拖入同一导入流。提权会话收不到 Explorer 拖入（UIPI），这是
+    // 等价入口。
     callback paste-import-requested();
     // 启动时给 key-root 上焦：Slint 不为子元素生成 get_* 访问器，聚焦只能
     // 在 .slint 内自理（Rust 侧 invoke，处理器里调元素方法）。
@@ -482,6 +489,9 @@ export component AppWindow inherits Window {
     callback import-finished(bool, string);
     // D38：设置面板底部「打开日志目录」。
     callback open-logs-requested();
+    // D82 日志导出：两段确认装填态（第一击置 true，第二击导出并由壳层复位）。
+    in-out property <bool> logs-export-armed: false;
+    callback export-logs-requested();
 
     // —— D61 旧版库一键迁移 ——
     // 仅在检测到 exe 旁遗留库（或未收账的迁移备份）时出现于设置面板；
@@ -545,28 +555,50 @@ export component AppWindow inherits Window {
         root.viewport-resized();
     }
 
+    // 弹层门卫：挡板（overlay 宿主内 if root.modal-open）与键盘快捷键守卫
+    // 共用的同一份「任一弹层打开」判定——单一代码事实来源，新增弹层只改这里。
+    // import-result-open 不算模态（挡板同判，结果面板开着仍可操作背景）。
+    property <bool> modal-open:
+        root.settings-open || root.import-menu-open
+        || root.target-mode == UiEnums.target-mode-choose
+        || root.context-menu-open || root.move-menu-open
+        || root.cat-menu-open || root.cat-rename-open
+        || root.rename-open || root.properties-open
+        || root.scope-menu-open || root.classify-open
+        || root.target-rename-open
+        || root.tuning-open
+        || root.share-devices-open || root.share-offer-open
+        || root.share-request-open
+        || root.share-domains-open || root.share-ctl-open
+        || root.update-open;
+
     // overlay 宿主：填满窗口。内层先放常规布局，再叠绝对定位浮层。
-    // D47 键盘通道：根 FocusScope 兜住 Esc（关菜单/弹窗/退多选）与 Ctrl+A
-    // （全选当前视图）。capture 阶段父先于子：检索框/输入框编辑时让路，
-    // Ctrl+A 不误伤文本全选。壳层启动时 focus() 一次（见 main.rs）。
+    // D47 键盘通道：capture 只留 Esc——「关弹层」是否决类动作，必须永远赢。
+    // Ctrl+A / Ctrl+V 走非 capture 的 key_pressed 兜底：持焦 TextInput 原生
+    // 消费 Ctrl+A/Ctrl+C/Ctrl+V/X（1.17.1 items/text.rs StandardShortcut 分支），
+    // 这些键到不了这里，无需任何「输入框持焦让路」机关；弹层打开时默认动作
+    // 让位（modal-open 门卫），杜绝快捷键打进下层视图。壳层启动时 focus() 一次
+    //（见 main.rs）：无焦点时按键不会送达 key-root，兜底链路必须有主。
     key-root := FocusScope {
         focus-on-click: false;
 
         capture_key_pressed(event) => {
-            // Ctrl+A / Ctrl+V（D79 粘贴导入）：仅在没有任何文本输入持焦时截获
-            //（TextInputFocus 计数 > 0 = 某输入框持焦，全选/粘贴留给输入框）。
+            if (event.text == Key.Escape) {
+                root.escape-pressed();
+                return accept;
+            }
+            return reject;
+        }
+
+        key_pressed(event) => {
             if (event.modifiers.control && (event.text == "a" || event.text == "A")
-                && !TextInputFocus.any()) {
+                && !root.modal-open) {
                 root.key-a-pressed();
                 return accept;
             }
             if (event.modifiers.control && (event.text == "v" || event.text == "V")
-                && !TextInputFocus.any()) {
+                && !root.modal-open) {
                 root.paste-import-requested();
-                return accept;
-            }
-            if (event.text == Key.Escape) {
-                root.escape-pressed();
                 return accept;
             }
             return reject;
@@ -733,11 +765,6 @@ export component AppWindow inherits Window {
                             // 文本经 self.text 转发。
                             edited => {
                                 root.search-changed(self.text);
-                            }
-                            // D79：聚焦计数（键根 Ctrl+A/Ctrl+V 让位判断用）。
-                            changed has-focus => {
-                                if (self.has-focus) { TextInputFocus.focus-gained(); }
-                                else { TextInputFocus.focus-lost(); }
                             }
                         }
 
@@ -1186,6 +1213,18 @@ export component AppWindow inherits Window {
                                         clicked => {
                                             root.filter-selected(i - 1);
                                         }
+                                        // D84 分类右键菜单：up 右键带命中分类名与
+                                        // 窗口坐标（同瓦片右键取坐标手法）。
+                                        // 「全部」(i=0) 不是用户分类，不弹菜单。
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.up
+                                                && ev.button == PointerEventButton.right
+                                                && i > 0) {
+                                                root.cat-right-click(name,
+                                                    self.absolute-position.x + self.mouse-x,
+                                                    self.absolute-position.y + self.mouse-y);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1543,6 +1582,13 @@ export component AppWindow inherits Window {
                                 // 上框信号逐字照发（红线 B：现状不变）。
                                 property <bool> mod-on-down: false;
 
+                                // D83 素材点击免激活：hover 态喂给壳层静态，
+                                // 平台层在 WM_MOUSEACTIVATE 时裁决是否豁免上浮
+                                // （事件驱动；激活决定先于本组件收到点击）。
+                                changed has-hover => {
+                                    root.tile-hover-changed(self.has-hover);
+                                }
+
                                 clicked => {
                                     if (!self.mod-on-down) {
                                         root.tile-clicked(tile.asset-id);
@@ -1618,24 +1664,15 @@ export component AppWindow inherits Window {
             }
         }
 
-        // 浮层挡板：任一浮层打开时铺满窗口拦截背景点击（工作流弹窗下 =
+        // 浮层挡板：判定即 modal-open（与键盘快捷键守卫同一份代码事实——
+        // 任一浮层打开时铺满窗口拦截背景点击（工作流弹窗下 =
         // 模态死点击，底下控件收不到；点在弹窗面板自身空白处命中挡板同理，
         // 也不触发收起）。D67 分级收口：壳层在 overlay-dismissed 里只关
         // 菜单级浮层（右键/范围/导入/移动/目标选择器）；设置/归类/重命名/
         // 属性/目标重命名/更新不再吃 dismiss——误触背景不丢输入，关闭走
         // 各自的显式按钮与 Esc。挡板不能摘：摘了背景控件恢复收点，弹窗
         // 飘着时点瓦片会误触发动作，比误关更糟。
-        if root.settings-open || root.import-menu-open
-            || root.target-mode == UiEnums.target-mode-choose
-            || root.context-menu-open || root.move-menu-open
-            || root.rename-open || root.properties-open
-            || root.scope-menu-open || root.classify-open
-            || root.target-rename-open
-            || root.tuning-open
-            || root.share-devices-open || root.share-offer-open
-            || root.share-request-open
-            || root.share-domains-open || root.share-ctl-open
-            || root.update-open: TouchArea {
+        if root.modal-open: TouchArea {
             width: 100%;
             height: 100%;
             clicked => {
@@ -1798,10 +1835,6 @@ export component AppWindow inherits Window {
                 target-rename-input := LineEdit {
                     text: root.target-rename-text;
                     placeholder-text: "别名（留空保存 = 恢复默认名）";
-                    changed has-focus => {
-                        if (self.has-focus) { TextInputFocus.focus-gained(); }
-                        else { TextInputFocus.focus-lost(); }
-                    }
                 }
 
                 HorizontalLayout {
@@ -2028,19 +2061,36 @@ export component AppWindow inherits Window {
                                 spacing: 4px;
                                 for tuning in root.target-tunings: FlatButton {
                                     text: tuning.label;
-                                    tip: "调整该目标「把焦点放入输入框」的点击坐标表达式";
+                                    tip: "调整该目标「把焦点放入输入框」的点击坐标表达式；保存后该目标只使用这一个点，重置可恢复内置兜底点";
                                     clicked => { root.tuning-selected(tuning.target-id); }
                                 }
                             }
                         }
 
-                        // D38：一键打开日志目录（全部子进程日志同目录，导出=拷贝该目录）。
+                        // D38：一键定位本次会话日志（全部子进程日志同目录）。
                         // 归入「高级」组末尾（模型里最后一组是高级），样式走通用 FlatButton。
                         FlatButton {
-                            text: "打开日志目录";
+                            text: "定位本次日志";
                             glyph: Glyph.folder-search;
-                            tip: "全部进程的日志都在这里，导出问题反馈时拷贝整个目录";
+                            tip: "在资源管理器中选中本次运行的日志文件；全部进程的日志都在同一目录";
                             clicked => { root.open-logs-requested(); }
+                        }
+
+                        // D82 日志导出：两段确认（第一击装填、第二击复制）——
+                        // 先复制到剪贴板，用户在聊天框按 Ctrl+V 手动粘贴；
+                        // 未实测 file 行不走自动上框（只上框不发送红线）。
+                        FlatButton {
+                            text: root.logs-export-armed ? "再次点击确认复制" : "复制本次日志";
+                            glyph: Glyph.folder-search;
+                            tip: "把本次运行的日志文件复制到剪贴板；在聊天框按 Ctrl+V 手动粘贴（不自动上框/发送）";
+                            clicked => {
+                                if (root.logs-export-armed) {
+                                    root.logs-export-armed = false;
+                                    root.export-logs-requested();
+                                } else {
+                                    root.logs-export-armed = true;
+                                }
+                            }
                         }
 
                         // D61/D64 旧版库迁移：三态——可迁移（按钮）/ 已收账
@@ -2172,10 +2222,6 @@ export component AppWindow inherits Window {
                             text: root.tuning-x-text;
                             font-size: 10px;
                             placeholder-text: "如 8 或 WINDOW_WIDTH - 8";
-                            changed has-focus => {
-                                if (self.has-focus) { TextInputFocus.focus-gained(); }
-                                else { TextInputFocus.focus-lost(); }
-                            }
                         }
                     }
                     VerticalLayout {
@@ -2189,10 +2235,6 @@ export component AppWindow inherits Window {
                             text: root.tuning-y-text;
                             font-size: 10px;
                             placeholder-text: "如 WINDOW_HEIGHT - 8";
-                            changed has-focus => {
-                                if (self.has-focus) { TextInputFocus.focus-gained(); }
-                                else { TextInputFocus.focus-lost(); }
-                            }
                         }
                     }
                 }
@@ -2323,6 +2365,53 @@ export component AppWindow inherits Window {
             }
         }
 
+        // —— 分类右键菜单（D84）：重命名 / 删除。删除语义 = 引用行归待分类
+        //（category 置 NULL），素材与对象文件不动，可重新归类——因此不做
+        // 二段确认（与瓦片「删除进回收站」同风险级）。样式同瓦片菜单浮层。
+        if root.cat-menu-open: Rectangle {
+            x: Math.min(root.cat-menu-x, root.width - 220px);
+            y: Math.min(root.cat-menu-y, root.height - 140px);
+            width: 220px;
+            height: cat-menu-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            cat-menu-layout := VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+
+                if root.cat-menu-title != "": Text {
+                    text: root.cat-menu-title;
+                    color: Theme.text-3;
+                    font-size: 10px;
+                    x: 4px;
+                    width: parent.width - 8px;
+                    overflow: elide;
+                }
+
+                MenuItem {
+                    glyph: Glyph.file-text;
+                    text: "重命名";
+                    clicked => {
+                        root.cat-menu-action(0);
+                    }
+                }
+                MenuItem {
+                    glyph: Glyph.trash;
+                    text: "删除";
+                    detail: "素材移入待分类";
+                    clicked => {
+                        root.cat-menu-action(1);
+                    }
+                }
+            }
+        }
+
         // —— 「移动到分类」弹层：现有分类逐条 + 输入新名新建（统一归入同款交互）——
         if root.move-menu-open: Rectangle {
             x: Math.max(0px, (root.width - 280px) / 2);
@@ -2404,10 +2493,6 @@ export component AppWindow inherits Window {
                     move-name := LineEdit {
                         placeholder-text: "输入新分类名即新建";
                         horizontal-stretch: 1;
-                        changed has-focus => {
-                            if (self.has-focus) { TextInputFocus.focus-gained(); }
-                            else { TextInputFocus.focus-lost(); }
-                        }
                     }
                     Button {
                         text: "新建并移入";
@@ -3207,10 +3292,6 @@ export component AppWindow inherits Window {
                 rename-input := LineEdit {
                     text: root.rename-current;
                     placeholder-text: "新名称（只改显示名，不动磁盘路径）";
-                    changed has-focus => {
-                        if (self.has-focus) { TextInputFocus.focus-gained(); }
-                        else { TextInputFocus.focus-lost(); }
-                    }
                 }
 
                 if root.rename-error != "": Text {
@@ -3234,6 +3315,66 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.rename-confirmed(rename-input.text);
+                        }
+                    }
+                }
+            }
+        }
+
+        // —— 分类重命名弹窗（D84）：只改分类名（引用该名的素材行批量跟随），
+        // 不动素材文件名与磁盘路径。结构同素材重命名弹窗；独立弹窗不复用
+        // rename-open——两者的确认路径不同（素材改名 vs 分类批量改写），
+        // 共用弹窗要在确认处理器里判 pending 归属，分支比弹窗本身更贵。
+        if root.cat-rename-open: Rectangle {
+            x: (root.width - 340px) / 2;
+            y: 150px;
+            width: 340px;
+            height: cat-rename-layout.preferred-height;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            background: Theme.bg-overlay;
+            drop-shadow-blur: 16px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: Theme.scrim;
+
+            cat-rename-layout := VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: "重命名分类";
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                cat-rename-input := LineEdit {
+                    text: root.cat-rename-current;
+                    placeholder-text: "新分类名";
+                }
+
+                if root.cat-rename-error != "": Text {
+                    text: root.cat-rename-error;
+                    color: Theme.danger;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "取消";
+                        clicked => {
+                            root.cat-rename-canceled();
+                        }
+                    }
+                    Button {
+                        text: "保存";
+                        primary: true;
+                        clicked => {
+                            root.cat-rename-confirmed(cat-rename-input.text);
                         }
                     }
                 }
@@ -3505,10 +3646,6 @@ export component AppWindow inherits Window {
                     placeholder-text: "输入分类名，实时匹配已有分类…";
                     edited(text) => { root.classify-name-changed(text); }
                     accepted(text) => { root.classify-name-changed(text); }
-                    changed has-focus => {
-                        if (self.has-focus) { TextInputFocus.focus-gained(); }
-                        else { TextInputFocus.focus-lost(); }
-                    }
                 }
 
                 // 候选列表：ScrollView 高度钉 min(166px, 内容高)，不钉会塌成

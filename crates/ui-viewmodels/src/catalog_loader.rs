@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use domain::{Asset, AssetId, AssetKind, CategoryId, Filter, TagId};
 use index::FacetIndex;
-use pipeline::AssetPayload;
+use pipeline::{AssetPayload, PayloadKind};
 use store::Store;
 
 #[derive(Debug)]
@@ -171,7 +171,7 @@ pub struct MaterializedAsset {
 impl MaterializedAsset {
     pub fn as_payload(&self) -> AssetPayload<'_> {
         AssetPayload {
-            kind: self.kind,
+            kind: PayloadKind::from_asset_kind(self.kind),
             png_bytes: &self.png_bytes,
             source_path: self.source_path.clone(),
             text: self.text.clone(),

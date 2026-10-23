@@ -1,4 +1,4 @@
-use pipeline::{AssetPayload, PasteConfig, PasteSession, TargetPasteOutcome, TargetPipelineDeps};
+use pipeline::{AssetPayload, PasteSession, TargetPasteOutcome, TargetPipelineDeps};
 use targets::{
     matching_profile_windows, resolve_eligible_snapshot, AliasMap, Health, ProfileError,
     ProfileSet, TargetBinding, TargetId, TargetTracker, WindowSnapshot,
@@ -303,14 +303,14 @@ impl TargetRoutingVm {
     }
 
     /// 声明了「上框点位」（input_point）的目标清单：id + 展示名 + 当前生效
-    /// 的 x/y 表达式（已是 画像链合并后 的结果）。设置面板「上框点位」区的
-    /// 行数据来源。
+    /// 的 x/y 表达式（取首个点击点，已是 画像链合并后 的结果）。设置面板
+    /// 「上框点位」区的行数据来源。
     pub fn tuning_targets(&self) -> Vec<TuningTarget> {
         self.profiles
             .profiles()
             .iter()
             .filter_map(|profile| {
-                let point = profile.input_point.as_ref()?;
+                let point = profile.input_points.first()?;
                 Some(TuningTarget {
                     id: profile.id.as_str().to_string(),
                     label: profile.label.clone(),
@@ -580,7 +580,7 @@ impl TargetRoutingVm {
         let profile = target
             .and_then(|binding| self.profiles.get(&binding.id))
             .unwrap_or_else(|| self.profiles.generic());
-        let mut session = PasteSession::new(PasteConfig::default());
+        let mut session = PasteSession::new();
         session.begin_targeted(&self.tracker);
         match session.paste_targeted(payload, profile, deps) {
             TargetPasteOutcome::Injected { verified: true } => TargetPasteNotice {

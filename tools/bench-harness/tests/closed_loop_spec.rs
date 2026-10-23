@@ -4,8 +4,8 @@
 //! 诚实边界（PRD）：真实「双击→输入框」含 IM 目标窗口与 SendInput，
 //! 无法诚实自动化。本测试覆盖自动化段：
 //! `VM.double_click → VmEvent::OpenAsset → negotiate → 真实 Win32 剪贴板写入
-//! + 读回校验 → 焦点死降级 CopiedOnly`（探针内部用 alive 恒 false 的包装
-//! FocusWatcher 模拟 CI 无 IM 目标）。
+//! + 读回校验 → 无热目标降级 CopiedOnly`（探针内部用默认未持目标的
+//! PasteSession 模拟 CI 无 IM 目标）。
 //! 真实 SendInput 进输入框由 `real_sendinput_into_notepad`（#[ignore]）人工补全。
 
 #![cfg(windows)]
@@ -16,10 +16,10 @@ use bench_harness::closed_loop::{run_closed_loop_probe, PROBE_TEXT};
 fn closed_loop_doubleclick_to_input_box_under_500ms() {
     let report = run_closed_loop_probe().expect("闭环探针执行失败");
 
-    // 门 1：CopiedOnly 语义断言——焦点失活降级路径必须发生（而非 Injected/Failed）
+    // 门 1：CopiedOnly 语义断言——无热目标降级路径必须发生（而非 Injected/Failed）
     assert_eq!(
-        report.copied_only_reason, "前一前台窗口已失活",
-        "降级原因应来自焦点校验失败路径"
+        report.copied_only_reason, "请选择一个上框目标",
+        "降级原因应来自无热目标路径"
     );
 
     // 门 1：读回校验真实发生——run_closed_loop_probe 内部已做 CF_UNICODETEXT

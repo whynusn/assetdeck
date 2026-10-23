@@ -1888,11 +1888,6 @@ fn uia_automation() -> std::result::Result<IUIAutomation, String> {
 // 输入框焦点获取
 // ---------------------------------------------------------------------------
 
-/// 锚点比例的安全区间：贴边的比例容易落到滚动条 / 窗口边框 / 工具条上，
-/// 夹紧后即便画像写了 0.0 或 1.0 也不会点到输入框以外的控件。
-const ANCHOR_RATIO_MIN: f32 = 0.02;
-const ANCHOR_RATIO_MAX: f32 = 0.98;
-
 /// UIA `SetFocus` 之后**最多**等目标应用移动键盘焦点多久。目标一报焦点事件即提前返回。
 const UIA_FOCUS_SETTLE_CAP_MS: u64 = 40;
 /// 锚点单击之后**最多**等目标应用建立插入符多久。目标一报焦点/插入符事件即提前返回。
@@ -2116,10 +2111,11 @@ fn focus_input_by_plan(
             }
             FocusStep::InputPointClick => {
                 // 表达式点击点（2026-09-05 真机通路）：先按实时 DPI 求值逻辑点，
-                // 再复用锚点单击的全套守卫与证据链。
-                let Some(expr) = plan.input_point_expr.as_ref() else {
+                // 再复用锚点单击的全套守卫与证据链。列表**逐点**尝试（2026-09-15
+                // 收敛：旧 anchor 兜底点并入此列表），首个命中即止。
+                if plan.input_points.is_empty() {
                     continue;
-                };
+                }
                 let dpi = window_dpi(hwnd);
                 let scale = f64::from(dpi.max(1)) / 96.0;
                 let mut client = RECT {
@@ -2141,22 +2137,24 @@ fn focus_input_by_plan(
                     ((client.right - client.left) as f64 / scale).round() as i32,
                     ((client.bottom - client.top) as f64 / scale).round() as i32,
                 );
-                let Ok(evaluated) = input_point_logical(expr, logical) else {
-                    // 求值失败（坏表达式）只在加载期校验过；此处按不可用降级，
-                    // 不 panic 不猜测——后续级别（如 anchor）仍可接管。
-                    attempts.push(FocusAttempt {
-                        step: *step,
-                        outcome: FocusOutcome::Unavailable,
-                        click: None,
-                        settle: None,
-                    });
-                    continue;
-                };
-                let geometry = AnchorGeometry::ExprPoint {
-                    x_logical: evaluated.0,
-                    y_logical: evaluated.1,
-                };
-                let (outcome, click, settle) = click_anchor(hwnd, geometry, nudge_offscreen);
+                let mut outcome = FocusOutcome::Unavailable;
+                let mut click = None;
+                let mut settle = None;
+                for expr in &plan.input_points {
+                    let Ok(evaluated) = input_point_logical(expr, logical) else {
+                        // 求值失败（坏表达式）只在加载期校验过；此处按不可用降级，
+                        // 不 panic 不猜测——后续级别（如 caret_semantic）仍可接管。
+                        continue;
+                    };
+                    let geometry = AnchorGeometry {
+                        x_logical: evaluated.0,
+                        y_logical: evaluated.1,
+                    };
+                    (outcome, click, settle) = click_anchor(hwnd, geometry, nudge_offscreen);
+                    if outcome == FocusOutcome::FocusedByAnchor {
+                        break;
+                    }
+                }
                 attempts.push(FocusAttempt {
                     step: *step,
                     outcome,
@@ -2168,28 +2166,6 @@ fn focus_input_by_plan(
                         outcome: FocusOutcome::FocusedByAnchor,
                         attempts,
                     };
-                }
-            }
-            FocusStep::AnchorClick => {
-                // bottom-up 锚点（D74）存在即优先：旧比例锚点只作兼容兜底。
-                let geometry = plan
-                    .anchor_bottom
-                    .map(AnchorGeometry::BottomUp)
-                    .or(plan.anchor.map(AnchorGeometry::Ratio));
-                if let Some(geometry) = geometry {
-                    let (outcome, click, settle) = click_anchor(hwnd, geometry, nudge_offscreen);
-                    attempts.push(FocusAttempt {
-                        step: *step,
-                        outcome,
-                        click,
-                        settle,
-                    });
-                    if outcome == FocusOutcome::FocusedByAnchor {
-                        return FocusReport {
-                            outcome: FocusOutcome::FocusedByAnchor,
-                            attempts,
-                        };
-                    }
                 }
             }
         }
@@ -2288,45 +2264,24 @@ fn uia_set_focus_on_editable(window: WindowHandle) -> (bool, Option<WaitOutcome>
     (false, last_settle)
 }
 
-/// 客户区比例锚点 → 客户区内像素偏移。比例先夹紧到安全区间再换算。
-/// 锚点几何 → 客户区内点击点（物理像素）。
+/// 已求值锚点几何 → 客户区内点击点（物理像素）。
 ///
-/// bottom-up（D74）：y = 客户区高 − y_from_bottom × (dpi/96)——用目标窗口的
-/// 实时 DPI 把 96-DPI 逻辑像素换算成物理像素，锚定的是「距底边」而不是
-/// 「距顶边比例」，窗口变高时不再从输入区漂进消息列表。y 夹进客户区内，
-/// 画像写了离谱值也点不出窗口。
+/// 求值产出 96-DPI 逻辑坐标，这里按目标窗口的实时 DPI 放大并夹进客户区。
+/// 允许贴边（角落内缩配方可能就是贴边点），只防越界点击到窗外。
+/// 旧比例/bottom-up 两套锚点数学已随三代模型收敛删除——等价表达式
+/// （`WINDOW_WIDTH * r / 1000`、`WINDOW_HEIGHT - d`）在求值期给出同一几何。
 fn click_point_in_client(
     client_width: i32,
     client_height: i32,
     dpi: u32,
     geometry: AnchorGeometry,
 ) -> (i32, i32) {
-    let clamp = |ratio: f32| ratio.clamp(ANCHOR_RATIO_MIN, ANCHOR_RATIO_MAX);
-    match geometry {
-        AnchorGeometry::Ratio(anchor) => (
-            (client_width as f32 * clamp(anchor.x_ratio)).round() as i32,
-            (client_height as f32 * clamp(anchor.y_ratio)).round() as i32,
-        ),
-        AnchorGeometry::BottomUp(anchor) => {
-            let scale = dpi.max(1) as f32 / 96.0;
-            let x = (client_width as f32 * clamp(anchor.x_ratio)).round() as i32;
-            let offset = (anchor.y_from_bottom * scale).round() as i32;
-            let y = (client_height - offset).clamp(8, (client_height - 8).max(8));
-            (x, y)
-        }
-        AnchorGeometry::ExprPoint {
-            x_logical,
-            y_logical,
-        } => {
-            // 求值已在计划级完成（逻辑像素），这里只按实时 DPI 放大并夹进客户区。
-            // 允许贴边（角落内缩配方可能就是贴边点），只防越界点击到窗外。
-            let scale = dpi.max(1) as f32 / 96.0;
-            let x = ((x_logical as f32 * scale).round() as i32).clamp(0, (client_width - 1).max(0));
-            let y =
-                ((y_logical as f32 * scale).round() as i32).clamp(0, (client_height - 1).max(0));
-            (x, y)
-        }
-    }
+    let scale = dpi.max(1) as f32 / 96.0;
+    let x =
+        ((geometry.x_logical as f32 * scale).round() as i32).clamp(0, (client_width - 1).max(0));
+    let y =
+        ((geometry.y_logical as f32 * scale).round() as i32).clamp(0, (client_height - 1).max(0));
+    (x, y)
 }
 
 /// 目标窗口的实时 DPI；API 失败（老系统/无效句柄）回落 96（=不缩放）。
@@ -2880,7 +2835,7 @@ impl KeyInjector for Win32Injector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BottomUpAnchor, FocusAnchor};
+    use crate::InputPointExpr;
 
     /// 从 UTF-16 列表还原出路径字符串序列（去掉分隔 NUL 与末尾终止 NUL）。
     fn decode(list: &[u16]) -> Vec<String> {
@@ -2891,63 +2846,89 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn bottom_up_anchor_scales_with_dpi_and_ignores_window_height() {
-        // 千牛接待中心实测值：1230x800 逻辑客户区、144 DPI（150%）。
-        // 偏移先取整：round(127×1.5)=191，y = 800−191 = 609，即物理底边向上
-        // 190.5px，落在实测文本带（物理 80~295）内；窗口变高时此距离不变。
-        let point = click_point_in_client(
-            1230,
-            800,
-            144,
-            AnchorGeometry::BottomUp(BottomUpAnchor {
-                x_ratio: 0.394,
-                y_from_bottom: 127.0,
-            }),
-        );
-        assert_eq!(point, (485, 609));
-
-        // 同一锚点、同 DPI、窗口高 1000 逻辑：y 只随客户区底边平移，
-        // 不像比例锚那样把点击漂进消息列表（D74 失效机理）。
-        let tall = click_point_in_client(
-            1230,
-            1000,
-            144,
-            AnchorGeometry::BottomUp(BottomUpAnchor {
-                x_ratio: 0.394,
-                y_from_bottom: 127.0,
-            }),
-        );
-        assert_eq!(tall, (485, 809));
+    /// 迁移等价式（D74 收敛后）：千牛旧底部锚 (0.394, 127) 的表达式形态。
+    fn qianniu_migrated_point() -> InputPointExpr {
+        InputPointExpr {
+            x: "WINDOW_WIDTH * 394 / 1000".into(),
+            y: "WINDOW_HEIGHT - 127".into(),
+        }
     }
 
     #[test]
-    fn bottom_up_anchor_clamps_inside_client_at_low_dpi() {
-        // 96 DPI 不缩放；离谱的 y_from_bottom 被夹进客户区内（8px 边距），
-        // 画像写错值也点不出窗口。
+    fn expr_point_scales_with_dpi_and_keeps_bottom_distance() {
+        // 逻辑客户区 1230x800、144 DPI（150%）：求值 x=484（整数除法）、y=673，
+        // 物理 = ×1.5 → (726, 1010)，物理底边距 190px 落在实测文本带（80~295）内。
+        let logical = input_point_logical(&qianniu_migrated_point(), (1230, 800))
+            .expect("迁移表达式必须可求值");
+        assert_eq!(logical, (484, 673));
         let point = click_point_in_client(
-            1000,
-            300,
+            1845,
+            1200,
+            144,
+            AnchorGeometry {
+                x_logical: logical.0,
+                y_logical: logical.1,
+            },
+        );
+        assert_eq!(point, (726, 1010));
+
+        // 窗口高 1000 逻辑：y = 底边距不变（1000−127=873 → ×1.5=1310，物理底边距
+        // 190px），不像旧比例锚那样把点击漂进消息列表——D74 失效机理的免疫
+        // 由表达式结构本身保证（WINDOW_HEIGHT 锚定底边），不再依赖锚点数学。
+        let tall = input_point_logical(&qianniu_migrated_point(), (1230, 1000))
+            .expect("迁移表达式必须可求值");
+        assert_eq!(tall, (484, 873));
+        let tall_point = click_point_in_client(
+            1845,
+            1500,
+            144,
+            AnchorGeometry {
+                x_logical: tall.0,
+                y_logical: tall.1,
+            },
+        );
+        assert_eq!(tall_point, (726, 1310));
+    }
+
+    #[test]
+    fn expr_point_clamps_inside_client() {
+        // 求值期就夹进客户区（input_point_logical）；离谱表达式点不出窗口。
+        let expr = InputPointExpr {
+            x: "WINDOW_WIDTH / 2".into(),
+            y: "WINDOW_HEIGHT - 900".into(),
+        };
+        let logical = input_point_logical(&expr, (1000, 300)).expect("必须可求值");
+        assert_eq!(logical, (500, 0));
+        let point = click_point_in_client(
+            1500,
+            450,
             96,
-            AnchorGeometry::BottomUp(BottomUpAnchor {
-                x_ratio: 0.5,
-                y_from_bottom: 900.0,
-            }),
+            AnchorGeometry {
+                x_logical: logical.0,
+                y_logical: logical.1,
+            },
         );
-        assert_eq!(point, (500, 8));
+        assert_eq!(point, (500, 0));
     }
 
     #[test]
-    fn ratio_anchor_unchanged_for_legacy_profiles() {
-        // 旧比例锚路径保持原行为：未声明 anchor_bottom 的画像走这里。
+    fn legacy_ratio_anchor_migration_is_geometrically_equivalent() {
+        // 旧比例锚 (0.5, 0.5) 的迁移式：96 DPI（不缩放）下给出同一几何；
+        // 高 DPI 下比例 × 物理宽 ≡ WINDOW_WIDTH*r × DPI 缩放（线性等价）。
+        let expr = InputPointExpr {
+            x: "WINDOW_WIDTH * 500 / 1000".into(),
+            y: "WINDOW_HEIGHT * 500 / 1000".into(),
+        };
+        let logical = input_point_logical(&expr, (1000, 800)).expect("必须可求值");
+        assert_eq!(logical, (500, 400));
         let point = click_point_in_client(
             1000,
             800,
-            144,
-            AnchorGeometry::Ratio(FocusAnchor {
-                x_ratio: 0.5,
-                y_ratio: 0.5,
-            }),
+            96,
+            AnchorGeometry {
+                x_logical: logical.0,
+                y_logical: logical.1,
+            },
         );
         assert_eq!(point, (500, 400));
     }
@@ -3024,21 +3005,21 @@ mod tests {
         assert!(crate::eval_point_expr("", 1920, 1080).is_err());
     }
 
-    /// ExprPoint 几何：逻辑像素按实时 DPI 放大、越界夹进客户区（允许贴边）。
+    /// 已求值几何：逻辑像素按实时 DPI 放大、越界夹进客户区（允许贴边）。
     #[test]
     fn expr_point_scales_logical_by_dpi_and_clamps_into_client() {
-        let geometry = AnchorGeometry::ExprPoint {
+        let geometry = AnchorGeometry {
             x_logical: 100,
             y_logical: 50,
         };
         assert_eq!(click_point_in_client(1000, 800, 144, geometry), (150, 75));
         assert_eq!(click_point_in_client(1000, 800, 96, geometry), (100, 50));
-        let corner = AnchorGeometry::ExprPoint {
+        let corner = AnchorGeometry {
             x_logical: 0,
             y_logical: 0,
         };
         assert_eq!(click_point_in_client(1000, 800, 288, corner), (0, 0));
-        let overflow = AnchorGeometry::ExprPoint {
+        let overflow = AnchorGeometry {
             x_logical: 99_999,
             y_logical: 99_999,
         };
@@ -3878,6 +3859,198 @@ pub mod paint_guard {
         }
         ORIGINAL_PROC.store(previous, Ordering::Release);
         Ok(())
+    }
+}
+
+/// D83 素材点击免激活：与目标应用重叠时，左键点素材会先触发本窗上浮（系统默认
+/// 激活），随后上框又把目标应用顶回最前——短时间两次层序翻转即用户看到的
+/// 闪烁。根治 = 左键点击落在素材格上时豁免本次激活（窗口层序不动），素材格
+/// 以外的点击与右键维持系统默认上浮。这是唯一干净的切点：mousedown 那刻系统
+/// 必须立刻决定激活与否，此时无法预知这将是单击还是双击（双击由时间窗事后
+/// 判定），「要不要上浮」只能落在元素级判据「光标在不在素材格上」。
+///
+/// 机制：子类化主窗口（模式与 paint_guard/dropfiles 同款，SetWindowLongPtrW
+/// 链 + WM_NCDESTROY 还原，三链按安装顺序自然串接），拦截 `WM_MOUSEACTIVATE`
+/// ——该消息在点击投递前发出，winit 不特殊处理（落到 DefWindowProc = 激活
+/// 上浮）。左键命中裁决返回 `MA_NOACTIVATE`：不激活不上浮，但 WM_LBUTTONDOWN/
+/// WM_LBUTTONDBLCLK 照常投递（双击判定与激活无关），Slint 交互无损；OLE
+/// 拖拽（DoDragDrop）不依赖窗口激活，同样不受影响。右键/中键不豁免——窗口内
+/// 上下文菜单必须随窗口上浮才可见。上框链路零改动——激活目标应用的那次层序
+/// 变化是注入的结构性前提（前台校验），动不得。
+///
+/// 代价：`MA_NOACTIVATE` 同时意味着本窗不获得键盘焦点；单击选中素材后
+/// Esc/Ctrl+A 仍发给目标应用，直到用户点击非素材区域。这是「不上浮」的
+/// 固有代价，设置文案与验收项必须写明。
+///
+/// 状态两个静态热读位（均 UI 线程读写，Relaxed 足够）：开关来自设置
+/// `suppress_activate_on_asset_click`（默认开，用户拍板新方案即默认）；
+/// hover 态由 Slint 侧素材格 `tile-touch` 的 `changed has-hover` 回调喂入
+/// （事件驱动，无轮询；WM_MOUSEACTIVATE 先于 Slint 收到点击，只能用移动期
+/// 积累的 hover 态）。误判代价 = 单次点击不上浮，再点非素材区即恢复。
+pub mod activation_guard {
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, SetWindowLongPtrW, GWLP_WNDPROC, WM_NCDESTROY, WNDPROC,
+    };
+
+    use crate::PlatformError;
+
+    /// `WM_MOUSEACTIVATE`(0x0021)：光标在非活动窗口上按下鼠标时，系统在投递
+    /// 点击前先发本消息问「激活吗」。常量本地定义，避免 windows-sys 元数据
+    /// 归属不确定性（WM_DROPFILES 先例）。
+    const WM_MOUSEACTIVATE: u32 = 0x0021;
+    /// 鼠标消息（WM_MOUSEACTIVATE 的 lParam 高字）：只有左键点击素材格才
+    /// 豁免激活；右键要正常上浮，否则窗口内的上下文菜单可能被目标应用遮住。
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_LBUTTONDBLCLK: u32 = 0x0203;
+    /// 返回值：不激活、不上浮，点击照常投递。
+    const MA_NOACTIVATE: LRESULT = 3;
+    /// lParam 低字 = 按下时对窗口做 WM_NCHITTEST 的结果；只对客户区点击生效，
+    /// 标题栏/边框（HTCAPTION 等）的拖拽永远维持系统上浮。
+    const HTCLIENT: usize = 1;
+
+    static ORIGINAL_PROC: AtomicIsize = AtomicIsize::new(0);
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    /// 设置开关（默认开 = 新方案）。设置面板翻转即存即生效。
+    static SUPPRESS_ENABLED: AtomicBool = AtomicBool::new(true);
+    /// UI 层素材格 hover 状态（tile-touch 的 changed has-hover 喂入）。
+    static POINTER_OVER_ASSET: AtomicBool = AtomicBool::new(false);
+
+    /// WM_MOUSEACTIVATE 的裁决（纯函数，测试锁定）：免激活仅当「开关开 +
+    /// 光标在素材格上 + 客户区点击 + 左键」四条件同时成立；返回 None =
+    /// 不拦截，走默认链（系统激活上浮）。右键/中键必须上浮——窗口内的
+    /// 上下文菜单依赖窗口在前台才可见。
+    fn activation_decision(
+        suppress_enabled: bool,
+        pointer_over_asset: bool,
+        hit_test: usize,
+        mouse_message: u32,
+    ) -> Option<LRESULT> {
+        if suppress_enabled
+            && pointer_over_asset
+            && hit_test == HTCLIENT
+            && matches!(mouse_message, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK)
+        {
+            Some(MA_NOACTIVATE)
+        } else {
+            None
+        }
+    }
+
+    pub fn set_suppress_enabled(enabled: bool) {
+        SUPPRESS_ENABLED.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 素材格 hover 态喂入（Slint 回调，UI 线程）。
+    pub fn set_pointer_over_asset(over: bool) {
+        POINTER_OVER_ASSET.store(over, Ordering::Relaxed);
+    }
+
+    unsafe extern "system" fn activation_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_MOUSEACTIVATE {
+            let hit_test = (lparam as usize & 0xFFFF) as usize; // LOWORD = 命中测试结果
+            let mouse_message = ((lparam as usize >> 16) & 0xFFFF) as u32; // HIWORD = 鼠标消息
+            if let Some(result) = activation_decision(
+                SUPPRESS_ENABLED.load(Ordering::Relaxed),
+                POINTER_OVER_ASSET.load(Ordering::Relaxed),
+                hit_test,
+                mouse_message,
+            ) {
+                return result;
+            }
+        }
+        let mut original = ORIGINAL_PROC.load(Ordering::Relaxed);
+        if msg == WM_NCDESTROY {
+            // 还原子类化并清空安装态：窗口若在进程内重建（当前渲染器切换要求
+            // 重启，但不要把生命周期耦合到那个假设上），下一次 install 能重新
+            // 挂到新 HWND，而不是被 INSTALLED 直接短路。
+            original = ORIGINAL_PROC.swap(0, Ordering::AcqRel);
+            INSTALLED.store(false, Ordering::Release);
+            if original != 0 {
+                unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, original) };
+            }
+        }
+        if original == 0 {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        } else {
+            let proc: WNDPROC = std::mem::transmute(original);
+            unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+        }
+    }
+
+    /// 在主窗口 HWND 上安装免激活裁决（幂等）。安装时机与顺序无关：本 proc
+    /// 只拦 WM_MOUSEACTIVATE，其余消息原样转发链条。UI 线程 STA 单线程泵
+    /// 消息，安装期间无并发 proc 调用，ORIGINAL_PROC 落库顺序因此安全。
+    pub fn install(hwnd: isize) -> Result<(), PlatformError> {
+        if hwnd == 0 {
+            return Err(PlatformError::Window(
+                "窗口句柄为空，素材点击免激活不可用".into(),
+            ));
+        }
+        if INSTALLED.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let previous = unsafe {
+            SetWindowLongPtrW(
+                hwnd as HWND,
+                GWLP_WNDPROC,
+                activation_proc as *const () as usize as isize,
+            )
+        };
+        if previous == 0 {
+            INSTALLED.store(false, Ordering::Release);
+            return Err(PlatformError::Window("SetWindowLongPtrW 子类化失败".into()));
+        }
+        ORIGINAL_PROC.store(previous, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const WM_RBUTTONDOWN: u32 = 0x0204;
+
+        #[test]
+        fn suppresses_only_when_all_four_conditions_hold() {
+            assert_eq!(
+                activation_decision(true, true, HTCLIENT, WM_LBUTTONDOWN),
+                Some(MA_NOACTIVATE),
+                "开关开 + 素材格上 + 客户区 + 左键 = 豁免上浮"
+            );
+            assert_eq!(
+                activation_decision(true, true, HTCLIENT, WM_LBUTTONDBLCLK),
+                Some(MA_NOACTIVATE),
+                "双击的第二下同样豁免（上框由双击信号驱动）"
+            );
+            assert_eq!(
+                activation_decision(false, true, HTCLIENT, WM_LBUTTONDOWN),
+                None,
+                "设置关 = 全量恢复系统默认（用户显式选择旧行为）"
+            );
+            assert_eq!(
+                activation_decision(true, false, HTCLIENT, WM_LBUTTONDOWN),
+                None,
+                "非素材区域（工具栏/侧栏/空白）照常上浮，行为不取消"
+            );
+            assert_eq!(
+                activation_decision(true, true, 2, WM_LBUTTONDOWN),
+                None,
+                "标题栏/边框拖拽（HTCAPTION 等）不受影响"
+            );
+            assert_eq!(
+                activation_decision(true, true, HTCLIENT, WM_RBUTTONDOWN),
+                None,
+                "右键必须上浮：窗口内上下文菜单不能被目标应用遮住"
+            );
+        }
     }
 }
 

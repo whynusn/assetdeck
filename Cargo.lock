@@ -502,6 +502,7 @@ dependencies = [
  "platform",
  "serde_json",
  "store",
+ "targets",
  "tempfile",
  "ui-viewmodels",
  "windows-sys 0.59.0",

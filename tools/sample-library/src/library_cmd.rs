@@ -1,4 +1,4 @@
-//! D46/D48 库写子命令族：`sample-library --cmd trash|restore|purge|empty-trash|rename|move-category …`。
+//! D46/D48 库写子命令族：`sample-library --cmd trash|restore|purge|empty-trash|rename|move-category|rename-category|delete-category …`。
 //!
 //! 为什么是子命令而不是库内直接函数：UI 进程直写 meta.db 会制造第二写者
 //! （库写单入口纪律，同导入管线走子进程的理由）。壳层 ChildTaskRunner
@@ -14,9 +14,11 @@ pub(crate) struct LibraryCmd {
     pub library: std::path::PathBuf,
     pub uuids: Vec<String>,
     pub value: Option<String>,
+    /// 第二个值：仅 rename-category 用（--value=旧名，--value2=新名）。
+    pub value2: Option<String>,
 }
 
-/// `--cmd <action> --library <root> [--uuid <u>]… [--value <v>]`
+/// `--cmd <action> --library <root> [--uuid <u>]… [--value <v>] [--value2 <v2>]`
 /// 返回 Err 表示参数错误（调用方出 usage）；None 表示不是 --cmd 调用。
 pub(crate) fn parse_library_cmd(args: &[String]) -> Result<Option<LibraryCmd>, String> {
     let Some(pos) = args.iter().position(|a| a == "--cmd") else {
@@ -26,6 +28,7 @@ pub(crate) fn parse_library_cmd(args: &[String]) -> Result<Option<LibraryCmd>, S
     let mut library = None;
     let mut uuids = Vec::new();
     let mut value = None;
+    let mut value2 = None;
     let mut it = args.iter().skip(pos + 2);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -35,6 +38,7 @@ pub(crate) fn parse_library_cmd(args: &[String]) -> Result<Option<LibraryCmd>, S
             }
             "--uuid" => uuids.push(it.next().ok_or("--uuid 缺少值")?.clone()),
             "--value" => value = Some(it.next().ok_or("--value 缺少值")?.clone()),
+            "--value2" => value2 = Some(it.next().ok_or("--value2 缺少值")?.clone()),
             other => return Err(format!("--cmd 不识别的参数: {other}")),
         }
     }
@@ -43,6 +47,7 @@ pub(crate) fn parse_library_cmd(args: &[String]) -> Result<Option<LibraryCmd>, S
         library: library.ok_or("--cmd 需要 --library <root>")?,
         uuids,
         value,
+        value2,
     }))
 }
 
@@ -82,14 +87,33 @@ pub(crate) fn execute(cmd: &LibraryCmd) -> Result<(), String> {
             }
             n
         }
+        // D84 分类右键菜单：rename-category 按名批量改写（单条 UPDATE，
+        // 逐件 set_category 是 N 次事务不可取）；delete-category = 引用行
+        // category 置 NULL（素材回待分类，对象文件不动）。
+        "rename-category" => {
+            let old = cmd.value.as_deref().ok_or("rename-category 需要 --value <旧名>")?;
+            let new = cmd.value2.as_deref().ok_or("rename-category 需要 --value2 <新名>")?;
+            if new.trim().is_empty() || new.contains('/') || new.contains('\\') {
+                return Err("新分类名不能为空或含路径分隔符".to_string());
+            }
+            lib.store().rename_category(old, new).map_err(|e| e.to_string())?
+        }
+        "delete-category" => {
+            let name = cmd.value.as_deref().ok_or("delete-category 需要 --value <分类名>")?;
+            lib.store().clear_category(name).map_err(|e| e.to_string())?
+        }
         other => {
             return Err(format!(
-                "未知 --cmd {other}（可用：trash | restore | purge | empty-trash | rename | move-category）"
+                "未知 --cmd {other}（可用：trash | restore | purge | empty-trash | rename | move-category | rename-category | delete-category）"
             ))
         }
     };
-    if !matches!(cmd.action.as_str(), "rename" | "move-category") {
-        // 批量动作无逐件进度，收尾报满（协议要求 PROGRESS 行，壳层进度条收口）。
+    if matches!(cmd.action.as_str(), "rename-category" | "delete-category") {
+        // 分类级动作同样没有逐件循环：用受影响行数报一次收尾进度，
+        // 满足壳层「进度条必须收到 PROGRESS 才收口」的协议约定。
+        println!("PROGRESS\t{done}\t{done}");
+    } else if !matches!(cmd.action.as_str(), "rename" | "move-category") {
+        // 其余批量动作无逐件进度，收尾报满（协议要求 PROGRESS 行，壳层进度条收口）。
         println!("PROGRESS\t{total}\t{total}");
     }
     println!(

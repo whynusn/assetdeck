@@ -1,4 +1,4 @@
-use pipeline::{AssetPayload, TargetPipelineDeps};
+use pipeline::{AssetPayload, PayloadKind, TargetPipelineDeps};
 use platform::{
     ClipboardSink, FileDialogs, FocusWatcher, ForegroundObserver, InputFocuser, KeyInjector,
     ReadinessProbe, WindowActivator, WindowEnumerator,
@@ -192,23 +192,27 @@ impl TargetRoutingRuntime {
         // 当场激活本应用、抢走首次注入前校验的前台。因此首次注入成功后的短窗内，
         // 同素材请求按连击尾随半程并入：不再重复上框。降级/失败清空记录，失败后的
         // 立即重试不受影响。
-        if let Some((last_path, at)) = &self.last_injected {
-            if *last_path == payload.source_path
-                && at.elapsed() < Duration::from_millis(TRAILING_CLICK_COALESCE_MS)
-            {
-                let label = self
-                    .routing
-                    .selected()
-                    .map_or_else(|| "目标".to_string(), |binding| binding.label.clone());
-                log::info!(
-                    "连击尾随点击并入刚完成的上框（间隔 {}ms），跳过重复请求",
-                    at.elapsed().as_millis()
-                );
-                return TargetPasteNotice {
-                    tone: TargetNoticeTone::Success,
-                    text: format!("已上框到 {label}（连击已合并）"),
-                    injected: true,
-                };
+        // File 载荷例外（D82）：日志导出每次都是同一个路径，750ms 内再次导出
+        // 不是连击尾随，而是用户的明确重复请求——合并会静默吞掉第二次导出。
+        if payload.kind != PayloadKind::File {
+            if let Some((last_path, at)) = &self.last_injected {
+                if *last_path == payload.source_path
+                    && at.elapsed() < Duration::from_millis(TRAILING_CLICK_COALESCE_MS)
+                {
+                    let label = self
+                        .routing
+                        .selected()
+                        .map_or_else(|| "目标".to_string(), |binding| binding.label.clone());
+                    log::info!(
+                        "连击尾随点击并入刚完成的上框（间隔 {}ms），跳过重复请求",
+                        at.elapsed().as_millis()
+                    );
+                    return TargetPasteNotice {
+                        tone: TargetNoticeTone::Success,
+                        text: format!("已上框到 {label}（连击已合并）"),
+                        injected: true,
+                    };
+                }
             }
         }
         // 解绑自愈（D42）：真实低配机日志显示约 30% 的上框因「热目标暂时无窗口

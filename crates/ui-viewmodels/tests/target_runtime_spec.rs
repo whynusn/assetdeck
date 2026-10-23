@@ -13,7 +13,7 @@ use platform::{
     WindowActivator, WindowEnumerator, WindowHandle, WindowRect, WindowSnapshot,
 };
 use ui_viewmodels::{
-    AssetKind, AssetPayload, TargetBarMode, TargetNoticeTone, TargetRoutingRuntime,
+    AssetPayload, PayloadKind, TargetBarMode, TargetNoticeTone, TargetRoutingRuntime,
     TargetRuntimeDeps,
 };
 
@@ -135,7 +135,7 @@ impl ForegroundObserver for NoObserver {
     }
 }
 
-/// 千牛 CEF / 微信 Qt 都不暴露可 SetFocus 的输入框，替身照实走「锚点单击」这一级。
+/// 千牛 CEF / 微信 Qt 都不暴露可 SetFocus 的输入框，替身照实走「点击点单击」这一级。
 /// settle 恒为 Observed：替身模拟「单击后等到输入迹象」的正证据路径。
 struct Focuser(Shared);
 impl InputFocuser for Focuser {
@@ -144,7 +144,7 @@ impl InputFocuser for Focuser {
         platform::FocusReport {
             outcome: FocusOutcome::FocusedByAnchor,
             attempts: vec![platform::FocusAttempt {
-                step: platform::FocusStep::AnchorClick,
+                step: platform::FocusStep::InputPointClick,
                 outcome: FocusOutcome::FocusedByAnchor,
                 click: None,
                 settle: Some(platform::WaitOutcome::Observed { elapsed_ms: 10 }),
@@ -317,7 +317,7 @@ fn paste_heals_dormant_hot_target_by_forced_rebind() {
     // 解绑态直接 paste（脚本已耗尽 → 回落「窗口还在」快照）：
     // 必须先强制重绑再上框，而不是降级「目标窗口已关闭」。
     let notice = runtime.paste(&AssetPayload {
-        kind: AssetKind::Video,
+        kind: PayloadKind::Video,
         png_bytes: &[],
         source_path: PathBuf::from("C:/library/objects/clip.mp4"),
         text: String::new(),
@@ -400,7 +400,7 @@ fn coalesce_runtime(recorder: &Shared, focus: Box<dyn FocusWatcher>) -> TargetRo
 
 fn video_payload_at(path: &str) -> AssetPayload<'static> {
     AssetPayload {
-        kind: AssetKind::Video,
+        kind: PayloadKind::Video,
         png_bytes: &[],
         source_path: PathBuf::from(path),
         text: String::new(),
@@ -475,7 +475,7 @@ fn runtime_pastes_video_by_file_path_without_enter() {
     let mut runtime = runtime(&recorder);
 
     let notice = runtime.paste(&AssetPayload {
-        kind: AssetKind::Video,
+        kind: PayloadKind::Video,
         png_bytes: &[],
         source_path: PathBuf::from("C:/library/objects/clip.mp4"),
         text: String::new(),
@@ -499,15 +499,13 @@ fn runtime_pastes_video_by_file_path_without_enter() {
                 steps: vec![
                     FocusStep::AlreadyEditable,
                     FocusStep::UiaSetFocus,
-                    FocusStep::AnchorClick,
+                    FocusStep::InputPointClick,
                 ],
-                anchor: None,
-                anchor_bottom: None,
-                input_point_expr: None,
+                input_points: Vec::new(),
                 caret_identity: None,
             }
         )],
-        "激活后必须对同一目标做一次聚焦；该画像未声明策略故取三级缺省、未声明锚点故 anchor 为 None"
+        "激活后必须对同一目标做一次聚焦；该画像未声明策略故取三级缺省、未声明点击点故列表为空"
     );
     assert_eq!(
         log.payloads,

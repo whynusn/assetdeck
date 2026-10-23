@@ -1,9 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use platform::{
-    eval_point_expr, BottomUpAnchor, CaretSemanticIdentity, FocusAnchor, FocusPlan, FocusStep,
-    InputPointExpr,
-};
+use platform::{eval_point_expr, CaretSemanticIdentity, FocusPlan, FocusStep, InputPointExpr};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +21,10 @@ pub enum FormatKind {
     Image,
     Video,
     Text,
+    /// 文件引用（D82）：日志导出等「把文件交出去」的载荷。是否接收由画像
+    /// 的 formats.file 行声明——未声明即 Unsupported，管线对 File 降级为
+    /// 「只复制、手动粘贴」，不注入必落空的 Ctrl+V（pdd 的 video 行置空同款纪律）。
+    File,
     Other,
 }
 
@@ -33,6 +34,9 @@ pub struct FormatPolicy {
     pub image: Vec<ClipboardFormat>,
     pub video: Vec<ClipboardFormat>,
     pub text: Vec<ClipboardFormat>,
+    /// 文件引用行（D82）：声明该目标可接收 HDROP 文件粘贴。缺省空 =
+    /// 未实测的目标不自动上框；管线仍会把文件写进剪贴板供手动粘贴。
+    pub file: Vec<ClipboardFormat>,
     pub other: Vec<ClipboardFormat>,
 }
 
@@ -42,6 +46,7 @@ impl Default for FormatPolicy {
             image: vec![ClipboardFormat::Png, ClipboardFormat::Files],
             video: vec![ClipboardFormat::Files],
             text: vec![ClipboardFormat::Text],
+            file: Vec::new(),
             other: Vec::new(),
         }
     }
@@ -53,6 +58,7 @@ impl FormatPolicy {
             FormatKind::Image => &self.image,
             FormatKind::Video => &self.video,
             FormatKind::Text => &self.text,
+            FormatKind::File => &self.file,
             FormatKind::Other => &self.other,
         }
     }
@@ -65,6 +71,7 @@ pub struct KindFormats {
     pub image: Vec<ClipboardFormat>,
     pub video: Vec<ClipboardFormat>,
     pub text: Vec<ClipboardFormat>,
+    pub file: Vec<ClipboardFormat>,
     pub other: Vec<ClipboardFormat>,
 }
 
@@ -74,6 +81,7 @@ impl KindFormats {
             FormatKind::Image => &self.image,
             FormatKind::Video => &self.video,
             FormatKind::Text => &self.text,
+            FormatKind::File => &self.file,
             FormatKind::Other => &self.other,
         }
     }
@@ -120,49 +128,19 @@ pub enum ReadinessMode {
     UiaStrict,
 }
 
-/// 聊天输入框在窗口客户区中的比例位置，画像级声明。
-///
-/// 为什么建模在画像里：每个 IM 的版式不同（微信输入框偏右下、千牛在中栏下部），
-/// 但同一个 IM 内相对位置随窗口缩放保持稳定。比例而非绝对像素，才能跟随用户拖拽。
-/// 本类型是 `platform::FocusAnchor` 的可反序列化镜像——`platform` trait 层零依赖，
-/// 不能引入 serde，因此配置形态留在 `targets`。
+/// 旧比例锚字段（仅解析迁移用，2026-09-15 收敛后不再出现在 `Profile` 上）：
+/// parse 期一次性转成 `input_points` 等价表达式（线性缩放下几何等价，D74）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct InputAnchor {
     pub x_ratio: f32,
     pub y_ratio: f32,
 }
 
-impl From<InputAnchor> for FocusAnchor {
-    fn from(value: InputAnchor) -> Self {
-        FocusAnchor {
-            x_ratio: value.x_ratio,
-            y_ratio: value.y_ratio,
-        }
-    }
-}
-
-/// 底部锚点（D74）：y 是距客户区**底边**的 96-DPI 逻辑像素，由平台层按目标
-/// 窗口实时 DPI 换算。
-///
-/// 为什么需要它：top-down 比例锚点（[`InputAnchor`]）对窗口高度敏感——底部
-/// 工具条/提示条是固定像素高度，窗口越高同一比例落点越偏上，最终漂出输入区
-/// （2026-09-03 拼多多「我这台能用、测试用户不行」的根因）。bottom-up 锚定
-/// 底边，随窗口高度变化保持命中。实测取值（客户区物理像素，150% DPI 环境）：
-/// 拼多多输入区底距 55~150（中心 ~100）；千牛接待中心 80~295（中心 ~190）。
+/// 旧底部锚字段（D74，仅解析迁移用）：y 是距客户区底边的 96-DPI 逻辑像素。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct InputAnchorBottom {
     pub x_ratio: f32,
-    /// 距客户区底边的 96-DPI 逻辑像素（物理像素 = 该值 × dpi/96）。
     pub y_from_bottom: f32,
-}
-
-impl From<InputAnchorBottom> for BottomUpAnchor {
-    fn from(value: InputAnchorBottom) -> Self {
-        BottomUpAnchor {
-            x_ratio: value.x_ratio,
-            y_from_bottom: value.y_from_bottom,
-        }
-    }
 }
 
 /// 表达式点击点（2026-09-05，失焦恢复输入面真机通路的用户可配定位模型）。
@@ -214,9 +192,10 @@ pub enum FocusStrategyStep {
     Already,
     /// UIA 子树搜索 + `SetFocus`。
     Uia,
-    /// 画像锚点单次左键单击。
+    /// 旧锚点级（2026-09-15 收敛后与 `input_point` 同一配置面）：保留此拼写
+    /// 仅为旧用户画像可解析，映射为 `InputPointClick`。
     Anchor,
-    /// 表达式点击点单次左键单击（`input_point` 声明坐标表达式）。
+    /// 表达式点击点单次左键单击（`input_point` 声明坐标表达式，逐点兜底）。
     InputPoint,
     /// 原生 caret + MSAA 语义确认。
     CaretSemantic,
@@ -227,24 +206,23 @@ impl From<FocusStrategyStep> for FocusStep {
         match value {
             FocusStrategyStep::Already => FocusStep::AlreadyEditable,
             FocusStrategyStep::Uia => FocusStep::UiaSetFocus,
-            FocusStrategyStep::Anchor => FocusStep::AnchorClick,
+            FocusStrategyStep::Anchor => FocusStep::InputPointClick,
             FocusStrategyStep::InputPoint => FocusStep::InputPointClick,
             FocusStrategyStep::CaretSemantic => FocusStep::CaretSemantic,
         }
     }
 }
 
-/// 未声明 `focus_strategy` 时的缺省顺序：与历史三级降级完全一致，
-/// 因此新增字段对既有画像零行为变化。
+/// 未声明 `focus_strategy` 时的缺省顺序：与历史三级降级完全一致
+/// （旧缺省第三级 anchor 已并入 input_point 配置面），新增字段对既有画像零行为变化。
 fn default_focus_strategy() -> Vec<FocusStrategyStep> {
     vec![
         FocusStrategyStep::Already,
         FocusStrategyStep::Uia,
-        FocusStrategyStep::Anchor,
+        FocusStrategyStep::InputPoint,
     ]
 }
 
-// Eq 被 input_anchor 的 f32 排除：比例是连续量，等价比较用 PartialEq 即可。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
     pub id: TargetId,
@@ -274,15 +252,11 @@ pub struct Profile {
     /// 微信/千牛的 UIA 可写候选实测为 0，把 `uia` 去掉即省下 22~83ms 纯损耗。
     /// 未声明时取三级缺省顺序；空数组是配置错误（见 `ProfileError::EmptyFocusStrategy`）。
     pub focus_strategy: Vec<FocusStrategyStep>,
-    /// 输入框锚点：激活窗口后若拿不到键盘焦点，平台层允许在此处做一次左键单击。
-    /// 未声明时不做任何点击（宁可不落框，也不点未声明的位置）。
-    pub input_anchor: Option<InputAnchor>,
-    /// 底部锚点（D74）：声明后**优先于** `input_anchor` 使用；`input_anchor`
-    /// 保留作兼容兜底（旧用户画像仍可解析、行为不变）。
-    pub input_anchor_bottom: Option<InputAnchorBottom>,
-    /// 表达式点击点：`focus_strategy` 含 `input_point` 级时必填；坐标模型见
-    /// [`InputPointConfig`]。
-    pub input_point: Option<InputPointConfig>,
+    /// 表达式点击点（单一配置面）：`focus_strategy` 含 `input_point` 级时使用；
+    /// **逐点**依次兜底，首个命中即止。未声明时不做任何点击（宁可不落框，
+    /// 也不点未声明的位置）。旧 input_anchor/input_anchor_bottom 锚点已在
+    /// parse 期一次性迁移为等价表达式并入此列表（2026-09-15，D74/D76 收敛）。
+    pub input_points: Vec<InputPointConfig>,
     /// caret 语义确认的身份声明：`focus_strategy` 含 `caret_semantic` 级时生效；
     /// 未声明取缺省（千牛校准值 role 7/编辑）。
     pub caret_semantic: Option<CaretSemanticConfig>,
@@ -303,9 +277,7 @@ impl Profile {
             readiness: ReadinessMode::P0Only,
             settle_ms: 80,
             focus_strategy: default_focus_strategy(),
-            input_anchor: None,
-            input_anchor_bottom: None,
-            input_point: None,
+            input_points: Vec::new(),
             caret_semantic: None,
         }
     }
@@ -315,23 +287,31 @@ impl Profile {
         self.paste_sends.sends(kind, format)
     }
 
-    /// 传给平台聚焦端的锚点。未声明锚点时返回 None，平台层据此跳过点击。
-    pub fn focus_anchor(&self) -> Option<FocusAnchor> {
-        self.input_anchor.map(FocusAnchor::from)
-    }
-
-    /// 传给平台聚焦端的完整计划：级别顺序 + 锚点 + 表达式点击点。
+    /// 传给平台聚焦端的完整计划：级别顺序 + 表达式点击点（单一配置面）。
     pub fn focus_plan(&self) -> FocusPlan {
+        let mut steps: Vec<FocusStep> = Vec::new();
+        let mut click_level_seen = false;
+        for step in self.focus_strategy.iter().copied().map(FocusStep::from) {
+            // 旧画像策略里的 anchor 级映射后与 input_point 级共用同一份
+            // input_points 列表：任何第二个点击级都会把整张列表再试一遍。
+            // 因此折叠**所有**点击级（不只相邻），保留首个点击级在策略中的
+            // 位置；逐点尝试本身已提供顺序兜底。
+            if step == FocusStep::InputPointClick {
+                if click_level_seen {
+                    continue;
+                }
+                click_level_seen = true;
+            }
+            steps.push(step);
+        }
         FocusPlan {
-            steps: self
-                .focus_strategy
+            steps,
+            input_points: self
+                .input_points
                 .iter()
-                .copied()
-                .map(FocusStep::from)
+                .cloned()
+                .map(InputPointExpr::from)
                 .collect(),
-            anchor: self.focus_anchor(),
-            anchor_bottom: self.input_anchor_bottom.map(BottomUpAnchor::from),
-            input_point_expr: self.input_point.clone().map(InputPointExpr::from),
             caret_identity: self.caret_semantic.clone().map(CaretSemanticIdentity::from),
         }
     }
@@ -397,6 +377,15 @@ pub enum ProfileError {
     },
 }
 
+/// TOML 形态：`[profiles.input_point]` 单表或 `[[profiles.input_point]]` 表数组。
+/// untagged 下单表反序列化为 Single、表数组为 Many——老用户画像的单表写法零迁移。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum InputPointsShape {
+    Many(Vec<InputPointConfig>),
+    Single(InputPointConfig),
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ProfileDocument {
     #[serde(default)]
@@ -417,9 +406,11 @@ struct ProfilePatch {
     readiness: Option<ReadinessMode>,
     settle_ms: Option<u64>,
     focus_strategy: Option<Vec<FocusStrategyStep>>,
+    /// 旧锚点字段（仅解析迁移用）：resolve 期一次性转成 input_points 等价表达式。
     input_anchor: Option<InputAnchor>,
     input_anchor_bottom: Option<InputAnchorBottom>,
-    input_point: Option<InputPointConfig>,
+    /// 表达式点击点：单表或表数组皆可（见 [`InputPointsShape`]）。
+    input_point: Option<InputPointsShape>,
     caret_semantic: Option<CaretSemanticConfig>,
 }
 
@@ -539,9 +530,11 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
     let not_ready_title_regexes = patch.not_ready_title_regexes.unwrap_or_default();
     validate_regexes(&id, &title_regexes)?;
     validate_regexes(&id, &not_ready_title_regexes)?;
-    if let Some(anchor) = patch.input_anchor {
-        // 越界比例一律报错而不是夹紧：静默夹紧会让错配的画像看起来「能用」，
-        // 却把点击落到输入框以外的控件上。
+
+    // 旧锚点字段虽只用于迁移，仍要保留原来的加载期范围校验：静默夹紧会让
+    // 错配的画像「看起来能用」，却把点击落到输入框以外的控件上。NaN 也会
+    // 被 contains 拒绝（0.0..=1.0 不含 NaN），不会悄悄迁移成 0。
+    if let Some(anchor) = patch.input_anchor.as_ref() {
         if !(0.0..=1.0).contains(&anchor.x_ratio) || !(0.0..=1.0).contains(&anchor.y_ratio) {
             return Err(ProfileError::InvalidAnchor {
                 profile: id,
@@ -550,7 +543,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
             });
         }
     }
-    if let Some(anchor) = patch.input_anchor_bottom {
+    if let Some(anchor) = patch.input_anchor_bottom.as_ref() {
         if !(0.0..=1.0).contains(&anchor.x_ratio) {
             return Err(ProfileError::InvalidAnchorBottom {
                 profile: id,
@@ -558,9 +551,7 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
                 y_from_bottom: anchor.y_from_bottom,
             });
         }
-        // y_from_bottom 是「客户区底边往上的物理像素距离」，按 96 DPI 基准声明。
-        // 上界取 500：底部固定高度 chrome（工具栏/提示条）实测 128~295 物理像素，
-        // 500 已远超任何合理的输入框纵深；超过只会把点击送进消息列表。
+        // y_from_bottom 是客户区底边往上的 96-DPI 逻辑像素；上界 500 与旧版一致。
         if !(1.0..=500.0).contains(&anchor.y_from_bottom) {
             return Err(ProfileError::InvalidAnchorBottom {
                 profile: id,
@@ -569,26 +560,68 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
             });
         }
     }
-    if let Some(strategy) = patch.focus_strategy.as_ref() {
-        if strategy.is_empty() {
-            return Err(ProfileError::EmptyFocusStrategy(id));
+
+    // 一次迁移（2026-09-15 D74/D76 收敛）：旧锚点字段在此转成等价表达式后进
+    // input_points 单一配置面。线性缩放下几何等价——比例 r →
+    // WINDOW_WIDTH*⌊1000r⌋/1000、底距 d → WINDOW_HEIGHT-d；转换后旧字段
+    // 不再存在于 Profile 上。D74 优先序保持：声明底部锚时优先于比例锚。
+    let mut input_points: Vec<InputPointConfig> = match patch.input_point {
+        Some(InputPointsShape::Many(points)) => points,
+        Some(InputPointsShape::Single(point)) => vec![point],
+        None => Vec::new(),
+    };
+    let migrated = if let Some(bottom) = patch.input_anchor_bottom {
+        Some(InputPointConfig {
+            x: ratio_to_expr("WINDOW_WIDTH", bottom.x_ratio),
+            y: format!("WINDOW_HEIGHT - {}", bottom.y_from_bottom.round() as i64),
+        })
+    } else {
+        patch.input_anchor.map(|anchor| InputPointConfig {
+            x: ratio_to_expr("WINDOW_WIDTH", anchor.x_ratio),
+            y: ratio_to_expr("WINDOW_HEIGHT", anchor.y_ratio),
+        })
+    };
+    if let Some(point) = migrated {
+        // 旧锚点的语义是「主点失败后的兜底」，不是排在内置兜底点之后。
+        // 插到首个点之后：既保留主点优先，又让用户的旧锚点覆盖先于内置
+        // 兜底点被尝试（内置多点的末位通常是迁移来的旧锚兜底）。
+        if input_points.is_empty() {
+            input_points.push(point);
+        } else {
+            input_points.insert(1, point);
         }
-        // input_point 级依赖表达式坐标：策略声明了它就必须给配置，且表达式必须
-        // 可求值（用参考尺寸 1920x1080 试算，坏表达式在加载期报错而不是点击期
-        // 静默降级——否则用户改了坐标却永远走不到，只会看到神秘的回退）。
-        if strategy.contains(&FocusStrategyStep::InputPoint) {
-            let Some(point) = patch.input_point.as_ref() else {
-                return Err(ProfileError::InputPointMissing { profile: id });
-            };
-            for (axis, expr) in [("x", &point.x), ("y", &point.y)] {
-                if let Err(reason) = eval_point_expr(expr, 1920, 1080) {
-                    return Err(ProfileError::InvalidInputPointExpr {
-                        profile: id,
-                        axis: axis.to_string(),
-                        expr: expr.clone(),
-                        reason,
-                    });
-                }
+    }
+    input_points.dedup_by(|a, b| a.x == b.x && a.y == b.y);
+
+    let strategy = patch
+        .focus_strategy
+        .clone()
+        .unwrap_or_else(default_focus_strategy);
+    if strategy.is_empty() {
+        return Err(ProfileError::EmptyFocusStrategy(id));
+    }
+    // input_point 级依赖表达式坐标：策略**显式声明**了它就必须给配置。
+    // 缺省顺序（未声明 focus_strategy）也含 input_point 级——它是 inert 的
+    //（无声明点时平台层自动跳过），不得把「没配点」的画像整体拒之门外，
+    // 否则旧画像全部炸在升级上（实测 bench 契约测试先例）。
+    if patch.focus_strategy.is_some()
+        && strategy.contains(&FocusStrategyStep::InputPoint)
+        && input_points.is_empty()
+    {
+        return Err(ProfileError::InputPointMissing { profile: id });
+    }
+    // 表达式必须可求值（用参考尺寸 1920x1080 试算，坏表达式在加载期报错而不是
+    // 点击期静默降级——否则用户改了坐标却永远走不到，只会看到神秘的回退）。
+    // 未声明 input_point 级的点也一并校验：坏表达式即使是惰性配置也不该带进运行时。
+    for point in &input_points {
+        for (axis, expr) in [("x", &point.x), ("y", &point.y)] {
+            if let Err(reason) = eval_point_expr(expr, 1920, 1080) {
+                return Err(ProfileError::InvalidInputPointExpr {
+                    profile: id,
+                    axis: axis.to_string(),
+                    expr: expr.clone(),
+                    reason,
+                });
             }
         }
     }
@@ -605,12 +638,19 @@ fn resolve_patch(id: String, patch: ProfilePatch) -> Result<Profile, ProfileErro
         paste_sends: patch.paste_sends.unwrap_or_default(),
         readiness: patch.readiness.unwrap_or_default(),
         settle_ms: patch.settle_ms.unwrap_or(80),
-        focus_strategy: patch.focus_strategy.unwrap_or_else(default_focus_strategy),
-        input_anchor: patch.input_anchor,
-        input_anchor_bottom: patch.input_anchor_bottom,
-        input_point: patch.input_point,
+        focus_strategy: strategy,
+        input_points,
         caret_semantic: patch.caret_semantic,
     })
+}
+
+/// 比例 → 等价表达式（千分位保留精度）：`WINDOW_WIDTH * 394 / 1000` 形态。
+/// 比例按旧 click_point_in_client 的安全区间 [0.02, 0.98] 夹紧——旧路径在
+/// 点击时也会夹紧，迁移后不能把贴边比例放大成 0/1000（那会点到滚动条/边框）。
+/// 线性缩放下 r × 物理尺寸 ≡ (r × 逻辑尺寸) × DPI 缩放，几何等价（D74）。
+fn ratio_to_expr(variable: &str, ratio: f32) -> String {
+    let ratio = f64::from(ratio).clamp(0.02, 0.98);
+    format!("{variable} * {} / 1000", (ratio * 1000.0).round() as i64)
 }
 
 fn validate_regexes(profile: &str, patterns: &[String]) -> Result<(), ProfileError> {
@@ -721,8 +761,9 @@ label = "重复微信"
         assert_eq!(set.generic().formats.image[0], ClipboardFormat::Png);
     }
 
+    /// 旧比例锚字段的一次性迁移：parse 期转成等价表达式进 input_points 配置面。
     #[test]
-    fn input_anchor_is_parsed_and_exposed_as_focus_anchor() {
+    fn legacy_input_anchor_migrates_into_input_points() {
         let doc = r#"
 [[profiles]]
 id = "qianniu"
@@ -734,21 +775,103 @@ y_ratio = 0.787
 "#;
         let set = load_profiles(doc, None).unwrap();
         let profile = set.get(&TargetId::new("qianniu")).unwrap();
-        let anchor = profile.focus_anchor().expect("画像声明了锚点");
-        assert!((anchor.x_ratio - 0.394).abs() < f32::EPSILON);
-        assert!((anchor.y_ratio - 0.787).abs() < f32::EPSILON);
+        let plan = profile.focus_plan();
+        let points = &plan.input_points;
+        assert_eq!(points.len(), 1, "旧比例锚应迁移为恰好一个点击点");
+        assert_eq!(points[0].x, "WINDOW_WIDTH * 394 / 1000");
+        assert_eq!(points[0].y, "WINDOW_HEIGHT * 787 / 1000");
     }
 
     #[test]
-    fn profile_without_input_anchor_yields_no_click_target() {
+    fn profile_without_input_points_yields_no_click_target() {
         let set = load_profiles(BUILTIN, None).unwrap();
         let profile = set.get(&TargetId::new("wechat")).unwrap();
-        assert!(profile.focus_anchor().is_none());
-        assert!(Profile::generic().focus_anchor().is_none());
+        assert!(profile.focus_plan().input_points.is_empty());
+        assert!(Profile::generic().focus_plan().input_points.is_empty());
+    }
+
+    /// D74 优先序保持：旧画像同时声明底部锚与比例锚时，只有底部锚迁移
+    ///（比例锚在 D74 优先序下本就是 dead weight）。
+    #[test]
+    fn legacy_input_anchor_bottom_takes_precedence_over_ratio_anchor() {
+        let doc = r#"
+[[profiles]]
+id = "dual"
+label = "双锚点"
+
+[profiles.input_anchor]
+x_ratio = 0.5
+y_ratio = 0.8
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.5
+y_from_bottom = 100
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let plan = set.get(&TargetId::new("dual")).unwrap().focus_plan();
+        assert_eq!(plan.input_points.len(), 1, "只迁移 D74 优先的底部锚");
+        assert_eq!(plan.input_points[0].x, "WINDOW_WIDTH * 500 / 1000");
+        assert_eq!(plan.input_points[0].y, "WINDOW_HEIGHT - 100");
     }
 
     #[test]
-    fn out_of_range_anchor_is_rejected_instead_of_clamped() {
+    fn user_profile_can_override_input_anchor_bottom() {
+        let builtin = r#"
+[[profiles]]
+id = "qianniu"
+label = "千牛"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.394
+y_from_bottom = 127
+"#;
+        let user = r#"
+[[profiles]]
+id = "qianniu"
+
+[profiles.input_anchor_bottom]
+x_ratio = 0.4
+y_from_bottom = 150
+"#;
+        let set = load_profiles(builtin, Some(user)).unwrap();
+        let plan = set.get(&TargetId::new("qianniu")).unwrap().focus_plan();
+        assert_eq!(plan.input_points.len(), 1);
+        assert_eq!(plan.input_points[0].x, "WINDOW_WIDTH * 400 / 1000");
+        assert_eq!(plan.input_points[0].y, "WINDOW_HEIGHT - 150");
+    }
+
+    #[test]
+    fn user_profile_can_retune_input_anchor() {
+        let builtin = r#"
+[[profiles]]
+id = "wechat"
+label = "微信"
+
+[profiles.input_anchor]
+x_ratio = 0.66
+y_ratio = 0.85
+"#;
+        let user = r#"
+[[profiles]]
+id = "wechat"
+
+[profiles.input_anchor]
+x_ratio = 0.5
+y_ratio = 0.9
+"#;
+        let set = load_profiles(builtin, Some(user)).unwrap();
+        let points = &set
+            .get(&TargetId::new("wechat"))
+            .unwrap()
+            .focus_plan()
+            .input_points;
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].x, "WINDOW_WIDTH * 500 / 1000");
+        assert_eq!(points[0].y, "WINDOW_HEIGHT * 900 / 1000");
+    }
+
+    #[test]
+    fn out_of_range_legacy_anchor_is_rejected() {
         let doc = r#"
 [[profiles]]
 id = "broken"
@@ -765,49 +888,7 @@ y_ratio = 0.5
     }
 
     #[test]
-    fn input_anchor_bottom_is_parsed_into_focus_plan() {
-        let doc = r#"
-[[profiles]]
-id = "qianniu"
-label = "千牛"
-
-[profiles.input_anchor_bottom]
-x_ratio = 0.394
-y_from_bottom = 127
-"#;
-        let set = load_profiles(doc, None).unwrap();
-        let plan = set.get(&TargetId::new("qianniu")).unwrap().focus_plan();
-        let bottom = plan.anchor_bottom.expect("声明了底部锚就必须进 focus_plan");
-        assert!((bottom.x_ratio - 0.394).abs() < f32::EPSILON);
-        assert!((bottom.y_from_bottom - 127.0).abs() < f32::EPSILON);
-        assert!(plan.anchor.is_none(), "只声明底部锚的画像不带比例锚");
-    }
-
-    #[test]
-    fn input_anchor_bottom_takes_precedence_over_ratio_anchor_in_plan() {
-        // 两个都声明时 focus_plan 同时携带，由平台层按 anchor_bottom 优先取用；
-        // 这里守卫的是「两个都进了 plan」——丢了任一都会让降级语义失真。
-        let doc = r#"
-[[profiles]]
-id = "dual"
-label = "双锚点"
-
-[profiles.input_anchor]
-x_ratio = 0.5
-y_ratio = 0.8
-
-[profiles.input_anchor_bottom]
-x_ratio = 0.5
-y_from_bottom = 100
-"#;
-        let set = load_profiles(doc, None).unwrap();
-        let plan = set.get(&TargetId::new("dual")).unwrap().focus_plan();
-        assert!(plan.anchor.is_some());
-        assert!(plan.anchor_bottom.is_some());
-    }
-
-    #[test]
-    fn out_of_range_anchor_bottom_is_rejected_instead_of_clamped() {
+    fn out_of_range_legacy_anchor_bottom_is_rejected() {
         let over = r#"
 [[profiles]]
 id = "broken"
@@ -836,46 +917,63 @@ y_from_bottom = 100
         ));
     }
 
+    /// 迁移式保留旧 click_point_in_client 的 [0.02, 0.98] 安全区间：
+    /// 合法但贴边的比例不能被放大成窗口边缘（会点到滚动条/边框）。
     #[test]
-    fn user_profile_can_override_input_anchor_bottom() {
-        let builtin = r#"
+    fn legacy_ratio_anchors_keep_safe_interval_clamp() {
+        let doc = r#"
 [[profiles]]
-id = "qianniu"
-label = "千牛"
+id = "ratio-edge"
+label = "比例贴边"
+
+[profiles.input_anchor]
+x_ratio = 1.0
+y_ratio = 0.0
+
+[[profiles]]
+id = "bottom-edge"
+label = "底距贴边"
 
 [profiles.input_anchor_bottom]
-x_ratio = 0.394
-y_from_bottom = 127
+x_ratio = 1.0
+y_from_bottom = 100
 "#;
-        let user = r#"
-[[profiles]]
-id = "qianniu"
-
-[profiles.input_anchor_bottom]
-x_ratio = 0.4
-y_from_bottom = 150
-"#;
-        let set = load_profiles(builtin, Some(user)).unwrap();
-        let bottom = set
-            .get(&TargetId::new("qianniu"))
+        let set = load_profiles(doc, None).unwrap();
+        let ratio = &set
+            .get(&TargetId::new("ratio-edge"))
             .unwrap()
             .focus_plan()
-            .anchor_bottom
-            .unwrap();
-        assert!((bottom.x_ratio - 0.4).abs() < f32::EPSILON);
-        assert!((bottom.y_from_bottom - 150.0).abs() < f32::EPSILON);
+            .input_points;
+        assert_eq!(ratio.len(), 1);
+        assert_eq!(ratio[0].x, "WINDOW_WIDTH * 980 / 1000");
+        assert_eq!(ratio[0].y, "WINDOW_HEIGHT * 20 / 1000");
+
+        let bottom = &set
+            .get(&TargetId::new("bottom-edge"))
+            .unwrap()
+            .focus_plan()
+            .input_points;
+        assert_eq!(bottom.len(), 1);
+        assert_eq!(bottom[0].x, "WINDOW_WIDTH * 980 / 1000");
+        assert_eq!(bottom[0].y, "WINDOW_HEIGHT - 100");
     }
 
+    /// 用户旧锚点覆盖必须排在主点之后、内置兜底点之前：旧语义是
+    /// 「替换兜底点」，不能因为迁移退化成「追加在内置兜底点之后」。
     #[test]
-    fn user_profile_can_retune_input_anchor() {
+    fn user_legacy_anchor_is_inserted_before_builtin_fallback_points() {
         let builtin = r#"
 [[profiles]]
 id = "wechat"
 label = "微信"
 
-[profiles.input_anchor]
-x_ratio = 0.66
-y_ratio = 0.85
+[[profiles.input_point]]
+x = "WINDOW_WIDTH - 8"
+y = "WINDOW_HEIGHT - 8"
+
+[[profiles.input_point]]
+x = "WINDOW_WIDTH * 660 / 1000"
+y = "WINDOW_HEIGHT * 850 / 1000"
 "#;
         let user = r#"
 [[profiles]]
@@ -886,13 +984,43 @@ x_ratio = 0.5
 y_ratio = 0.9
 "#;
         let set = load_profiles(builtin, Some(user)).unwrap();
-        let anchor = set
+        let points = &set
             .get(&TargetId::new("wechat"))
             .unwrap()
-            .focus_anchor()
-            .unwrap();
-        assert!((anchor.x_ratio - 0.5).abs() < f32::EPSILON);
-        assert!((anchor.y_ratio - 0.9).abs() < f32::EPSILON);
+            .focus_plan()
+            .input_points;
+        assert_eq!(points.len(), 3, "主点 + 用户覆盖 + 内置兜底");
+        assert_eq!(points[0].x, "WINDOW_WIDTH - 8");
+        assert_eq!(points[1].x, "WINDOW_WIDTH * 500 / 1000");
+        assert_eq!(points[1].y, "WINDOW_HEIGHT * 900 / 1000");
+        assert_eq!(points[2].x, "WINDOW_WIDTH * 660 / 1000");
+    }
+
+    /// 所有点击级共用同一份点列表：非相邻的第二个点击级若保留，会把整张
+    /// 列表再试一遍。折叠到首个点击级的位置，顺序兜底交给列表本身。
+    #[test]
+    fn non_adjacent_click_levels_collapse_to_first_position() {
+        let doc = r#"
+[[profiles]]
+id = "wechat"
+label = "微信"
+focus_strategy = ["anchor", "uia", "input_point"]
+
+[profiles.input_point]
+x = "8"
+y = "8"
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let steps = set
+            .get(&TargetId::new("wechat"))
+            .unwrap()
+            .focus_plan()
+            .steps;
+        assert_eq!(
+            steps,
+            vec![FocusStep::InputPointClick, FocusStep::UiaSetFocus],
+            "第二个点击级必须折叠，且保留首个点击级在策略中的位置"
+        );
     }
 
     #[test]
@@ -904,27 +1032,33 @@ y_ratio = 0.9
             vec![
                 FocusStep::AlreadyEditable,
                 FocusStep::UiaSetFocus,
-                FocusStep::AnchorClick
+                FocusStep::InputPointClick
             ],
-            "未声明 focus_strategy 的画像必须保持历史三级降级顺序"
+            "未声明 focus_strategy 的画像必须保持历史三级降级顺序（旧 anchor 级并入 input_point 配置面）"
         );
         assert_eq!(
             Profile::generic().focus_plan().steps,
             vec![
                 FocusStep::AlreadyEditable,
                 FocusStep::UiaSetFocus,
-                FocusStep::AnchorClick
+                FocusStep::InputPointClick
             ]
         );
     }
 
+    /// 旧画像策略里的 anchor 级：映射为 InputPointClick 且与相邻 input_point 级
+    /// 合并——同一配置面下逐点尝试不重复，行为与「一个点击级」一致。
     #[test]
-    fn declared_focus_strategy_can_skip_uia_scan() {
+    fn legacy_anchor_strategy_step_merges_with_input_point_level() {
         let doc = r#"
 [[profiles]]
 id = "wechat"
 label = "微信"
-focus_strategy = ["already", "anchor"]
+focus_strategy = ["already", "input_point", "anchor"]
+
+[profiles.input_point]
+x = "WINDOW_WIDTH - 8"
+y = "WINDOW_HEIGHT - 8"
 "#;
         let set = load_profiles(doc, None).unwrap();
         let steps = set
@@ -934,7 +1068,32 @@ focus_strategy = ["already", "anchor"]
             .steps;
         assert_eq!(
             steps,
-            vec![FocusStep::AlreadyEditable, FocusStep::AnchorClick],
+            vec![FocusStep::AlreadyEditable, FocusStep::InputPointClick],
+            "anchor 级并入 input_point 配置面后，连续的点击级必须合并"
+        );
+    }
+
+    #[test]
+    fn declared_focus_strategy_can_skip_uia_scan() {
+        let doc = r#"
+[[profiles]]
+id = "wechat"
+label = "微信"
+focus_strategy = ["already", "input_point"]
+
+[profiles.input_point]
+x = "8"
+y = "8"
+"#;
+        let set = load_profiles(doc, None).unwrap();
+        let steps = set
+            .get(&TargetId::new("wechat"))
+            .unwrap()
+            .focus_plan()
+            .steps;
+        assert_eq!(
+            steps,
+            vec![FocusStep::AlreadyEditable, FocusStep::InputPointClick],
             "声明了策略就必须逐字生效：跳过 UIA 才能省下实测 22~83ms 的纯损耗"
         );
         assert!(!steps.contains(&FocusStep::UiaSetFocus));
@@ -954,35 +1113,50 @@ focus_strategy = []
         ));
     }
 
-    /// 表达式点击点（2026-09-05 失焦恢复输入面通路）：策略步与坐标必须成对生效。
+    /// 表达式点击点（2026-09-05 失焦恢复输入面通路）：策略步与坐标必须成对生效；
+    /// 单表与表数组两种 TOML 形态等价（表数组 = 多点逐个兜底）。
     #[test]
-    fn input_point_expr_is_parsed_into_focus_plan() {
-        let doc = r#"
+    fn input_point_expr_is_parsed_into_focus_plan_single_table_and_array() {
+        let single = r#"
 [[profiles]]
 id = "wechat"
 label = "微信"
-focus_strategy = ["already", "input_point", "anchor"]
+focus_strategy = ["already", "input_point"]
 
 [profiles.input_point]
 x = "WINDOW_WIDTH - 8"
 y = "WINDOW_HEIGHT - 8"
 "#;
-        let set = load_profiles(doc, None).unwrap();
+        let set = load_profiles(single, None).unwrap();
         let plan = set.get(&TargetId::new("wechat")).unwrap().focus_plan();
         assert_eq!(
             plan.steps,
-            vec![
-                FocusStep::AlreadyEditable,
-                FocusStep::InputPointClick,
-                FocusStep::AnchorClick
-            ],
+            vec![FocusStep::AlreadyEditable, FocusStep::InputPointClick],
             "input_point 策略步必须映射为 InputPointClick 并保序"
         );
-        let point = plan
-            .input_point_expr
-            .expect("声明 input_point 级就必须把表达式带进计划");
-        assert_eq!(point.x, "WINDOW_WIDTH - 8");
-        assert_eq!(point.y, "WINDOW_HEIGHT - 8");
+        let points = &plan.input_points;
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].x, "WINDOW_WIDTH - 8");
+        assert_eq!(points[0].y, "WINDOW_HEIGHT - 8");
+
+        let array = r#"
+[[profiles]]
+id = "wechat"
+label = "微信"
+focus_strategy = ["already", "input_point"]
+
+[[profiles.input_point]]
+x = "WINDOW_WIDTH - 8"
+y = "WINDOW_HEIGHT - 8"
+
+[[profiles.input_point]]
+x = "WINDOW_WIDTH * 660 / 1000"
+y = "WINDOW_HEIGHT * 850 / 1000"
+"#;
+        let set = load_profiles(array, None).unwrap();
+        let plan = set.get(&TargetId::new("wechat")).unwrap().focus_plan();
+        assert_eq!(plan.input_points.len(), 2, "表数组形态应解析为逐点兜底列表");
+        assert_eq!(plan.input_points[1].y, "WINDOW_HEIGHT * 850 / 1000");
     }
 
     #[test]
@@ -1018,6 +1192,26 @@ y = "8"
         ));
     }
 
+    /// 未声明 input_point 级的惰性点也必须在加载期校验：坏表达式即使是
+    /// 惰性配置也不该带进运行时。
+    #[test]
+    fn inert_input_point_with_bad_expr_is_rejected_at_load_time() {
+        let doc = r#"
+[[profiles]]
+id = "broken"
+label = "惰性坏点"
+
+[profiles.input_point]
+x = "WINDOW_DEPTH - 8"
+y = "8"
+"#;
+        assert!(matches!(
+            load_profiles(doc, None),
+            Err(ProfileError::InvalidInputPointExpr { profile, axis, .. })
+                if profile == "broken" && axis == "x"
+        ));
+    }
+
     #[test]
     fn user_profile_can_override_input_point() {
         let builtin = r#"
@@ -1039,14 +1233,14 @@ x = "300"
 y = "WINDOW_HEIGHT - 60"
 "#;
         let set = load_profiles(builtin, Some(user)).unwrap();
-        let point = set
+        let points = &set
             .get(&TargetId::new("qianniu"))
             .unwrap()
             .focus_plan()
-            .input_point_expr
-            .expect("用户覆写后表达式必须还在计划里");
-        assert_eq!(point.x, "300");
-        assert_eq!(point.y, "WINDOW_HEIGHT - 60");
+            .input_points;
+        assert_eq!(points.len(), 1, "用户覆写 input_point 后旧点必须整体替换");
+        assert_eq!(points[0].x, "300");
+        assert_eq!(points[0].y, "WINDOW_HEIGHT - 60");
     }
 
     /// caret 身份声明进计划：声明则带值，未声明为 None（平台层取缺省千牛校准值）。

@@ -96,6 +96,9 @@ pub enum NotReadyReason {
     /// 目标应用把该剪贴板格式的粘贴当作「立即发送」（千牛 × CF_HDROP 实测）。
     /// 「只上框、不发送」是红线，故这类格式不注入：只复制并提示用户手动粘贴。
     PasteWouldSend,
+    /// 画像未声明该载荷格式（如 D82 日志导出遇到未实测文件粘贴的目标）：
+    /// 不注入，但文件仍写剪贴板供用户手动粘贴——与「完全无法承载」区分。
+    PayloadUnsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

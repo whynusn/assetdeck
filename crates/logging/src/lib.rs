@@ -185,6 +185,13 @@ pub fn current_level() -> Level {
     }
 }
 
+/// 立即把日志缓冲刷到磁盘（导出日志前调用）。std File 本身无用户态缓冲，
+/// 每行 write_all 已实时落盘（D82 实证）；这里是语义保险：未来若换
+/// BufWriter 仍能保证「导出 = 最新」。未初始化时是 no-op。
+pub fn flush() {
+    log::logger().flush();
+}
+
 /// 当前进程激活的日志文件路径（导出/打开目录用）。
 pub fn active_log_path() -> Option<PathBuf> {
     GLOBAL.get().map(|inner| inner.path.clone())

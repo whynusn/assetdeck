@@ -1,5 +1,5 @@
 //! 闭环计时探针：`double_click → OpenAsset → negotiate → 真实 Win32 剪贴板写+读回校验
-//! → 焦点死降级 CopiedOnly`。
+//! → 无热目标降级 CopiedOnly`。
 //!
 //! 诚实边界（PRD/A2）：「双击→输入框」的真实端到端含 IM 目标窗口与 SendInput，
 //! 无法诚实自动化。本探针覆盖**自动化段**；真实 SendInput 进输入框由
@@ -9,15 +9,16 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use pipeline::{
-    negotiate, AssetKind, AssetPayload, PasteConfig, PasteOutcome, PasteSession, PipelineDeps,
-    TargetProfile,
+    negotiate_detailed, AssetPayload, PasteSession, PayloadKind, TargetPasteOutcome,
+    TargetPipelineDeps,
 };
 use platform::{
-    win32::{Win32Clipboard, Win32Focus},
-    ClipboardPayload, ClipboardSink, FocusWatcher, KeyInjector, WindowHandle,
+    win32::Win32Clipboard, ClipboardPayload, ClipboardSink, KeyInjector, WindowActivator,
+    WindowHandle,
 };
+use targets::Profile;
 use ui_viewmodels::{
-    Asset, AssetId, CategoryId, FacetIndex, LibraryGridVm, Sorter, TagId, VmEvent,
+    Asset, AssetId, AssetKind, CategoryId, FacetIndex, LibraryGridVm, Sorter, TagId, VmEvent,
 };
 
 /// 探针载荷文本（读回校验的逐字比对目标）。
@@ -34,18 +35,39 @@ pub struct ClosedLoopReport {
     /// 双击 → 读回校验完成的全耗时。best-effort 断言用（D10/A2 自动化段；
     /// 真实 SendInput 段不在内——见模块注释诚实边界）。
     pub elapsed_ms: u128,
-    /// CopiedOnly 的降级原因（预期为焦点失活路径），供 CI 日志呈现。
+    /// CopiedOnly 的降级原因（预期为无热目标路径），供 CI 日志呈现。
     pub copied_only_reason: String,
 }
 
-/// 包装 FocusWatcher：foreground 走真实 [`Win32Focus`]（begin_panel 锚定此刻真前台，
-/// 通常为测试宿主控制台窗口）；is_alive 恒 false——模拟 CI 无 IM 目标窗口，
-/// 驱动管线走「前一前台窗口已失活 → CopiedOnly」降级分支而非 Injected。
-struct DeadTargetFocus;
+/// 测试内 Noop 注入器：CopiedOnly 分支不会触达注入，仅为满足 TargetPipelineDeps 形参。
+struct NoopInjector;
 
-impl FocusWatcher for DeadTargetFocus {
+impl KeyInjector for NoopInjector {
+    fn inject(&mut self, _keys: &[u16]) -> platform::Result<()> {
+        Ok(())
+    }
+}
+
+/// 测试内 Noop 激活器：无热目标时管线不触达激活，仅为满足依赖形参。
+struct NoopActivator;
+
+impl WindowActivator for NoopActivator {
+    fn activate(
+        &self,
+        _window: WindowHandle,
+        _budget_ms: u64,
+        _settle_ms: u64,
+    ) -> platform::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// 测试内 Noop 焦点/就绪/聚焦替身：无热目标时管线不触达这些依赖
+///（TargetPipelineDeps 形参完整性需要实现，行为任意）。
+struct NoopFocus;
+impl platform::FocusWatcher for NoopFocus {
     fn foreground(&self) -> WindowHandle {
-        Win32Focus.foreground()
+        WindowHandle(0)
     }
 
     fn is_alive(&self, _window: WindowHandle) -> bool {
@@ -53,12 +75,28 @@ impl FocusWatcher for DeadTargetFocus {
     }
 }
 
-/// 测试内 Noop 注入器：CopiedOnly 分支不会触达注入，仅为满足 PipelineDeps 形参。
-struct NoopInjector;
+struct NoopProbe;
+impl platform::ReadinessProbe for NoopProbe {
+    fn probe(&self, _window: WindowHandle, _timeout_ms: u64) -> platform::ReadinessSignal {
+        platform::ReadinessSignal::Inconclusive
+    }
 
-impl KeyInjector for NoopInjector {
-    fn inject(&mut self, _keys: &[u16]) -> platform::Result<()> {
-        Ok(())
+    fn blockers(&self, _window: WindowHandle) -> platform::ReadinessSignal {
+        platform::ReadinessSignal::Inconclusive
+    }
+}
+
+struct NoopFocuser;
+impl platform::InputFocuser for NoopFocuser {
+    fn focus_input(
+        &self,
+        _window: WindowHandle,
+        _plan: &platform::FocusPlan,
+    ) -> platform::FocusReport {
+        platform::FocusReport {
+            outcome: platform::FocusOutcome::Unavailable,
+            attempts: Vec::new(),
+        }
     }
 }
 
@@ -93,40 +131,47 @@ pub fn run_closed_loop_probe() -> Result<ClosedLoopReport, String> {
         ));
     };
 
-    // 会话：auto_send 默认关（D8 快照测试锁定）；锚定真前台
-    let mut session = PasteSession::new(PasteConfig::default());
-    session.begin_panel(&DeadTargetFocus);
+    // 会话：默认未持热目标——写剪贴板后按「没有已锁定的热目标」降级 CopiedOnly
+    //（原 M6 死焦点降级的 M8 等价路径），注入零触达。
+    let mut session = PasteSession::new();
 
     // 载荷走协商表 Text 行（Image/Video 行的剪贴板形态不属本探针职责）
     let payload = AssetPayload {
-        kind: AssetKind::Text,
+        kind: PayloadKind::Text,
         png_bytes: &[],
         source_path: PathBuf::new(),
         text: PROBE_TEXT.to_string(),
     };
-    let Some(negotiated) = negotiate(&payload, TargetProfile::ImGeneric) else {
-        return Err("negotiate 未映射 (Text × ImGeneric) 行".into());
-    };
-    debug_assert!(matches!(negotiated, ClipboardPayload::Text(_)));
+    let negotiated = negotiate_detailed(&payload, &Profile::generic());
+    debug_assert!(matches!(
+        negotiated,
+        pipeline::Negotiated::Safe {
+            payload: ClipboardPayload::Text(_),
+            ..
+        }
+    ));
 
     let mut sink = Win32Clipboard;
     let mut injector = NoopInjector;
-    let mut deps = PipelineDeps {
+    let mut deps = TargetPipelineDeps {
         clipboard: &mut sink,
-        focus: &DeadTargetFocus,
+        focus: &NoopFocus,
         injector: &mut injector,
+        activator: &NoopActivator,
+        readiness: &NoopProbe,
+        focuser: &NoopFocuser,
     };
-    let outcome = session.paste(&payload, &mut deps);
+    let outcome = session.paste_targeted(&payload, &Profile::generic(), &mut deps);
 
     // 读回校验（真实系统剪贴板）：CF_UNICODETEXT 须逐字等于载荷文本。
     // 选直接读回而非 sequence-number 前后比对：内容级证据更硬（design 备选二）。
     let read_back = read_cf_unicode_text();
 
     let reason = match outcome {
-        PasteOutcome::CopiedOnly { reason } => reason,
+        TargetPasteOutcome::CopiedOnly { feedback } => feedback.hint,
         other => {
             cleanup_clipboard(&mut sink);
-            return Err(format!("期望 CopiedOnly（焦点死降级），实际 {other:?}"));
+            return Err(format!("期望 CopiedOnly（无热目标降级），实际 {other:?}"));
         }
     };
 

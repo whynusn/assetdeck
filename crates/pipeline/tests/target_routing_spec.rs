@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pipeline::{
-    negotiate, negotiate_detailed, AssetKind, AssetPayload, Negotiated, PasteConfig, PasteSession,
-    TargetPasteOutcome, TargetPipelineDeps, VK_RETURN,
+    negotiate_detailed, AssetPayload, Negotiated, PasteSession, PayloadKind, TargetPasteOutcome,
+    TargetPipelineDeps, VK_RETURN,
 };
 use platform::{
     ClipboardPayload, ClipboardSink, FocusOutcome, FocusPlan, FocusStep, FocusWatcher,
@@ -13,7 +13,7 @@ use platform::{
 };
 use targets::ReadinessMode;
 use targets::{
-    ClipboardFormat, FocusStrategyStep, FormatPolicy, InputAnchor, KindFormats, Profile,
+    ClipboardFormat, FocusStrategyStep, FormatPolicy, InputPointConfig, KindFormats, Profile,
     SendPolicy, TargetBinding, TargetId,
 };
 
@@ -146,28 +146,22 @@ fn profile() -> Profile {
             FocusStrategyStep::Uia,
             FocusStrategyStep::Anchor,
         ],
-        input_anchor: None,
-        input_anchor_bottom: None,
-        input_point: None,
+        input_points: Vec::new(),
         caret_semantic: None,
     }
 }
 
 fn payload<'a>(png: &'a [u8]) -> AssetPayload<'a> {
     AssetPayload {
-        kind: AssetKind::Image,
+        kind: PayloadKind::Image,
         png_bytes: png,
         source_path: PathBuf::from("C:/asset.png"),
         text: String::new(),
     }
 }
 
-fn run(
-    signal: ReadinessSignal,
-    foreground: WindowHandle,
-    auto_send: bool,
-) -> (TargetPasteOutcome, Vec<Op>) {
-    run_with_mode(signal, foreground, auto_send, ReadinessMode::UiaShallow)
+fn run(signal: ReadinessSignal, foreground: WindowHandle) -> (TargetPasteOutcome, Vec<Op>) {
+    run_with_mode(signal, foreground, ReadinessMode::UiaShallow)
 }
 
 /// 用指定画像跑一次上框，返回结果与操作日志。就绪度恒 Ready、前台恒命中，
@@ -195,7 +189,7 @@ fn run_with_profile(profile: Profile, req: &AssetPayload<'_>) -> (TargetPasteOut
         readiness: &probe,
         focuser: &focuser,
     };
-    let mut session = PasteSession::new(PasteConfig::default());
+    let mut session = PasteSession::new();
     session.set_target(Some(TargetBinding::new(
         profile.id.clone(),
         HWND,
@@ -207,7 +201,7 @@ fn run_with_profile(profile: Profile, req: &AssetPayload<'_>) -> (TargetPasteOut
 
 fn video_payload<'a>() -> AssetPayload<'a> {
     AssetPayload {
-        kind: AssetKind::Video,
+        kind: PayloadKind::Video,
         png_bytes: &[],
         source_path: PathBuf::from("C:/asset.mp4"),
         text: String::new(),
@@ -225,22 +219,14 @@ fn video_files_sends() -> SendPolicy {
 fn run_with_mode(
     signal: ReadinessSignal,
     foreground: WindowHandle,
-    auto_send: bool,
     readiness: ReadinessMode,
 ) -> (TargetPasteOutcome, Vec<Op>) {
-    run_with_focus(
-        signal,
-        foreground,
-        auto_send,
-        readiness,
-        FocusOutcome::FocusedByAnchor,
-    )
+    run_with_focus(signal, foreground, readiness, FocusOutcome::FocusedByAnchor)
 }
 
 fn run_with_focus(
     signal: ReadinessSignal,
     foreground: WindowHandle,
-    auto_send: bool,
     readiness: ReadinessMode,
     focus_outcome: FocusOutcome,
 ) -> (TargetPasteOutcome, Vec<Op>) {
@@ -268,7 +254,7 @@ fn run_with_focus(
     };
     let mut profile = profile();
     profile.readiness = readiness;
-    let mut session = PasteSession::new(PasteConfig { auto_send });
+    let mut session = PasteSession::new();
     session.set_target(Some(TargetBinding::new(
         TargetId::new("wechat"),
         HWND,
@@ -295,8 +281,11 @@ fn negotiate_honors_profile_ordered_format_fallback() {
     ];
     let req = payload(&[1, 2, 3]);
     assert_eq!(
-        negotiate(&req, &profile),
-        Some(ClipboardPayload::Files(vec![PathBuf::from("C:/asset.png")]))
+        negotiate_detailed(&req, &profile),
+        Negotiated::Safe {
+            format: ClipboardFormat::Files,
+            payload: ClipboardPayload::Files(vec![PathBuf::from("C:/asset.png")])
+        }
     );
 }
 
@@ -305,7 +294,6 @@ fn not_ready_no_conversation_never_injects() {
     let (outcome, ops) = run(
         ReadinessSignal::Blocked(ReadinessBlocker::NoConversation),
         HWND,
-        false,
     );
     assert!(matches!(outcome, TargetPasteOutcome::CopiedOnly { .. }));
     assert!(!ops.iter().any(|op| matches!(op, Op::Inject(_))));
@@ -313,13 +301,13 @@ fn not_ready_no_conversation_never_injects() {
 
 #[test]
 fn unknown_readiness_injects_but_marks_unverified() {
-    let (outcome, _) = run(ReadinessSignal::Inconclusive, HWND, false);
+    let (outcome, _) = run(ReadinessSignal::Inconclusive, HWND);
     assert_eq!(outcome, TargetPasteOutcome::Injected { verified: false });
 }
 
 #[test]
 fn probe_timeout_falls_back_to_unknown_not_notready() {
-    let (outcome, ops) = run(ReadinessSignal::Inconclusive, HWND, false);
+    let (outcome, ops) = run(ReadinessSignal::Inconclusive, HWND);
     assert!(matches!(outcome, TargetPasteOutcome::Injected { .. }));
     assert!(ops.iter().any(|op| matches!(op, Op::Inject(_))));
 }
@@ -329,7 +317,6 @@ fn uia_strict_inconclusive_copies_without_injecting() {
     let (outcome, ops) = run_with_mode(
         ReadinessSignal::Inconclusive,
         HWND,
-        false,
         ReadinessMode::UiaStrict,
     );
     assert!(matches!(outcome, TargetPasteOutcome::CopiedOnly { .. }));
@@ -338,7 +325,7 @@ fn uia_strict_inconclusive_copies_without_injecting() {
 
 #[test]
 fn foreground_drift_before_inject_aborts() {
-    let (outcome, ops) = run(ReadinessSignal::Ready, WindowHandle(99), false);
+    let (outcome, ops) = run(ReadinessSignal::Ready, WindowHandle(99));
     assert!(matches!(outcome, TargetPasteOutcome::CopiedOnly { .. }));
     assert!(!ops.iter().any(|op| matches!(op, Op::Inject(_))));
 }
@@ -406,7 +393,7 @@ fn run_drift(
         readiness: &probe,
         focuser: &focuser,
     };
-    let mut session = PasteSession::new(PasteConfig::default());
+    let mut session = PasteSession::new();
     session.set_target(Some(TargetBinding::new(
         TargetId::new("wechat"),
         HWND,
@@ -456,14 +443,14 @@ fn foreground_drift_to_foreign_window_degrades_without_reassert() {
 
 #[test]
 fn core_upload_path_never_synthesizes_enter() {
-    let (outcome, ops) = run(ReadinessSignal::Ready, HWND, true);
+    let (outcome, ops) = run(ReadinessSignal::Ready, HWND);
     assert_eq!(outcome, TargetPasteOutcome::Injected { verified: true });
     assert!(!has_enter(&ops));
 }
 
 #[test]
 fn targeted_pipeline_order_is_write_activate_probe_validate_inject() {
-    let (_, ops) = run(ReadinessSignal::Ready, HWND, false);
+    let (_, ops) = run(ReadinessSignal::Ready, HWND);
     assert_eq!(
         ops,
         vec![
@@ -483,7 +470,7 @@ fn targeted_pipeline_order_is_write_activate_probe_validate_inject() {
 /// 更晚则探测拿到的是激活瞬间那个错误焦点（真机上就是窗口根控件）。
 #[test]
 fn focus_step_runs_between_activate_and_probe() {
-    let (_, ops) = run(ReadinessSignal::Ready, HWND, false);
+    let (_, ops) = run(ReadinessSignal::Ready, HWND);
     let activate = ops.iter().position(|op| op == &Op::Activate).unwrap();
     let focus = ops.iter().position(|op| op == &Op::Focus).unwrap();
     let readiness = ops
@@ -493,12 +480,7 @@ fn focus_step_runs_between_activate_and_probe() {
     assert!(activate < focus && focus < readiness, "实际顺序: {ops:?}");
 
     // 严格档走 UIA probe()，夹在中间的位置关系必须完全一致。
-    let (_, strict) = run_with_mode(
-        ReadinessSignal::Ready,
-        HWND,
-        false,
-        ReadinessMode::UiaStrict,
-    );
+    let (_, strict) = run_with_mode(ReadinessSignal::Ready, HWND, ReadinessMode::UiaStrict);
     let activate = strict.iter().position(|op| op == &Op::Activate).unwrap();
     let focus = strict.iter().position(|op| op == &Op::Focus).unwrap();
     let probe = strict.iter().position(|op| op == &Op::Probe).unwrap();
@@ -509,7 +491,7 @@ fn focus_step_runs_between_activate_and_probe() {
 /// 唯一允许的注入是随后的 Ctrl+V。
 #[test]
 fn focus_step_never_injects_keys_before_paste_chord() {
-    let (_, ops) = run(ReadinessSignal::Ready, HWND, false);
+    let (_, ops) = run(ReadinessSignal::Ready, HWND);
     let injects: Vec<_> = ops
         .iter()
         .filter_map(|op| match op {
@@ -528,7 +510,6 @@ fn focus_unavailable_still_injects_but_marks_unverified() {
     let (outcome, ops) = run_with_focus(
         ReadinessSignal::Inconclusive,
         HWND,
-        false,
         ReadinessMode::UiaShallow,
         FocusOutcome::Unavailable,
     );
@@ -543,7 +524,6 @@ fn confirmed_focus_upgrades_inconclusive_probe_to_verified() {
     let (outcome, _) = run_with_focus(
         ReadinessSignal::Inconclusive,
         HWND,
-        false,
         ReadinessMode::UiaShallow,
         FocusOutcome::AlreadyEditable,
     );
@@ -556,7 +536,6 @@ fn uia_strict_aborts_when_focus_unavailable() {
     let (outcome, ops) = run_with_focus(
         ReadinessSignal::Ready,
         HWND,
-        false,
         ReadinessMode::UiaStrict,
         FocusOutcome::Unavailable,
     );
@@ -568,10 +547,10 @@ fn uia_strict_aborts_when_focus_unavailable() {
     );
 }
 
-/// 画像声明的锚点必须原样传到平台层：夹紧与安全校验是平台层的职责，
-/// 管线不得擅自改写或凭空补一个锚点。
+/// 画像声明的点击点必须原样传到平台层：夹紧与安全校验是平台层的职责，
+/// 管线不得擅自改写或凭空补一个点击点。
 #[test]
-fn profile_anchor_is_forwarded_to_focuser_verbatim() {
+fn profile_input_points_are_forwarded_to_focuser_verbatim() {
     let log = Log::default();
     let mut sink = Sink(log.clone());
     let focus = Focus {
@@ -588,10 +567,10 @@ fn profile_anchor_is_forwarded_to_focuser_verbatim() {
     let focuser = Focuser::new(log.clone(), FocusOutcome::FocusedByAnchor);
     let seen = focuser.seen_plan.clone();
     let mut profile = profile();
-    profile.input_anchor = Some(InputAnchor {
-        x_ratio: 0.394,
-        y_ratio: 0.787,
-    });
+    profile.input_points = vec![InputPointConfig {
+        x: "WINDOW_WIDTH - 8".to_string(),
+        y: "WINDOW_HEIGHT - 8".to_string(),
+    }];
     {
         let mut deps = TargetPipelineDeps {
             clipboard: &mut sink,
@@ -601,24 +580,24 @@ fn profile_anchor_is_forwarded_to_focuser_verbatim() {
             readiness: &probe,
             focuser: &focuser,
         };
-        let mut session = PasteSession::new(PasteConfig::default());
+        let mut session = PasteSession::new();
         session.set_target(Some(TargetBinding::new(profile.id.clone(), HWND, "微信")));
         session.paste_targeted(&payload(&[1, 2, 3]), &profile, &mut deps);
     }
-    let anchor = seen
+    let points = seen
         .lock()
         .unwrap()
         .clone()
         .expect("聚焦端应被调用")
-        .anchor
-        .expect("锚点应被传入");
-    assert!((anchor.x_ratio - 0.394).abs() < f32::EPSILON);
-    assert!((anchor.y_ratio - 0.787).abs() < f32::EPSILON);
+        .input_points;
+    assert_eq!(points.len(), 1, "点击点应被原样传入");
+    assert_eq!(points[0].x, "WINDOW_WIDTH - 8");
+    assert_eq!(points[0].y, "WINDOW_HEIGHT - 8");
 }
 
-/// 未声明锚点的画像不得被平台层点击：传入 None 是「不要点」的唯一表达。
+/// 未声明点击点的画像不得被平台层点击：空列表是「不要点」的唯一表达。
 #[test]
-fn profile_without_anchor_forwards_none() {
+fn profile_without_input_points_forwards_empty_list() {
     let log = Log::default();
     let mut sink = Sink(log.clone());
     let focus = Focus {
@@ -644,12 +623,12 @@ fn profile_without_anchor_forwards_none() {
             readiness: &probe,
             focuser: &focuser,
         };
-        let mut session = PasteSession::new(PasteConfig::default());
+        let mut session = PasteSession::new();
         session.set_target(Some(TargetBinding::new(profile.id.clone(), HWND, "微信")));
         session.paste_targeted(&payload(&[1, 2, 3]), &profile, &mut deps);
     }
     let plan = seen.lock().unwrap().clone().expect("聚焦端应被调用");
-    assert_eq!(plan.anchor, None);
+    assert!(plan.input_points.is_empty());
 }
 
 /// 聚焦级别顺序是**画像数据**而不是平台层的代码分支：画像声明什么，
@@ -682,14 +661,15 @@ fn profile_focus_strategy_is_forwarded_as_plan() {
             readiness: &probe,
             focuser: &focuser,
         };
-        let mut session = PasteSession::new(PasteConfig::default());
+        let mut session = PasteSession::new();
         session.set_target(Some(TargetBinding::new(profile.id.clone(), HWND, "微信")));
         session.paste_targeted(&payload(&[1, 2, 3]), &profile, &mut deps);
     }
     let plan = seen.lock().unwrap().clone().expect("聚焦端应被调用");
     assert_eq!(
         plan.steps,
-        vec![FocusStep::AlreadyEditable, FocusStep::AnchorClick]
+        vec![FocusStep::AlreadyEditable, FocusStep::InputPointClick],
+        "旧 anchor 策略级收敛后映射为 InputPointClick"
     );
 }
 
@@ -752,7 +732,7 @@ fn unsupported_and_would_send_are_distinct_results() {
         }
     );
     let empty = AssetPayload {
-        kind: AssetKind::Video,
+        kind: PayloadKind::Video,
         png_bytes: &[],
         source_path: PathBuf::new(),
         text: String::new(),
@@ -763,12 +743,16 @@ fn unsupported_and_would_send_are_distinct_results() {
     );
 }
 
-/// 便捷入口 negotiate() 只返回安全格式，避免旧调用点无意中拿到即发格式。
+/// 便捷 negotiate_detailed 的 WouldSend 语义：即发格式不返回 Safe，
+/// 避免调用点无意中拿到即发格式当安全格式注入。
 #[test]
 fn negotiate_skips_paste_sends_formats() {
     let mut profile = profile();
     profile.paste_sends = video_files_sends();
-    assert_eq!(negotiate(&video_payload(), &profile), None);
+    assert!(matches!(
+        negotiate_detailed(&video_payload(), &profile),
+        Negotiated::WouldSend { .. }
+    ));
 }
 
 /// 即发是 (类别 × 格式) 事实，不是纯格式事实：千牛画像只把 video × files 标为即发，
@@ -822,7 +806,7 @@ fn only_strict_readiness_pays_for_uia_probe() {
     let count = |ops: &[Op], want: &Op| ops.iter().filter(|op| *op == want).count();
 
     for mode in [ReadinessMode::UiaShallow, ReadinessMode::P0Only] {
-        let (outcome, ops) = run_with_mode(ReadinessSignal::Ready, HWND, false, mode);
+        let (outcome, ops) = run_with_mode(ReadinessSignal::Ready, HWND, mode);
         assert_eq!(
             count(&ops, &Op::Probe),
             0,
@@ -836,12 +820,7 @@ fn only_strict_readiness_pays_for_uia_probe() {
         assert!(matches!(outcome, TargetPasteOutcome::Injected { .. }));
     }
 
-    let (outcome, ops) = run_with_mode(
-        ReadinessSignal::Ready,
-        HWND,
-        false,
-        ReadinessMode::UiaStrict,
-    );
+    let (outcome, ops) = run_with_mode(ReadinessSignal::Ready, HWND, ReadinessMode::UiaStrict);
     assert_eq!(count(&ops, &Op::Probe), 1, "严格档必须做一次 UIA probe()");
     assert_eq!(
         count(&ops, &Op::Blockers),
@@ -857,9 +836,45 @@ fn shallow_readiness_still_aborts_on_proven_blocker() {
     let (outcome, ops) = run_with_mode(
         ReadinessSignal::Blocked(ReadinessBlocker::WindowGone),
         HWND,
-        false,
         ReadinessMode::UiaShallow,
     );
     assert!(matches!(outcome, TargetPasteOutcome::CopiedOnly { .. }));
+    assert!(!ops.iter().any(|op| matches!(op, Op::Inject(_))));
+}
+
+fn file_payload<'a>() -> AssetPayload<'a> {
+    AssetPayload {
+        kind: PayloadKind::File,
+        png_bytes: &[],
+        source_path: PathBuf::from("C:/logs/app-1-2.log"),
+        text: String::new(),
+    }
+}
+
+/// D82 日志导出：画像声明 file 行（如微信）时走协商 → HDROP 写入并注入，
+/// 注入序列不含回车（D8/D82 红线——粘贴止步输入框，发送是用户的事）。
+#[test]
+fn file_payload_pastes_via_negotiation() {
+    let mut profile = profile();
+    profile.formats.file = vec![ClipboardFormat::Files];
+    let (outcome, ops) = run_with_profile(profile, &file_payload());
+    assert!(matches!(outcome, TargetPasteOutcome::Injected { .. }));
+    assert!(ops.contains(&Op::Write));
+    assert!(ops.contains(&Op::Activate));
+    assert!(!ops
+        .iter()
+        .any(|op| matches!(op, Op::Inject(keys) if keys.contains(&VK_RETURN))));
+}
+
+/// D82 红线：画像未声明 file 行时不能注入（Ctrl+V 必落空），但文件仍写
+/// 剪贴板供手动粘贴——降级为 CopiedOnly，而非连复制都不做的硬失败。
+#[test]
+fn file_payload_unsupported_degrades_to_copy_only() {
+    let (outcome, ops) = run_with_profile(profile(), &file_payload());
+    assert!(
+        matches!(outcome, TargetPasteOutcome::CopiedOnly { .. }),
+        "未声明 file 行应降级为仅复制，实际 {outcome:?}"
+    );
+    assert!(ops.contains(&Op::Write), "文件仍应写入剪贴板");
     assert!(!ops.iter().any(|op| matches!(op, Op::Inject(_))));
 }

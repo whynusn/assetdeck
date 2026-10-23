@@ -19,7 +19,7 @@ pub use matcher::{
 pub use model::{Health, NotReadyReason, Readiness, TargetBinding, TargetId, TargetScope};
 pub use platform::{WindowHandle, WindowRect, WindowSnapshot};
 pub use profile::{
-    load_profiles, ClipboardFormat, FocusStrategyStep, FormatKind, FormatPolicy, InputAnchor,
-    InputPointConfig, KindFormats, Profile, ProfileError, ProfileSet, ReadinessMode, SendPolicy,
+    load_profiles, ClipboardFormat, FocusStrategyStep, FormatKind, FormatPolicy, InputPointConfig,
+    KindFormats, Profile, ProfileError, ProfileSet, ReadinessMode, SendPolicy,
 };
 pub use tracker::TargetTracker;

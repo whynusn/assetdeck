@@ -83,6 +83,10 @@ impl PasteFeedback {
                 "该应用会把粘贴的文件直接发出而不进输入框；素材已复制，确认要发送时再手动 Ctrl+V",
                 FeedbackAction::PasteManually,
             ),
+            NotReadyReason::PayloadUnsupported => (
+                "当前目标不支持直接上框，文件已复制，请手动粘贴",
+                FeedbackAction::PasteManually,
+            ),
         };
         Self::copied(target_label, hint, action)
     }
@@ -123,6 +127,7 @@ mod tests {
             NotReadyReason::Ambiguous,
             NotReadyReason::ProbeUnavailable,
             NotReadyReason::PasteWouldSend,
+            NotReadyReason::PayloadUnsupported,
         ];
         for reason in reasons {
             let feedback = PasteFeedback::not_ready("微信", reason);

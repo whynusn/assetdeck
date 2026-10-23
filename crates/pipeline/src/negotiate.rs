@@ -1,7 +1,8 @@
 //! 格式协商表：资产类型 × 目标 profile → 剪贴板载荷。纯函数、零 IO。
 //!
 //! 表驱动纪律（spec/pipeline Code Review 清单）：新增协商项走 (kind, profile)
-//! 二维 match 行，而非 if-else 散落。
+//! 二维 match 行，而非 if-else 散落。画像入口是数据化的 `Profile`
+//! （targets crate）；M6 的枚举画像已整代删除。
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -9,72 +10,77 @@ use std::path::PathBuf;
 use platform::ClipboardPayload;
 use targets::{ClipboardFormat, FormatKind, Profile};
 
-/// 资产类别（管线视角的最小分类，本体收敛在 domain::AssetKind）。
+/// 载荷类别（管线视角的最小分类，D82 起**不收敛在 domain::AssetKind**）。
 ///
-/// `Other` 承载 v1 未路由的资产类（归档/字体/音频等）：协商返回 `None`，
-/// 由调用方降级为 Files 或提示不支持——这正是「未知组合」的一等表行。
-pub use domain::AssetKind;
+/// 为什么独立于 domain：`AssetKind` 是库语义的共享枚举（排序/卡片/serde
+/// 持久化共用），给「文件引用」加变体会外溢到库侧；而协商表需要 File 作为
+/// 一等座位（日志导出走同一张表，未声明的目标诚实 Unsupported）。
+///
+/// `Other` 承载库侧未知类别的资产（归档/字体/音频等）：协商返回 `None`，
+/// 由调用方提示不支持——这正是「未知组合」的一等表行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayloadKind {
+    Image,
+    Video,
+    Text,
+    /// 文件引用：载荷恒为 HDROP（source_path）。是否接收由画像 formats.file
+    /// 行声明；未声明时协商返回 Unsupported，管线对 File 另行降级为
+    /// 「只复制、手动粘贴」，不注入必落空的 Ctrl+V。
+    File,
+    Other,
+}
+
+impl PayloadKind {
+    pub fn from_asset_kind(kind: domain::AssetKind) -> PayloadKind {
+        match kind {
+            domain::AssetKind::Image => PayloadKind::Image,
+            domain::AssetKind::Video => PayloadKind::Video,
+            domain::AssetKind::Text => PayloadKind::Text,
+            domain::AssetKind::Other => PayloadKind::Other,
+        }
+    }
+}
+
+fn format_kind(kind: PayloadKind) -> FormatKind {
+    match kind {
+        PayloadKind::Image => FormatKind::Image,
+        PayloadKind::Video => FormatKind::Video,
+        PayloadKind::Text => FormatKind::Text,
+        PayloadKind::File => FormatKind::File,
+        PayloadKind::Other => FormatKind::Other,
+    }
+}
 
 /// 待粘贴资产的运行时载荷快照（UI 侧取数后传入，管线内不做任何解码）。
 #[derive(Debug, Clone)]
 pub struct AssetPayload<'a> {
-    pub kind: AssetKind,
+    pub kind: PayloadKind,
     /// Image 行使用：上游已编码的 PNG 字节（「UI 进程不解码」红线）。
     pub png_bytes: &'a [u8],
     pub source_path: PathBuf,
     pub text: String,
 }
 
-/// 目标应用画像。v1 只有通用 IM profile，枚举留扩展位。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TargetProfile {
-    ImGeneric,
-}
-
-/// 协商所需的画像视图。保留 M6 的枚举入口，同时让 M8 使用数据化 Profile。
+/// 协商所需的画像视图：数据化的 `Profile`（targets crate）实现本 trait。
 pub trait NegotiationProfile {
-    fn formats(&self, kind: AssetKind) -> &[ClipboardFormat];
+    fn formats(&self, kind: PayloadKind) -> &[ClipboardFormat];
 
     /// 该 (类别, 格式) 组合粘进这个目标是否等于「直接发送」。默认否。
     ///
     /// 带上 kind 是实测要求：千牛把视频的 CF_HDROP 当场发出，图片的 CF_HDROP
     /// 却停在输入框，同一格式在同一目标上结论相反。
-    fn paste_sends(&self, _kind: AssetKind, _format: ClipboardFormat) -> bool {
+    fn paste_sends(&self, _kind: PayloadKind, _format: ClipboardFormat) -> bool {
         false
     }
 }
 
-impl NegotiationProfile for TargetProfile {
-    fn formats(&self, kind: AssetKind) -> &[ClipboardFormat] {
-        const IMAGE: &[ClipboardFormat] = &[ClipboardFormat::Png, ClipboardFormat::Files];
-        const VIDEO: &[ClipboardFormat] = &[ClipboardFormat::Files];
-        const TEXT: &[ClipboardFormat] = &[ClipboardFormat::Text];
-        const NONE: &[ClipboardFormat] = &[];
-        match (self, kind) {
-            (TargetProfile::ImGeneric, AssetKind::Image) => IMAGE,
-            (TargetProfile::ImGeneric, AssetKind::Video) => VIDEO,
-            (TargetProfile::ImGeneric, AssetKind::Text) => TEXT,
-            (TargetProfile::ImGeneric, AssetKind::Other) => NONE,
-        }
-    }
-}
-
 impl NegotiationProfile for &Profile {
-    fn formats(&self, kind: AssetKind) -> &[ClipboardFormat] {
+    fn formats(&self, kind: PayloadKind) -> &[ClipboardFormat] {
         self.formats.for_kind(format_kind(kind))
     }
 
-    fn paste_sends(&self, kind: AssetKind, format: ClipboardFormat) -> bool {
+    fn paste_sends(&self, kind: PayloadKind, format: ClipboardFormat) -> bool {
         self.paste_sends_format(format_kind(kind), format)
-    }
-}
-
-fn format_kind(kind: AssetKind) -> FormatKind {
-    match kind {
-        AssetKind::Image => FormatKind::Image,
-        AssetKind::Video => FormatKind::Video,
-        AssetKind::Text => FormatKind::Text,
-        AssetKind::Other => FormatKind::Other,
     }
 }
 
@@ -176,28 +182,5 @@ fn carry<'a>(req: &'a AssetPayload<'a>, format: ClipboardFormat) -> Option<Clipb
         | ClipboardFormat::Png
         | ClipboardFormat::Files
         | ClipboardFormat::Text => None,
-    }
-}
-
-/// 查表：(kind × profile) → 剪贴板载荷。
-///
-/// - Image → PNG 字节透传（不重编码）；
-/// - Video → 源文件 HDROP（视频无帧级粘贴语义，交文件引用）；
-/// - Text  → Unicode 文本；
-/// - 无映射（未知组合）→ `None`，「查不到」是合法查询结果而非错误，
-///   调用方据此降级为 Files 或报不支持。
-///
-/// DIB 行存在但不默认路由：仅当上游已持有编码字节时由专用路径构造
-/// [`ClipboardPayload::Dib`]——UI 进程永不做位图解码（红线）。
-///
-/// 本函数只回答「安全格式」，会跳过画像标记为「粘贴即发送」的格式；
-/// 需要区分 `Unsupported` 与 `WouldSend` 的调用方请用 [`negotiate_detailed`]。
-pub fn negotiate<'a, P: NegotiationProfile>(
-    req: &'a AssetPayload<'a>,
-    profile: P,
-) -> Option<ClipboardPayload<'a>> {
-    match negotiate_detailed(req, profile) {
-        Negotiated::Safe { payload, .. } => Some(payload),
-        Negotiated::WouldSend { .. } | Negotiated::Unsupported => None,
     }
 }

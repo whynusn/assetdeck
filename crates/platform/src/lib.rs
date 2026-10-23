@@ -278,46 +278,17 @@ pub trait ReadinessProbe {
     fn blockers(&self, window: WindowHandle) -> ReadinessSignal;
 }
 
-/// 聊天输入框在窗口内的相对位置（客户区宽高比例，0.0..=1.0）。
+/// 锚点几何（已求值）：客户区逻辑坐标（原点=客户区左上角）。
 ///
-/// 为什么是比例而不是绝对坐标：IM 窗口尺寸随用户拖拽变化，但输入框在版式中的
-/// 相对位置稳定。比例锚点由目标画像声明，平台层只负责换算与安全校验。
-///
-/// 注意（D74）：top-down 比例有一个结构性失效模式——底部固定像素高度的
-/// 工具条/提示条会把「比例」和「输入框」解耦，窗口越高，同一比例落点离
-/// 输入框越远（2026-09-03 真机实测：客户区高 1185 时 y=0.92 命中输入区，
-/// 高 ~1400+ 时同一比例落进上方消息列表）。新目标/新测量请用
-/// [`BottomUpAnchor`]，本类型仅为兼容既有画像保留。
+/// 表达式与变量见 [`InputPointExpr`]；现场记录只留求值结果，表达式本身在计划里。
+/// 三代锚点模型（top-down 比例 / bottom-up 底距 / 表达式）已于 2026-09-15
+/// 收敛为表达式单一配置面——比例与底距都能被表达式等价表达（线性缩放下
+/// `r×宽 ≡ WINDOW_WIDTH*r/1000`、`底距 d ≡ WINDOW_HEIGHT-d`，D74），
+/// 本类型是求值后唯一的几何形态。
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FocusAnchor {
-    pub x_ratio: f32,
-    pub y_ratio: f32,
-}
-
-/// 底部锚点（D74）：x 仍为比例，y 是**距客户区底边**的 96-DPI 逻辑像素。
-///
-/// 为什么 bottom-up 稳定：输入框总是贴着底部固定高度的工具条/提示条排布，
-/// 底边到输入框中心的像素距离随窗口高度几乎不变（实测拼多多 1185 高客户区
-/// 输入区底距 55~150px，千牛 80~295px），而 top-down 比例随高度漂移。
-/// 平台层按目标窗口的实时 DPI 把逻辑像素换算成物理像素。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BottomUpAnchor {
-    pub x_ratio: f32,
-    /// 距客户区底边的 96-DPI 逻辑像素。
-    pub y_from_bottom: f32,
-}
-
-/// 锚点几何形态：声明使用的是哪一种定位模型（现场记录的判读键）。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AnchorGeometry {
-    Ratio(FocusAnchor),
-    BottomUp(BottomUpAnchor),
-    /// 表达式点击点（已求值）：客户区逻辑坐标（原点=客户区左上角）。
-    /// 表达式与变量见 [`InputPointExpr`]；现场记录只留求值结果，表达式本身在计划里。
-    ExprPoint {
-        x_logical: i32,
-        y_logical: i32,
-    },
+pub struct AnchorGeometry {
+    pub x_logical: i32,
+    pub y_logical: i32,
 }
 
 /// 一次「把键盘焦点送进聊天输入框」的结果。
@@ -375,10 +346,10 @@ pub struct FocusReport {
 }
 
 impl FocusReport {
-    /// 是否存在「锚点单击且观测到输入迹象」的正证据。
+    /// 是否存在「点击点单击且观测到输入迹象」的正证据。
     pub fn anchor_click_observed(&self) -> bool {
         self.attempts.iter().any(|attempt| {
-            attempt.step == FocusStep::AnchorClick
+            attempt.step == FocusStep::InputPointClick
                 && attempt.outcome == FocusOutcome::FocusedByAnchor
                 && matches!(attempt.settle, Some(WaitOutcome::Observed { .. }))
         })
@@ -397,14 +368,13 @@ pub enum FocusStep {
     AlreadyEditable,
     /// 在目标窗口的 UIA 子树里找可写控件并 `SetFocus`。
     UiaSetFocus,
-    /// 对画像声明的锚点做单次左键单击。无锚点时该级别自动跳过。
-    AnchorClick,
-    /// 对画像声明的表达式点击点（[`InputPointExpr`]）做单次左键单击。
-    /// 无声明时该级别自动跳过。这是概念动作「把焦点放入目标应用的输入框」的
-    /// **点击式机制**之一：与 `AnchorClick` 的差别只在定位模型——这里是用户可配
-    /// 的窗口内任意一点（原点=客户区左上角，逻辑像素，变量
-    /// WINDOW_WIDTH/WINDOW_HEIGHT 实时求值）。哪个机制对哪个目标有效是观测
-    /// 事实（如拼多多实测无法以点击恢复焦点，其画像就不声明任何点击级）。
+    /// 对画像声明的表达式点击点（[`InputPointExpr`]）**逐点**左键单击，
+    /// 首个命中即止。无声明时该级别自动跳过。这是概念动作「把焦点放入目标
+    /// 应用的输入框」的**点击式机制**：用户可配的窗口内任意点（原点=客户区
+    /// 左上角，逻辑像素，变量 WINDOW_WIDTH/WINDOW_HEIGHT 实时求值），多个点
+    /// 按声明顺序依次兜底（2026-09-15 收敛：旧 anchor 级并入此配置面）。
+    /// 哪个机制对哪个目标有效是观测事实（如拼多多实测无法以点击恢复焦点，
+    /// 其画像就不声明任何点击级）。
     InputPointClick,
     /// 读取原生 caret 并以 MSAA 语义确认编辑器，不执行任何动作。
     CaretSemantic,
@@ -633,12 +603,11 @@ pub fn caret_identity_matches(
 #[derive(Debug, Clone, PartialEq)]
 pub struct FocusPlan {
     pub steps: Vec<FocusStep>,
-    pub anchor: Option<FocusAnchor>,
-    /// bottom-up 锚点（D74）：存在即**优先于** `anchor` 被使用。
-    pub anchor_bottom: Option<BottomUpAnchor>,
-    /// 表达式点击点：`steps` 含 [`FocusStep::InputPointClick`] 且本字段存在时，
-    /// 该级对求值点做单次左键单击（定位模型见 [`InputPointExpr`]）。
-    pub input_point_expr: Option<InputPointExpr>,
+    /// 表达式点击点列表（单一配置面）：`steps` 含 [`FocusStep::InputPointClick`]
+    /// 时，该级对列表**逐点**求值并单击，首个命中即止（定位模型见
+    /// [`InputPointExpr`]）。空列表时该级自动跳过。旧 anchor/anchor_bottom
+    /// 锚点已收敛为等价表达式并入此列表（2026-09-15，一次性迁移在 targets 层）。
+    pub input_points: Vec<InputPointExpr>,
     /// `FocusStep::CaretSemantic` 的身份谓词；None = 缺省（千牛校准值 role 7/编辑）。
     pub caret_identity: Option<CaretSemanticIdentity>,
 }
