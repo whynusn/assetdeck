@@ -2350,10 +2350,16 @@ export component AppWindow inherits Window {
                         root.menu-action(3);
                     }
                 }
+                // 危险动作独立分组（契约 §2.3）：红线 + danger 行，不和常规项混排。
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
                 MenuItem {
                     glyph: Glyph.trash;
                     text: "删除";
                     detail: "进回收站，可恢复";
+                    danger: true;
                     clicked => {
                         root.menu-action(4);
                     }
@@ -2416,10 +2422,15 @@ export component AppWindow inherits Window {
                         root.cat-menu-action(0);
                     }
                 }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
                 MenuItem {
                     glyph: Glyph.trash;
                     text: "删除";
                     detail: "素材移入待分类";
+                    danger: true;
                     clicked => {
                         root.cat-menu-action(1);
                     }

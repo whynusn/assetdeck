@@ -33,14 +33,18 @@ export global Theme {
     in-out property <color> accent-ink: #06131a;
     in-out property <color> accent-soft: #1f3a47;
     in-out property <color> danger: #e0666f;
-    in-out property <color> danger-soft: #3a2427;
-    in-out property <color> danger-press: #472a2e;
+    in-out property <color> danger-soft: #352124;
+    in-out property <color> danger-press: #2a1c1f;
+    // 危险填充态（danger-press）上的文字/图标：浅色主题的填充红需要反白。
+    in-out property <color> danger-ink: #ffffff;
     in-out property <color> warn: #e3b457;
     in-out property <color> warn-soft: #3a3320;
     in-out property <color> ok: #5ac18e;
     in-out property <color> ok-soft: #1f3a30;
     in-out property <color> shared: #c77ae0;
     in-out property <color> shared-soft: #3a2740;
+    // 控件轨道描边（开关关闭态）：必须在浮层底上可辨（契约 §5 UI 边界 ≥3:1）。
+    in-out property <color> control-track-border: #8a8a8a;
 
     // 浮层：比抬起面再亮一档，并配描边拉开与内容的层次
     in-out property <color> bg-overlay: #2c2c2c;
@@ -189,10 +193,11 @@ export component IconButton inherits Rectangle {
         : touch.has-hover ? Theme.line-strong
         : Theme.line;
     background: !root.enabled ? transparent
-        : touch.pressed ? Theme.bg-raised-press
-        : root.active ? Theme.accent-soft
-        : touch.has-hover ? Theme.bg-raised-hover
-        : Theme.bg-raised;
+        : root.active
+            ? (touch.pressed ? Theme.accent-press : Theme.accent-soft)
+            : touch.pressed ? Theme.bg-raised-press
+            : touch.has-hover ? Theme.bg-raised-hover
+            : Theme.bg-raised;
 
     animate background, border-color { duration: 120ms; }
 
@@ -200,7 +205,9 @@ export component IconButton inherits Rectangle {
         width: root.icon-size;
         height: root.icon-size;
         commands: root.glyph;
-        tint: !root.enabled ? Theme.text-3 : root.active ? Theme.accent : Theme.text-2;
+        tint: !root.enabled ? Theme.text-3
+            : root.active ? (touch.pressed ? Theme.accent-ink : Theme.accent)
+            : Theme.text-2;
     }
 
     touch := TouchArea {
@@ -229,11 +236,11 @@ export component DangerButton inherits Rectangle {
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
-        : root.armed || touch.has-hover ? Theme.danger : Theme.line;
+        : root.armed || touch.has-hover || touch.pressed ? Theme.danger : Theme.line;
     background: !root.enabled ? transparent
-        : root.armed
-            ? (touch.pressed ? Theme.danger-press : Theme.danger-soft)
-            : (touch.pressed ? Theme.danger-press : touch.has-hover ? Theme.danger-soft : transparent);
+        : touch.pressed ? Theme.danger-press
+        : root.armed || touch.has-hover ? Theme.danger-soft
+        : transparent;
 
     animate background, border-color { duration: 120ms; }
 
@@ -246,14 +253,18 @@ export component DangerButton inherits Rectangle {
         Icon {
             y: (parent.height - self.height) / 2;
             commands: Glyph.trash;
-            tint: root.enabled ? Theme.danger : Theme.text-3;
+            tint: !root.enabled ? Theme.text-3
+                : touch.pressed ? Theme.danger-ink
+                : Theme.danger;
             width: 14px;
             height: 14px;
         }
 
         Text {
             text: root.text;
-            color: root.enabled ? Theme.danger : Theme.text-3;
+            color: !root.enabled ? Theme.text-3
+                : touch.pressed ? Theme.danger-ink
+                : Theme.danger;
             font-size: Typography.body;
             vertical-alignment: center;
         }
@@ -340,12 +351,11 @@ export component Toggle inherits Rectangle {
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
         : root.checked ? Theme.accent
-        : touch.has-hover ? Theme.line-strong
-        : Theme.line;
+        : Theme.control-track-border;
     background: !root.enabled ? Theme.bg-raised
         : root.checked
             ? (touch.pressed ? Theme.accent-press : Theme.accent)
-            : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised);
+            : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised : Theme.bg-input);
 
     animate background, border-color { duration: 140ms; }
 
@@ -375,13 +385,16 @@ export component MenuItem inherits Rectangle {
     in property <string> glyph;
     in property <string> text;
     in property <string> detail: "";
+    in property <bool> danger: false;
     callback clicked();
 
     height: Metrics.menu-row;
     border-radius: Theme.radius;
-    background: touch.pressed ? Theme.bg-raised-press
-        : touch.has-hover ? Theme.bg-raised-hover
-        : transparent;
+    background: touch.pressed
+        ? (root.danger ? Theme.danger-press : Theme.bg-raised-press)
+        : touch.has-hover
+            ? (root.danger ? Theme.danger-soft : Theme.bg-raised-hover)
+            : transparent;
 
     animate background { duration: 100ms; }
 
@@ -393,7 +406,9 @@ export component MenuItem inherits Rectangle {
         Icon {
             y: (parent.height - self.height) / 2;
             commands: root.glyph;
-            tint: touch.has-hover ? Theme.accent : Theme.text-2;
+            tint: root.danger
+                ? (touch.pressed ? Theme.danger-ink : Theme.danger)
+                : touch.has-hover ? Theme.accent : Theme.text-2;
             width: 15px;
             height: 15px;
         }
@@ -405,15 +420,17 @@ export component MenuItem inherits Rectangle {
 
             Text {
                 text: root.text;
-                color: Theme.text;
+                color: root.danger
+                    ? (touch.pressed ? Theme.danger-ink : Theme.danger)
+                    : Theme.text;
                 font-size: Typography.body;
                 overflow: elide;
             }
 
             if root.detail != "": Text {
                 text: root.detail;
-                color: Theme.text-3;
-                font-size: Typography.caption;
+                color: root.danger && touch.pressed ? Theme.danger-ink : Theme.text-3;
+                font-size: Typography.label;
                 overflow: elide;
             }
         }

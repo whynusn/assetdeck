@@ -1989,6 +1989,7 @@ fn apply_theme(ui: &AppWindow, tokens: &ThemeTokens) {
     theme.set_bg_input(c(tokens.bg_input));
     theme.set_line(c(tokens.line));
     theme.set_line_strong(c(tokens.line_strong));
+    theme.set_control_track_border(c(tokens.control_track_border));
     theme.set_text(c(tokens.text));
     theme.set_text_2(c(tokens.text_2));
     theme.set_text_3(c(tokens.text_3));
@@ -2000,6 +2001,7 @@ fn apply_theme(ui: &AppWindow, tokens: &ThemeTokens) {
     theme.set_danger(c(tokens.danger));
     theme.set_danger_soft(c(tokens.danger_soft));
     theme.set_danger_press(c(tokens.danger_press));
+    theme.set_danger_ink(c(tokens.danger_ink));
     theme.set_warn(c(tokens.warn));
     theme.set_warn_soft(c(tokens.warn_soft));
     theme.set_ok(c(tokens.ok));

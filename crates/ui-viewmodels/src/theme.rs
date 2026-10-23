@@ -29,6 +29,8 @@ pub struct ThemeTokens {
     pub line: u32,
     /// 强描边（悬停/聚焦）。
     pub line_strong: u32,
+    /// 控件轨道描边（开关关闭态），对浮层底 ≥3:1。
+    pub control_track_border: u32,
     /// 文本三级：主/次/弱。
     pub text: u32,
     pub text_2: u32,
@@ -45,6 +47,8 @@ pub struct ThemeTokens {
     pub danger: u32,
     pub danger_soft: u32,
     pub danger_press: u32,
+    /// 危险填充态（danger_press）上的文字/图标。
+    pub danger_ink: u32,
     /// 警示语义色。
     pub warn: u32,
     pub warn_soft: u32,
@@ -93,6 +97,7 @@ impl ThemeProvider for DarkThemeProvider {
             bg_input: 0xFF1A1A1A,
             line: 0xFF383838,
             line_strong: 0xFF4A4A4A,
+            control_track_border: 0xFF8A8A8A,
             text: 0xFFF4F4F4,
             text_2: 0xFFC9C9C9,
             text_3: 0xFFA6A6A6,
@@ -102,8 +107,9 @@ impl ThemeProvider for DarkThemeProvider {
             accent_ink: 0xFF06131A,
             accent_soft: 0xFF1F3A47,
             danger: 0xFFE0666F,
-            danger_soft: 0xFF3A2427,
-            danger_press: 0xFF472A2E,
+            danger_soft: 0xFF352124,
+            danger_press: 0xFF2A1C1F,
+            danger_ink: 0xFFFFFFFF,
             warn: 0xFFE3B457,
             warn_soft: 0xFF3A3320,
             ok: 0xFF5AC18E,
@@ -143,6 +149,7 @@ impl ThemeProvider for LightThemeProvider {
             bg_input: 0xFFFFFFFF,
             line: 0xFFE0E0E6,
             line_strong: 0xFFC8C8D0,
+            control_track_border: 0xFF8A8A8A,
             text: 0xFF1F2328,
             text_2: 0xFF444B52,
             text_3: 0xFF62696F,
@@ -154,6 +161,7 @@ impl ThemeProvider for LightThemeProvider {
             danger: 0xFFC0343F,
             danger_soft: 0xFFFBE8EA,
             danger_press: 0xFFA92D37,
+            danger_ink: 0xFFFFFFFF,
             warn: 0xFF9A6B10,
             warn_soft: 0xFFF8EFD9,
             ok: 0xFF1F7A4D,
@@ -260,6 +268,37 @@ mod tests {
                     tokens.id
                 );
             }
+        }
+    }
+
+    /// 开关轨道边界与危险按钮各状态：契约 §5 的可读下限。
+    #[test]
+    fn control_outline_and_danger_fills_meet_contrast_floor() {
+        for tokens in [DarkThemeProvider.theme(), LightThemeProvider.theme()] {
+            let boundary = contrast(tokens.control_track_border, tokens.bg_overlay);
+            assert!(
+                boundary >= 3.0,
+                "{}: 开关轨道描边对 bg-overlay 只有 {boundary:.2}:1（契约 §5 要求 3:1）",
+                tokens.id
+            );
+            let idle = contrast(tokens.danger, tokens.bg_bar);
+            assert!(
+                idle >= 4.5,
+                "{}: danger 对 bg-bar 只有 {idle:.2}:1",
+                tokens.id
+            );
+            let hover = contrast(tokens.danger, tokens.danger_soft);
+            assert!(
+                hover >= 4.5,
+                "{}: danger 对 danger-soft 只有 {hover:.2}:1",
+                tokens.id
+            );
+            let pressed = contrast(tokens.danger_ink, tokens.danger_press);
+            assert!(
+                pressed >= 4.5,
+                "{}: danger-ink 对 danger-press 只有 {pressed:.2}:1",
+                tokens.id
+            );
         }
     }
 }

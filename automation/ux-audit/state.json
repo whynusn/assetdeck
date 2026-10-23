@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T19:17:29.165Z",
-  "runCount": 4,
+  "updatedAt": "2026-10-23T20:11:41.140Z",
+  "runCount": 5,
   "lastRuns": [
+    {
+      "runId": "run-20261024-040014",
+      "runNumber": 5,
+      "componentId": "M0-C4",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "补齐共享原语状态矩阵：开关关闭态新增 3:1 轨道描边并与禁用态分层；MenuItem 增加 danger 变体并为两个右键菜单的删除项加分隔线；DangerButton 按压态反白、暗色危险底调深；菜单副行升 label；IconButton 选中按压不再回落灰色。焦点模型留 M0-C5、设置行禁用层级留 M7-C2（P2 留档）。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(4 组 before/after + theme-light/notice-error 复核)",
+      "shots": "target/ux-audit/shots/M0-C4/after/settings-default.png;target/ux-audit/shots/M0-C4/after/shell-grid.png;target/ux-audit/shots/M0-C4/after/selection-bar.png;target/ux-audit/shots/M0-C4/after/context-menu.png;target/ux-audit/shots/_states/after/theme-light.png;target/ux-audit/shots/_states/after/notice-error.png;target/ux-audit/shots/_states/after/import-result.png",
+      "baseCommit": "80a548a",
+      "finishedAt": "2026-10-23T20:11:41.138Z"
+    },
     {
       "runId": "run-20261024-030013",
       "runNumber": 4,
@@ -148,7 +160,7 @@
             "M0-C2",
             "M0-C3"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint"
           ],
@@ -168,9 +180,9 @@
             "context-menu"
           ],
           "focus": "每个原语是否具备 disabled/pressed/selected/hover/focus 全状态；状态优先级是否一致；危险按钮 armed；开关受控语义。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-040014",
+          "auditedAtCommit": "80a548a",
+          "notes": "[run-20261024-040014] 补齐共享原语状态矩阵：开关关闭态新增 3:1 轨道描边并与禁用态分层；MenuItem 增加 danger 变体并为两个右键菜单的删除项加分隔线；DangerButton 按压态反白、暗色危险底调深；菜单副行升 label；IconButton 选中按压不再回落灰色。焦点模型留 M0-C5、设置行禁用层级留 M7-C2（P2 留档）。"
         },
         {
           "id": "M0-C5",
@@ -1857,6 +1869,104 @@
       "closedRun": 4,
       "fix": "通知条关闭 22→Metrics.hit-min(28)，共享中心行内按钮 24→Metrics.row-compact(28)，归类候选行 26→28（滚动上限同步 178=6×28+5×2）；三处热区均达 ≥28×28",
       "guard": "热区高度统一消费 Metrics.hit-min/row-compact，禁止再写字面量；notice-success/share-ctl/classify 截图逐张复核"
+    },
+    {
+      "id": "F-019",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "开关关闭态轨道与浮层同色，关闭与禁用不可分",
+      "detail": "Toggle 关闭态底用 Theme.bg-raised(#2F2F2F) 压在 bg-overlay(#2C2C2C) 上，实测几乎同色（对比≈1.04:1），1px 描边 Theme.line(#383838) 也只有≈1.19:1；设置面板里 6 个关闭开关只剩一颗灰点，被读成状态点而不是开关。禁用态与关闭态仅旋钮 #A6A6A6/#C9C9C9 一档之差（像素采样 settings-default.png:940-953,y=343/172），行是否可操作看不出来。契约 §2.1 状态可辨、§5 UI 边界 ≥3:1。",
+      "evidence": "crates/app-ui/ui/theme.slint:341-358；target/ux-audit/shots/M0-C4/before/settings-default.png；target/ux-audit/tmp/toggle-zoom.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "Toggle 关闭态改为 bg-input 轨道 + 新增 Theme.control-track-border 描边（暗/浅 #8A8A8A，对 bg-overlay ≥3:1）；禁用态保留 line 描边与更暗旋钮，关闭/禁用一眼可分",
+      "guard": "ui-viewmodels 新增 control_outline_and_danger_fills_meet_contrast_floor 对比度单测；ThemeTokens→apply_theme 编译期强绑定；settings-default after 截图复核"
+    },
+    {
+      "id": "F-020",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "右键菜单「删除」与普通项同色同组，危险动作无隔离",
+      "detail": "MenuItem 只有普通行一种形态；素材右键菜单的「删除」文字/图标与「复制/属性」完全相同，分类菜单的「删除」同样无区分，且与常规动作紧邻。契约 §2.3 要求危险项独立分组/分隔线，§2.4 要求破坏性动作不得与常规动作紧邻无隔离。",
+      "evidence": "crates/app-ui/ui/theme.slint:374-428；crates/app-ui/ui/appwindow.slint:2346、2419；target/ux-audit/shots/M0-C4/before/context-menu.png；target/ux-audit/tmp/menu-zoom.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "MenuItem 新增 danger 变体（危险文字/图标、danger-soft 悬停、danger-press 按压+danger-ink）；素材/分类右键菜单「删除」标 danger 并在其上方加分隔线",
+      "guard": "危险语义只在 MenuItem 单点定义；两个菜单 after 截图复核；对比度单测覆盖 danger 对 danger-soft/press"
+    },
+    {
+      "id": "F-021",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "DangerButton 按压态红字压红底，浅色主题对比仅 0.82:1",
+      "detail": "pressed 背景 danger-press 与文字/图标 danger 同色系：浅色主题 #C0343F 压 #A92D37 对比≈0.82:1，按下去文字几乎消失；暗色悬停/armed 的 danger 压 danger-soft 也只有≈4.30:1，低于正文 4.5:1 下限。契约 §2.1 pressed 必须可辨、§5 对比度。",
+      "evidence": "crates/app-ui/ui/theme.slint:228-259；crates/ui-viewmodels/src/theme.rs:104-106、154-156",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "DangerButton pressed 改用 danger-ink 反白文字/图标；暗色 danger-soft/press 调深为 #352124/#2A1C1F，hover/armed 的 danger 文字达 4.5:1 且 pressed 比 hover 更深",
+      "guard": "对比度单测覆盖 danger/bg-bar、danger/danger-soft、danger-ink/danger-press 明暗双套"
+    },
+    {
+      "id": "F-022",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "菜单副行用 caption 10px 承载安全承诺",
+      "detail": "「素材进剪贴板，绝不代发」「进回收站，可恢复」是决定用户敢不敢点的关键信息，却用 10px caption；契约 §1.2 规定 caption 不得承载唯一关键信息，M0-C2 已把同类说明提升到 label 11。",
+      "evidence": "crates/app-ui/ui/theme.slint:413-418；target/ux-audit/shots/M0-C4/before/context-menu.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "MenuItem 副行字号由 caption 10 提升为 label 11",
+      "guard": "字号只消费 Typography 令牌；菜单行高 46px 仍容纳双行并留出内边距"
+    },
+    {
+      "id": "F-023",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "图标按钮选中后再按压，底色回落到中性灰",
+      "detail": "IconButton active 时是 accent 描边 + accent-soft 底；pressed 分支优先于 active，按下瞬间底色变 bg-raised-press 灰、描边仍是 accent，选中态被打断。应按 pressed>selected 组合为 accent-press 底 + accent-ink 图标。",
+      "evidence": "crates/app-ui/ui/theme.slint:187-203",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "IconButton active+pressed 组合为 accent-press 底 + accent-ink 图标，不再回落到中性灰",
+      "guard": "状态优先级 pressed>selected 写入原语；按压态无头夹具无法触发，按状态矩阵核对（未截图验证）"
+    },
+    {
+      "id": "F-024",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "platform",
+      "title": "自定义原语没有键盘焦点态（全局焦点模型留待 M0-C5）",
+      "detail": "IconButton/FlatButton/Toggle/MenuItem/DangerButton 都只有 TouchArea，不可 Tab 聚焦、无 focus 视觉；std-widgets Button 却可聚焦，导致同一操作条里键盘行为不一致。契约 §2.1/§2.2 要求焦点可见与全键盘可达。全局焦点/键盘模型是 M0-C5 的范围（依赖本组件），本次留档不修。",
+      "evidence": "crates/app-ui/ui/theme.slint:206-212、313-319、363-369；crates/app-ui/ui/appwindow.slint:588",
+      "status": "open",
+      "createdRun": 5,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-025",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "设置行禁用态只变淡标题，说明文字不变",
+      "detail": "SettingRow enabled=false 时标题降到 text-3，但说明文字本来就是 text-3、开关也只是一颗更暗的旋钮，整行看起来仍可操作；禁用项（点击素材不上浮窗口/上框后自动发送）缺少统一降级。设置行语义属 M7-C2，本次先修 Toggle 轨道，行级禁用层级留待 M7-C2。",
+      "evidence": "crates/app-ui/ui/theme.slint:432-468；target/ux-audit/shots/M0-C4/before/settings-default.png",
+      "status": "open",
+      "createdRun": 5,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
     }
   ]
 }

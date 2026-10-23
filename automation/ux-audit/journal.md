@@ -50,3 +50,12 @@
 - 截图：target/ux-audit/shots/M0-C3/after/shell-grid.png;target/ux-audit/shots/M0-C3/after/settings-default.png;target/ux-audit/shots/_states/after/notice-success.png;target/ux-audit/shots/_states/after/selection-bar.png;target/ux-audit/shots/_states/after/share-ctl.png;target/ux-audit/shots/_states/after/classify.png;target/ux-audit/shots/_states/after/properties.png;target/ux-audit/shots/_states/after/rename.png
 - 基线：b79d9e5
 
+## run-20261024-040014 · M0-C4 · done
+
+- 组件：共享原语状态矩阵
+- 结论：补齐共享原语状态矩阵：开关关闭态新增 3:1 轨道描边并与禁用态分层；MenuItem 增加 danger 变体并为两个右键菜单的删除项加分隔线；DangerButton 按压态反白、暗色危险底调深；菜单副行升 label；IconButton 选中按压不再回落灰色。焦点模型留 M0-C5、设置行禁用层级留 M7-C2（P2 留档）。
+- Findings：F-019(fixed) 开关关闭态轨道与浮层同色，关闭与禁用不可分；F-020(fixed) 右键菜单「删除」与普通项同色同组，危险动作无隔离；F-021(fixed) DangerButton 按压态红字压红底，浅色主题对比仅 0.82:1；F-022(fixed) 菜单副行用 caption 10px 承载安全承诺；F-023(fixed) 图标按钮选中后再按压，底色回落到中性灰；F-024(open) 自定义原语没有键盘焦点态（全局焦点模型留待 M0-C5）；F-025(open) 设置行禁用态只变淡标题，说明文字不变
+- 门禁：slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(4 组 before/after + theme-light/notice-error 复核)
+- 截图：target/ux-audit/shots/M0-C4/after/settings-default.png;target/ux-audit/shots/M0-C4/after/shell-grid.png;target/ux-audit/shots/M0-C4/after/selection-bar.png;target/ux-audit/shots/M0-C4/after/context-menu.png;target/ux-audit/shots/_states/after/theme-light.png;target/ux-audit/shots/_states/after/notice-error.png;target/ux-audit/shots/_states/after/import-result.png
+- 基线：80a548a
+
