@@ -213,3 +213,14 @@ node automation/ux-audit/scripts/capture.mjs --all --phase before
 - 第一条工作单通常是 `M0-C1`（颜色 token）。先建立/补齐 token，再逐屏消费。
 - `M0-C8`（UI 卫生 ratchet）已在初始化时完成；不要重复实现。
 - 如果发现契约本身与现有产品决策冲突，按 §9 的契约修订流程单独处理，不要夹带在组件修复里。
+
+## 10. 每小时定时任务（Qoder Automations）
+
+- 任务：`ccdba4bb-1d50-4c0c-b93e-c25269d4b44c`「每小时 UX 视觉与交互审计（ux-audit）」，
+  cron `0 * * * *`（Asia/Shanghai），独立会话，Full Access，`cwd` = 本 worktree。
+- 提示词副本在 `automation/ux-audit/automation-prompt.md`；改提示词后必须用
+  `qoder_cron action=update` 同步任务，否则下一次运行仍用旧提示词。
+- 暂停/恢复：`qoder_cron action=disable|enable`；立即跑一次：`action=run`（会与进行中的构建争锁，
+  建议先确认没有 `state.mjs status` 里的 current）。
+- 单次运行可能超过 1 小时（首次全量编译），下一整点的运行会因锁直接退出——这是预期行为。
+- 合并回主线由用户在主工作树执行 `git merge ux-audit`；自动化本身**永不 push、不合并 main 进 ux-audit 以外的分支**。
