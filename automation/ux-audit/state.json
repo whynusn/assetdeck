@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T16:35:50.818Z",
-  "runCount": 1,
+  "updatedAt": "2026-10-23T17:25:39.406Z",
+  "runCount": 2,
   "lastRuns": [
+    {
+      "runId": "run-20261024-010014",
+      "runNumber": 2,
+      "componentId": "M0-C1",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "颜色令牌补齐 ok/shared/soft/badge-ring/tile-veil 并打通明暗注入；text-3 达标 4.5:1；目标健康色与共享/成功语义全部收口到 Theme 令牌。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(hex 0);viewmodels-test=pass;capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C1/after/settings-default.png;target/ux-audit/shots/M0-C1/after/shell-grid.png;target/ux-audit/shots/M0-C1/after/theme-light.png",
+      "baseCommit": "f222909",
+      "finishedAt": "2026-10-23T17:25:39.403Z"
+    },
     {
       "runId": "run-20261024-003547",
       "runNumber": 1,
@@ -33,7 +45,7 @@
           "name": "颜色 token 与明暗等价",
           "priority": 1,
           "dependsOn": [],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint",
             "crates/ui-viewmodels/src/theme.rs"
@@ -48,9 +60,9 @@
             "theme-light"
           ],
           "focus": "颜色令牌是否覆盖全部语义（含成功/共享）；暗/亮两套是否等价；消费点是否仍有 raw hex；soft 变体是否成对；text-3 的使用边界。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-010014",
+          "auditedAtCommit": "f222909",
+          "notes": "[run-20261024-010014] 颜色令牌补齐 ok/shared/soft/badge-ring/tile-veil 并打通明暗注入；text-3 达标 4.5:1；目标健康色与共享/成功语义全部收口到 Theme 令牌。"
         },
         {
           "id": "M0-C2",
@@ -339,7 +351,7 @@
             "target-chip",
             "target-mode",
             "target-label",
-            "target-health-color",
+            "target-health",
             "target-pinned"
           ],
           "states": [
@@ -1578,11 +1590,11 @@
       "title": "成功/共享/健康语义色仍是硬编码十六进制",
       "detail": "appwindow.slint 仍有 #5ac18e（已送达/域共享中）、#be4bdb（共享中）、#ffffffcc（选中描边）、#777b80（目标健康灰）；设计契约要求语义色全部走 Theme token，且成功/共享需要 soft 变体。",
       "evidence": "crates/app-ui/ui/appwindow.slint:192,1557,1559,1573,2898",
-      "status": "open",
+      "status": "fixed",
       "createdRun": 0,
-      "closedRun": null,
-      "fix": "",
-      "guard": ""
+      "closedRun": 2,
+      "fix": "6 处 raw hex 全部收口：已送达=Theme.ok、共享中=Theme.shared、状态点描边=Theme.badge-ring、目标健康灰改 int 枚举取 Theme.text-3；main.rs 的 health_color 第二套色板删除",
+      "guard": "ui_hygiene hex_outside_theme 基线下调到 0（只降不升）"
     },
     {
       "id": "F-002",
@@ -1625,6 +1637,90 @@
       "closedRun": null,
       "fix": "",
       "guard": ""
+    },
+    {
+      "id": "F-005",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "语义色板缺 ok/shared/soft/badge-ring，badge/card-icon 未进运行时令牌",
+      "detail": "Theme 只有 ok-soft，缺 ok（成功）、shared/shared-soft（共享中）与 badge-ring；ThemeTokens 也没有 badge-bg/badge-text/card-icon/tile 相关字段，apply_theme 从不写它们，浅色主题无法等价切换。契约 §1.1 要求成功/共享成对 token。",
+      "evidence": "crates/app-ui/ui/theme.slint:40,50-52,192；crates/ui-viewmodels/src/theme.rs:52-60；crates/app-ui/src/main.rs:2018-2020；截图 theme-light.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "Theme 新增 ok/shared/shared-soft/badge-ring/tile-veil；ThemeTokens 与 apply_theme 补齐 badge-bg/badge-text/card-icon/tile-veil 等字段；暗/浅两套与 theme-light 夹具同步",
+      "guard": "ThemeTokens 字段→apply_theme setter 编译期强绑定；theme-light 夹具显式覆盖全部语义 token"
+    },
+    {
+      "id": "F-006",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "text-3 在抬起面上对比度不达标（暗 3.88:1 / 浅 3.19:1）",
+      "detail": "契约 §5 要求 <18px 正文 ≥4.5:1 且 text-3 在 bg-raised 上必须实测达标；当前暗色 #8a8a8a 对 #2f2f2f 仅 3.88:1，浅色 #8a9199 对 #ffffff 仅 3.19:1，10px 说明文字（设置行、菜单副行）不可读。",
+      "evidence": "crates/app-ui/ui/theme.slint:27；crates/ui-viewmodels/src/theme.rs:87,128；截图 settings-default.png / theme-light.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "text-3 调整为暗 #a6a6a6 / 浅 #62696f，对 bg-raised、hover、overlay 均 ≥4.5:1",
+      "guard": "ui-viewmodels theme 单测 text_3_and_semantic_text_meet_contrast_floor（WCAG 相对亮度）"
+    },
+    {
+      "id": "F-007",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "目标健康色在 Rust 复制第二套语义色板，不随主题",
+      "detail": "main.rs health_color 硬编码 #5ac18e/#e0b84f/#e06c75/#777b80，分别喂给 target-health-color 与 TargetChoiceData.health-color；同一语义色散落 Rust 与 slint 两层，浅色主题 + 运行时令牌无法覆盖，且 appwindow.slint 默认值仍是 raw hex。",
+      "evidence": "crates/app-ui/src/main.rs:139-147,182；crates/app-ui/ui/appwindow.slint:93,192,1764；crates/app-ui/ui/appwindow.slint:891",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "目标健康色改为 UiEnums.target-health 整数枚举，chip 与选择行在 .slint 侧映射 Theme.ok/warn/danger/text-3，删除 main.rs health_color",
+      "guard": "ui_enums 映射单测 + ui_hygiene hex=0；fixtures 同步 target-health"
+    },
+    {
+      "id": "F-008",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "文本/文件瓦片正文压在固定占位色上，浅色主题深字压深底",
+      "detail": "文本卡预览与缺图图标直接用 Theme.text-2/Theme.card-icon 叠在 tile.color 上；tile.color 来自固定调色板（深色 #24282d 或饱和色），浅色主题正文变 #444b52 后与深底对比≈1.9:1，几乎不可读；暗色主题在饱和占位色（如 #f76707）上浅字也只有 1.84:1。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1428-1467；crates/app-ui/src/thumbs.rs:60-62；截图 theme-light.png 的文本卡",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "文本/文件卡新增 Theme.tile-veil 随主题翻转的占位色罩，card-icon 收口为令牌并按明暗取值；正文在两套主题下均可读",
+      "guard": "shell-grid / theme-light 截图逐张复核（before 不可读 → after 可读）"
+    },
+    {
+      "id": "F-009",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "选中勾选图标用纯白压在 accent 上（暗色仅 1.80:1）",
+      "detail": "tile selected 的勾选圆底是 Theme.accent，图标 tint 却写死 white；暗色主题 accent 是浅青 #60cdff，白勾对比 1.80:1，图形状态线索不可辨。应吃 accent-ink（暗色 10.46:1）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1530-1545；截图 shell-grid.png 的 dog.jpg 勾选角标",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "勾选图标 tint 改为 Theme.accent-ink（暗色 10.46:1），不再用纯白压 accent",
+      "guard": "视觉复核 shell-grid 勾选角标；颜色全部走 Theme 令牌"
+    },
+    {
+      "id": "F-010",
+      "componentId": "M0-C1",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "成功/共享语义错配：成功图标用 accent，共享域文字用绿色",
+      "detail": "成功通知底是 ok-soft，图标却用 Theme.accent；共享域行「共享中」用 #5ac18e（成功绿），与瓦片共享紫点同语义不同色。契约要求成功=ok、共享=shared，且状态需配对 soft 变体。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1070-1072,2897-2898；截图 shell-grid.png / before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "成功通知图标改用 Theme.ok；共享域「共享中」改用 Theme.shared，与瓦片共享紫点同语义",
+      "guard": "ui_hygiene hex=0；notice-success / share-domains 截图复核"
     }
   ]
 }

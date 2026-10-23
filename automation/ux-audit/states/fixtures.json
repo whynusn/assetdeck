@@ -46,7 +46,7 @@
         "selected-category": -1,
         "active-asset-id": 2,
         "target-label": "微信 · 文件传输助手",
-        "target-health-color": "#5ac18e",
+        "target-health": 1,
         "target-pinned": true,
         "target-mode": 1,
         "tiles": [
@@ -785,7 +785,7 @@
       "extends": "shell-grid",
       "props": {
         "target-label": "微信 · 文件传输助手",
-        "target-health-color": "#5ac18e",
+        "target-health": 1,
         "target-pinned": true,
         "target-mode": 1
       }
@@ -794,7 +794,7 @@
       "extends": "shell-grid",
       "props": {
         "target-label": "企业微信 · 产品群",
-        "target-health-color": "#e3b457",
+        "target-health": 2,
         "target-pinned": true,
         "target-mode": 2
       }
@@ -803,7 +803,7 @@
       "extends": "shell-grid",
       "props": {
         "target-label": "点击选择聊天窗口",
-        "target-health-color": "#777b80",
+        "target-health": 3,
         "target-pinned": false,
         "target-mode": 0
       }
@@ -819,7 +819,7 @@
             "label": "微信 · 文件传输助手",
             "default-label": "微信 · 文件传输助手",
             "status": "在线",
-            "health-color": "#5ac18e",
+            "health": 1,
             "available": true
           },
           {
@@ -827,7 +827,7 @@
             "label": "企业微信 · 产品群",
             "default-label": "企业微信 · 产品群",
             "status": "需确认",
-            "health-color": "#e3b457",
+            "health": 2,
             "available": true
           },
           {
@@ -835,7 +835,7 @@
             "label": "QQ · 我的电脑",
             "default-label": "QQ · 我的电脑",
             "status": "已关闭",
-            "health-color": "#777b80",
+            "health": 3,
             "available": false
           }
         ]
@@ -1038,7 +1038,7 @@
         "Theme.line-strong": "#c8c8d0",
         "Theme.text": "#1f2328",
         "Theme.text-2": "#444b52",
-        "Theme.text-3": "#8a9199",
+        "Theme.text-3": "#62696f",
         "Theme.accent": "#0b7ec2",
         "Theme.accent-hover": "#0a6faa",
         "Theme.accent-press": "#095d90",
@@ -1049,12 +1049,20 @@
         "Theme.danger-press": "#a92d37",
         "Theme.warn": "#9a6b10",
         "Theme.warn-soft": "#f8efd9",
+        "Theme.ok": "#1f7a4d",
         "Theme.ok-soft": "#e3f2e8",
+        "Theme.shared": "#8730a8",
+        "Theme.shared-soft": "#f4e8f8",
         "Theme.bg-overlay": "#fafafb",
         "Theme.scrim": "#00000033",
         "Theme.label-bar-bg": "#ffffffcc",
         "Theme.label-bar-bg-hover": "#ffffff",
-        "Theme.label-bar-text": "#1f2328"
+        "Theme.label-bar-text": "#1f2328",
+        "Theme.badge-bg": "#00000099",
+        "Theme.badge-text": "#ffffff",
+        "Theme.badge-ring": "#ffffffcc",
+        "Theme.tile-veil": "#ffffffd9",
+        "Theme.card-icon": "#62696f"
       }
     },
     "share-summary": {

@@ -23,3 +23,12 @@
 - 门禁：ui-hygiene=pass(hex 6/font 110/off16/radius 12/off5);capture-check=pass(42 states);state-validate=pass
 - 基线：780dd9a
 
+## run-20261024-010014 · M0-C1 · done
+
+- 组件：颜色 token 与明暗等价
+- 结论：颜色令牌补齐 ok/shared/soft/badge-ring/tile-veil 并打通明暗注入；text-3 达标 4.5:1；目标健康色与共享/成功语义全部收口到 Theme 令牌。
+- Findings：F-001(fixed) 成功/共享/健康语义色仍是硬编码十六进制；F-005(fixed) 语义色板缺 ok/shared/soft/badge-ring，badge/card-icon 未进运行时令牌；F-006(fixed) text-3 在抬起面上对比度不达标（暗 3.88:1 / 浅 3.19:1）；F-007(fixed) 目标健康色在 Rust 复制第二套语义色板，不随主题；F-008(fixed) 文本/文件瓦片正文压在固定占位色上，浅色主题深字压深底；F-009(fixed) 选中勾选图标用纯白压在 accent 上（暗色仅 1.80:1）；F-010(fixed) 成功/共享语义错配：成功图标用 accent，共享域文字用绿色
+- 门禁：slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(hex 0);viewmodels-test=pass;capture-check=pass;visual=pass
+- 截图：target/ux-audit/shots/M0-C1/after/settings-default.png;target/ux-audit/shots/M0-C1/after/shell-grid.png;target/ux-audit/shots/M0-C1/after/theme-light.png
+- 基线：f222909
+

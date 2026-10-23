@@ -4,7 +4,7 @@
   "updatedBy": "init",
   "scope": "crates/app-ui/ui/*.slint",
   "counts": {
-    "hex_outside_theme": 6,
+    "hex_outside_theme": 0,
     "font_size_literals": 110,
     "font_size_off_scale": 16,
     "border_radius_literals": 12,

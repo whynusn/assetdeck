@@ -27,7 +27,7 @@ use ui_viewmodels::{
     DarkThemeProvider, DomainKind, FacetIndex, Filter, InputPointOverride, LightThemeProvider,
     PayloadKind, RealAssetResolver, SearchProvider, SendItem, ShareAction, ShareControlVm,
     ShareRegistry, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode,
-    TargetBarSnapshot, TargetHealth, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps,
+    TargetBarSnapshot, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps,
     ThemeProvider, ThemeTokens, TuningTarget,
 };
 
@@ -136,23 +136,13 @@ fn columns_for(container_width: f32) -> u32 {
         .clamp(MIN_COLUMNS as i64, MAX_COLUMNS as i64) as u32
 }
 
-fn health_color(health: TargetHealth) -> slint::Color {
-    let argb = match health {
-        TargetHealth::Green => 0xFF5AC18E,
-        TargetHealth::Yellow => 0xFFE0B84F,
-        TargetHealth::Red => 0xFFE06C75,
-        TargetHealth::Unknown => 0xFF777B80,
-    };
-    slint::Color::from_argb_encoded(argb)
-}
-
 fn sync_target_bar(
     ui: &AppWindow,
     choices_model: &VecModel<TargetChoiceData>,
     snapshot: TargetBarSnapshot,
 ) {
     ui.set_target_label(snapshot.label.into());
-    ui.set_target_health_color(health_color(snapshot.health));
+    ui.set_target_health(ui_enums::target_health(snapshot.health));
     ui.set_target_pinned(snapshot.pinned);
     let mode = ui_enums::target_bar_mode(snapshot.mode);
     if mode != ui_enums::target_bar_mode(TargetBarMode::ChooseTarget) {
@@ -179,7 +169,7 @@ fn sync_target_bar(
                     } else {
                         "未运行 · 选择后仅复制".into()
                     },
-                    health_color: health_color(choice.health),
+                    health: ui_enums::target_health(choice.health),
                     available,
                 }
             })
@@ -2012,12 +2002,20 @@ fn apply_theme(ui: &AppWindow, tokens: &ThemeTokens) {
     theme.set_danger_press(c(tokens.danger_press));
     theme.set_warn(c(tokens.warn));
     theme.set_warn_soft(c(tokens.warn_soft));
+    theme.set_ok(c(tokens.ok));
     theme.set_ok_soft(c(tokens.ok_soft));
+    theme.set_shared(c(tokens.shared));
+    theme.set_shared_soft(c(tokens.shared_soft));
     theme.set_bg_overlay(c(tokens.bg_overlay));
     theme.set_scrim(c(tokens.scrim));
     theme.set_label_bar_bg(c(tokens.label_bar_bg));
     theme.set_label_bar_bg_hover(c(tokens.label_bar_bg_hover));
     theme.set_label_bar_text(c(tokens.label_bar_text));
+    theme.set_badge_bg(c(tokens.badge_bg));
+    theme.set_badge_text(c(tokens.badge_text));
+    theme.set_badge_ring(c(tokens.badge_ring));
+    theme.set_tile_veil(c(tokens.tile_veil));
+    theme.set_card_icon(c(tokens.card_icon));
 }
 
 /// std-widgets 明暗翻转：写内置 Palette 全局的 color-scheme 属性。

@@ -22,6 +22,11 @@ export global UiEnums {
     out property <int> notice-tone-success: 0;
     out property <int> notice-tone-warning: 1;
     out property <int> notice-tone-error: 2;
+    // 目标健康度：颜色由视图映射到 Theme.ok/warn/danger/text-3。
+    out property <int> target-health-green: 0;
+    out property <int> target-health-yellow: 1;
+    out property <int> target-health-red: 2;
+    out property <int> target-health-unknown: 3;
     out property <int> card-kind-image: 0;
     out property <int> card-kind-video: 1;
     out property <int> card-kind-text: 2;
@@ -90,7 +95,8 @@ export struct TargetChoiceData {
     // 别名覆盖前的默认标签（profile · 窗口标题），重命名弹层的标题行回显用。
     default-label: string,
     status: string,
-    health-color: color,
+    // UiEnums.target-health-*：颜色在视图侧取 Theme 令牌。
+    health: int,
     available: bool,
 }
 
@@ -189,7 +195,7 @@ export component AppWindow inherits Window {
     in property <string> empty-title: "";
     in property <string> empty-hint: "";
     in property <string> target-label: "点击选择聊天窗口";
-    in property <color> target-health-color: #777b80;
+    in property <int> target-health: 3;
     in property <bool> target-pinned: false;
     in property <int> target-mode: 0;
     in property <[TargetChoiceData]> target-choices;
@@ -888,7 +894,10 @@ export component AppWindow inherits Window {
                                 width: 7px;
                                 height: 7px;
                                 border-radius: 3.5px;
-                                background: root.target-health-color;
+                                background: root.target-health == UiEnums.target-health-green ? Theme.ok
+                                    : root.target-health == UiEnums.target-health-yellow ? Theme.warn
+                                    : root.target-health == UiEnums.target-health-red ? Theme.danger
+                                    : Theme.text-3;
                             }
 
                             target-label := Text {
@@ -1069,7 +1078,7 @@ export component AppWindow inherits Window {
                             : Glyph.check;
                         tint: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger
                             : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn
-                            : Theme.accent;
+                            : Theme.ok;
                         width: 14px;
                         height: 14px;
                     }
@@ -1424,6 +1433,14 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // 文本/文件卡没有缩略图，正文直接压占位色；加一层随主题
+                            // 翻转的色罩，保证两套主题下正文对比度都 ≥ 4.5:1。
+                            if tile.kind == UiEnums.card-kind-text || tile.kind == UiEnums.card-kind-other: Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: Theme.tile-veil;
+                            }
+
                             // 文本：中央图标 + 首行预览（文本素材从此可辨识，不再只是色块）。
                             if tile.kind == UiEnums.card-kind-text: VerticalLayout {
                                 width: 100%;
@@ -1539,7 +1556,7 @@ export component AppWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     commands: Glyph.check;
-                                    tint: white;
+                                    tint: Theme.accent-ink;
                                     width: 12px;
                                     height: 12px;
                                 }
@@ -1554,9 +1571,9 @@ export component AppWindow inherits Window {
                                 height: 10px;
                                 border-radius: 5px;
                                 border-width: 2px;
-                                border-color: #ffffffcc;
+                                border-color: Theme.badge-ring;
                                 background: tile.share-badge == UiEnums.share-badge-busy ? Theme.accent
-                                    : tile.share-badge == UiEnums.share-badge-done ? #5ac18e
+                                    : tile.share-badge == UiEnums.share-badge-done ? Theme.ok
                                     : Theme.danger;
                             }
 
@@ -1569,8 +1586,8 @@ export component AppWindow inherits Window {
                                 height: 8px;
                                 border-radius: 4px;
                                 border-width: 2px;
-                                border-color: #ffffffcc;
-                                background: #be4bdb;
+                                border-color: Theme.badge-ring;
+                                background: Theme.shared;
                             }
 
                             tile-touch := TouchArea {
@@ -1761,7 +1778,10 @@ export component AppWindow inherits Window {
                                 width: 8px;
                                 height: 8px;
                                 border-radius: 4px;
-                                background: choice.health-color;
+                                background: choice.health == UiEnums.target-health-green ? Theme.ok
+                                    : choice.health == UiEnums.target-health-yellow ? Theme.warn
+                                    : choice.health == UiEnums.target-health-red ? Theme.danger
+                                    : Theme.text-3;
                             }
 
                             Text {
@@ -2895,7 +2915,7 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
                         Text {
                             text: domain.shared ? "共享中" : "未共享";
-                            color: domain.shared ? #5ac18e : Theme.text-3;
+                            color: domain.shared ? Theme.shared : Theme.text-3;
                             font-size: 11px;
                             vertical-alignment: center;
                         }

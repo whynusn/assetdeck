@@ -21,10 +21,10 @@ export global Theme {
     in-out property <color> line: #383838;
     in-out property <color> line-strong: #4a4a4a;
 
-    // 文本三级：主/次/弱
+    // 文本三级：主/次/弱。text-3 必须对 bg-raised 达 4.5:1（契约 §5）。
     in-out property <color> text: #f4f4f4;
     in-out property <color> text-2: #c9c9c9;
-    in-out property <color> text-3: #8a8a8a;
+    in-out property <color> text-3: #a6a6a6;
 
     // 语义色：强调=fluent 暗色强调蓝，其上文字用黑（同 fluent accent-foreground）
     in-out property <color> accent: #60cdff;
@@ -37,19 +37,26 @@ export global Theme {
     in-out property <color> danger-press: #472a2e;
     in-out property <color> warn: #e3b457;
     in-out property <color> warn-soft: #3a3320;
+    in-out property <color> ok: #5ac18e;
     in-out property <color> ok-soft: #1f3a30;
+    in-out property <color> shared: #c77ae0;
+    in-out property <color> shared-soft: #3a2740;
 
     // 浮层：比抬起面再亮一档，并配描边拉开与内容的层次
     in-out property <color> bg-overlay: #2c2c2c;
     in-out property <color> scrim: #00000066;
 
-    // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值
+    // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值。
     in-out property <color> label-bar-bg: #00000080;
     in-out property <color> label-bar-bg-hover: #000000cc;
     in-out property <color> label-bar-text: #ffffff;
     in-out property <color> badge-bg: #00000099;
     in-out property <color> badge-text: #ffffff;
-    in-out property <color> card-icon: #00000066;
+    // 状态点的对比描边：压在任意缩略图上都要可辨，明暗两套同值。
+    in-out property <color> badge-ring: #ffffffcc;
+    // 文本/文件卡的占位色罩：把底色调向当前主题，保证卡面正文可读。
+    in-out property <color> tile-veil: #000000a6;
+    in-out property <color> card-icon: #a6a6a6;
 
     // 几何
     in-out property <length> radius: 4px;
