@@ -148,6 +148,14 @@ pub fn is_importable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 千牛「快捷短语」CSV 导出候选：扩展名 csv 即候选（表头在导入工序
+/// sample-library 侧校验，不符按不支持文件跳过）。csv 本体不进 MEDIA_TYPES
+/// （不作为普通素材导入），该判定只用于导入入口放行 → 子进程拆解为逐条
+/// 文本素材。
+pub fn is_phrase_csv_candidate(path: &Path) -> bool {
+    ext_of(path).as_deref() == Some("csv")
+}
+
 /// 该扩展名是否可派生浏览缩略图。
 pub fn is_thumbnailable(ext: &str) -> bool {
     by_extension(ext).map(|t| t.thumbnailable).unwrap_or(false)
@@ -227,6 +235,14 @@ mod tests {
         // 大写进入注册表前已被调用方 lowercase（契约在 ext_of）
         assert!(by_extension("JPG").is_none());
         assert!(by_extension("avif").is_none());
+    }
+
+    #[test]
+    fn phrase_csv_candidate_is_extension_only() {
+        assert!(is_phrase_csv_candidate(Path::new("导出/短语.csv")));
+        assert!(is_phrase_csv_candidate(Path::new("x.CSV")));
+        assert!(!is_phrase_csv_candidate(Path::new("x.txt")));
+        assert!(!is_phrase_csv_candidate(Path::new("noext")));
     }
 
     #[test]

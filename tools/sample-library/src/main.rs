@@ -5,6 +5,7 @@
 
 mod library_cmd;
 mod packages;
+mod qianniu_csv;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

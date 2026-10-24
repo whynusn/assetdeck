@@ -122,6 +122,12 @@ pub fn run_import_paths(lines: &[ImportLine], out: &Path, mode: CliMode) -> Resu
         // 文件直接入列；可导入性按 media 注册表判扩展名，不支持 = 静默跳过
         // （R4 拖入语义一致）。
         if line.path.is_file() && !crate::packages::is_emo_archive(&line.path) {
+            // 千牛快捷短语 CSV：先于 media 注册表拦截（csv 本体不可导入），
+            // 拆解为逐条文本素材（编码→标签、分组→分类）后走普通文本导入。
+            if crate::qianniu_csv::is_phrase_csv(&line.path) {
+                explode_phrase_csv_line(line, &mut assets, &mut cleanups);
+                continue;
+            }
             if media::is_importable(&line.path) {
                 let mut asset = ImportedAsset {
                     source: line.path.clone(),
@@ -163,6 +169,44 @@ pub fn run_import_paths(lines: &[ImportLine], out: &Path, mode: CliMode) -> Resu
         let _ = std::fs::remove_dir_all(cleanup);
     }
     result
+}
+
+/// 千牛快捷短语 CSV → 逐条文本素材：编码→标签、分组→分类（D87/D88 既有
+/// 语义），空分组的行继承本清单行的归类决策。拆解产物落临时 txt
+/// （ImportRequest 只认磁盘路径），temp 根进 cleanups——run_import 完成后
+/// 删除，与 .emo 解包同一后置时序。解析失败按不支持文件记账跳过，不拖垮
+/// 整批；拆解成功发 NOTICE 点名行数（弹窗摘要只看得到 1 个散文件）。
+fn explode_phrase_csv_line(
+    line: &ImportLine,
+    assets: &mut Vec<ImportedAsset>,
+    cleanups: &mut Vec<PathBuf>,
+) {
+    let fallback = match &line.directive {
+        ImportDirective::Category(name) => Some(name.as_str()),
+        ImportDirective::Auto | ImportDirective::Inbox => None,
+    };
+    match crate::qianniu_csv::explode_phrase_csv(&line.path, fallback) {
+        Ok(exploded) => {
+            let name = line
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?");
+            let mut message = format!(
+                "提示：快捷短语「{name}」拆解为 {} 条文本素材导入",
+                exploded.assets.len()
+            );
+            if exploded.skipped_rows > 0 {
+                message.push_str(&format!("（{} 行无正文已跳过）", exploded.skipped_rows));
+            }
+            println!("NOTICE\t{message}");
+            assets.extend(exploded.assets);
+            cleanups.push(exploded.temp_root);
+        }
+        Err(error) => {
+            eprintln!("warn: 跳过快捷短语 CSV {}: {error}", line.path.display());
+        }
+    }
 }
 
 /// `--import-paths <file> --library <root> [--mode fast|background]` 分支。

@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use media::is_importable;
+use media::{is_importable, is_phrase_csv_candidate};
 // 壳层（app-ui）不直接依赖 store：待分类名经此再导出，内部引用同用此名。
 pub use store::INBOX_CATEGORY;
 
@@ -114,7 +114,12 @@ pub fn plan_import(entries: &[ImportEntry]) -> ImportPlan {
             continue;
         }
         let kind = group_kind_of(entry);
-        if kind == GroupKind::Loose && !is_importable(&entry.path) {
+        // csv 不在 media 注册表（csv 本体不作为素材导入）：千牛快捷短语导出
+        // 在导入工序按表头拆解为逐条文本素材，这里放行候选让清单行能生成。
+        if kind == GroupKind::Loose
+            && !is_importable(&entry.path)
+            && !is_phrase_csv_candidate(&entry.path)
+        {
             continue;
         }
         if let Some(group) = plan.groups.iter_mut().find(|g| g.kind == kind) {
