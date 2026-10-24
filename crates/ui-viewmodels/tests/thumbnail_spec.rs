@@ -43,6 +43,7 @@ fn scaffold(tag: &str) -> PathBuf {
                 file_name: file_name.to_string(),
                 rel_path: format!("objects/{uuid}/{file_name}"),
                 category: None,
+                category_id: None,
                 tags: vec![],
                 size_bytes: 1,
                 created_at: index as i64,

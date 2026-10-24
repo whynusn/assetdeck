@@ -1,6 +1,7 @@
 //! ViewModel 层：桥接 UI 与核心 crates，纯 Rust 可全量单测（禁 slint 依赖，TDD 第一原则落点）。
 
 pub mod catalog_loader;
+pub mod category_rows;
 pub mod classify;
 pub mod grid_vm;
 pub mod layout;
@@ -21,9 +22,14 @@ pub use catalog_loader::{
     load_library_catalog, load_real_library, CatalogError, FacetEntry, LibraryFacets,
     MaterializedAsset, RealAssetResolver,
 };
-pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent};
-pub use layout::{masonry_layout, Rect};
-pub use search::{FtsNameSource, HybridSearchProvider, SearchError, SearchProvider, SearchScope};
+pub use category_rows::CategoryRows;
+pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent, TEXT_TILE_HEIGHT};
+pub use layout::{column_width, masonry_layout, masonry_layout_mixed, LayoutItem, FULL_ROW_GAP, Rect};
+pub use search::{
+    fit_search_snippet, fts_query_eligible, name_zone_px, split_search_snippet, FtsNameSource,
+    HybridSearchProvider, SearchError, SearchProvider, SearchScope, SNIPPET_QUERY_LIMIT,
+    TEXT_NAME_ZONE_FRACTION, TEXT_NAME_ZONE_MAX, TEXT_NAME_ZONE_MIN,
+};
 pub use settings::{
     settings_path, AppSettings, InputPointOverride, SettingKind, SettingSpec, SettingView,
     SETTING_SPECS, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH,

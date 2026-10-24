@@ -4,13 +4,14 @@
 //! 线程同时 enqueue / 终态查询，单连接必须串行化；锁粒度是「单条语句到
 //! 单批事务」，跨一批的巨型事务（批量导入落库）不会长期霸占连接。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 7;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 9;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -98,11 +99,30 @@ fn io_error(e: rusqlite::Error) -> std::io::Error {
     std::io::Error::other(e)
 }
 
+/// 分类名 → 稳定 id（不存在则创建）。名称解析的唯一落点；调用方须持连接锁。
+/// `ON CONFLICT(name) DO NOTHING` 让并发/重复调用保持幂等，随后按唯一索引取 id。
+fn ensure_category_on(conn: &Connection, name: &str) -> Result<u32> {
+    conn.execute(
+        "INSERT INTO categories(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+        params![name],
+    )?;
+    let id: i64 = conn.query_row(
+        "SELECT id FROM categories WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    Ok(id as u32)
+}
+
 pub struct AssetMeta {
     pub uuid: String,
     pub file_name: String,
     pub rel_path: String,
+    /// 分类显示名（读路径由 categories 表 JOIN 回填；写入侧的寻址字段）。
     pub category: Option<String>,
+    /// 分类外键（D87）：NULL = 系统收件箱。读路径回填；写入时 Some 直接使用，
+    /// 为 None 则按 [`Self::category`] 名称 ensure（兼容只按名寻址的调用方）。
+    pub category_id: Option<u32>,
     pub tags: Vec<String>,
     pub size_bytes: i64,
     pub created_at: i64,
@@ -131,6 +151,11 @@ pub struct SearchHit {
     pub uuid: String,
     pub file_name: String,
 }
+
+/// FTS snippet 命中标记（Unicode 私有区，正文不可能出现）：`content_snippets`
+/// 返回的片段里每个命中词前后各插一枚，UI 侧据此切段做高亮（D88）。
+pub const SNIPPET_MARK_START: char = '\u{E000}';
+pub const SNIPPET_MARK_END: char = '\u{E001}';
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS assets (
@@ -205,6 +230,68 @@ CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash);
 /// 改名（见 `rename_category`），不能按 deleted 过滤。
 const MIGRATION_V7: &str = "
 CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category);
+";
+
+/// v8：分类一等化（D87）。名字从「身份」降为「可改属性」，引用方持有稳定
+/// 自增 id：重命名只改 categories 一行，O(1)；删除仍需把引用行置 NULL（外键
+/// 语义），但走索引且只动该分类的行。
+///
+/// 收件箱不进表：身份仍是 `category_id IS NULL`（D85），AUTOINCREMENT 从 1 起，
+/// 0 保留给视图层 `CategoryId(0)`。先建表 + 加列，回填后再删旧列（旧索引必须
+/// 先 DROP，SQLite 不允许删除被索引的列）。
+const MIGRATION_V8_CREATE: &str = "
+CREATE TABLE IF NOT EXISTS categories (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+ALTER TABLE assets ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;
+";
+
+const MIGRATION_V8_FINISH: &str = "
+DROP INDEX IF EXISTS idx_assets_category;
+ALTER TABLE assets DROP COLUMN category;
+CREATE INDEX IF NOT EXISTS idx_assets_category_id ON assets(category_id);
+";
+
+/// v9：FTS 正文检索（D88）。文本素材按正文内容检索，命中片段回填卡片预览。
+///
+/// 结构上两件事：
+/// 1. `assets.text_content` 列 = 正文事实源（归一化 UTF-8 的前 64KB，由
+///    library 层写入——store 不知道文件路径，分层禁越）。FTS 表增加 content
+///    列，触发器直接读该列：导入 / 改名 / 正文回写都是「单行 UPDATE + 触发器」，
+///    无需调用方关心 FTS 行。
+/// 2. FTS 行号锚定 `assets.rowid`：旧触发器按 uuid 定位 FTS 行（虚拟表上
+///    `WHERE uuid = ?` 是全表扫描），正文回填这种逐行写法会退化成平方级；
+///    rowid 锚定后 DELETE/INSERT 全是点操作，JOIN 也从 uuid 等值降为 rowid。
+///
+/// 存量库正文由 library 层一次性回填（`store_meta` 旗标防重入）；迁移本身只
+/// 重建 name 索引，语义与旧库完全一致。整段套事务：中途失败整体回滚下次重试。
+const MIGRATION_V9: &str = "
+ALTER TABLE assets ADD COLUMN text_content TEXT;
+DROP TRIGGER IF EXISTS assets_fts_ai;
+DROP TRIGGER IF EXISTS assets_fts_au;
+DROP TRIGGER IF EXISTS assets_fts_ad;
+DROP TABLE IF EXISTS assets_fts;
+CREATE VIRTUAL TABLE IF NOT EXISTS assets_fts USING fts5(uuid UNINDEXED, name, content, tokenize='trigram');
+CREATE TRIGGER assets_fts_ai AFTER INSERT ON assets BEGIN
+  INSERT INTO assets_fts(rowid, uuid, name, content)
+  VALUES (new.rowid, new.uuid, new.file_name, COALESCE(new.text_content, ''));
+END;
+CREATE TRIGGER assets_fts_au AFTER UPDATE OF file_name, text_content ON assets BEGIN
+  DELETE FROM assets_fts WHERE rowid = old.rowid;
+  INSERT INTO assets_fts(rowid, uuid, name, content)
+  VALUES (old.rowid, new.uuid, new.file_name, COALESCE(new.text_content, ''));
+END;
+CREATE TRIGGER assets_fts_ad AFTER DELETE ON assets BEGIN
+  DELETE FROM assets_fts WHERE rowid = old.rowid;
+END;
+CREATE TABLE IF NOT EXISTS store_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+INSERT INTO assets_fts(rowid, uuid, name, content)
+SELECT rowid, uuid, file_name, COALESCE(text_content, '') FROM assets;
 ";
 
 #[derive(Debug)]
@@ -291,6 +378,52 @@ impl Store {
         if found < 7 {
             conn.execute_batch(MIGRATION_V7)?;
         }
+        if found < 8 {
+            // D87：建表 → 按名回填 → 删旧列，三段落在一个事务里。中途失败
+            // 整体回滚（旧列还在，下次打开重试），不会留下「半迁移」库。
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let outcome = (|| -> Result<()> {
+                conn.execute_batch(MIGRATION_V8_CREATE)?;
+                // 历史字面量收件箱（v6 已折成 NULL）与空分类不建行；名字升序
+                // 落 id，让迁移后的侧栏顺序确定可测。
+                conn.execute(
+                    "INSERT INTO categories(name) SELECT DISTINCT category FROM assets
+                     WHERE category IS NOT NULL AND category <> ?1 ORDER BY category",
+                    params![INBOX_CATEGORY],
+                )?;
+                conn.execute(
+                    "UPDATE assets SET category_id =
+                        (SELECT id FROM categories WHERE name = assets.category)
+                     WHERE category IS NOT NULL AND category <> ?1",
+                    params![INBOX_CATEGORY],
+                )?;
+                conn.execute_batch(MIGRATION_V8_FINISH)?;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
+        if found < 9 {
+            // v9（D88）：FTS 正文检索。事务包裹与 v8 同款——中途失败整体
+            // 回滚（旧表还在，下次打开重试），不会留下「半迁移」库。
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            let outcome = (|| -> Result<()> {
+                conn.execute_batch(MIGRATION_V9)?;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+        }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
         }
@@ -344,9 +477,11 @@ impl Store {
         }
         let conn = self.lock();
         conn.execute_batch("BEGIN IMMEDIATE")?;
+        // 同一批内同一分类只 ensure 一次；事务级缓存不会跨批陈旧。
+        let mut category_cache: HashMap<String, u32> = HashMap::new();
         let outcome = metas
             .iter()
-            .try_for_each(|meta| write_asset(&conn, meta))
+            .try_for_each(|meta| write_asset_cached(&conn, meta, &mut category_cache))
             .and_then(|_| conn.execute_batch("COMMIT").map_err(StoreError::from));
         match outcome {
             Ok(()) => Ok(()),
@@ -367,8 +502,10 @@ impl Store {
     pub fn get_asset(&self, uuid: &str) -> Result<Option<AssetMeta>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
-             FROM assets WHERE uuid = ?1",
+            "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+             FROM assets a
+             LEFT JOIN categories c ON c.id = a.category_id
+             WHERE a.uuid = ?1",
         )?;
         let mut rows = stmt.query(params![uuid])?;
         let Some(row) = rows.next()? else {
@@ -387,6 +524,7 @@ impl Store {
             content_hash: row.get(8)?,
             width: row.get(9)?,
             height: row.get(10)?,
+            category_id: row.get(11)?,
         };
         drop(rows);
         drop(stmt);
@@ -403,13 +541,14 @@ impl Store {
     /// 查询以引号短语形式传入，规避 FTS5 查询语法对标点/保留字的解析。
     /// D46 纪律：软删不触 file_name、FTS 行保留，所以这里必须 JOIN assets
     /// 过滤 `deleted = 0`——回收站素材永不出现在搜索结果。
+    /// v9 起JOIN 走 rowid 锚定（FTS 行号 = assets 行号，见 MIGRATION_V9）。
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let conn = self.lock();
-        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+        let phrase = fts_phrase(query);
         let mut stmt = conn.prepare(
             "SELECT a.uuid, a.file_name
              FROM assets_fts
-             JOIN assets a ON a.uuid = assets_fts.uuid
+             JOIN assets a ON a.rowid = assets_fts.rowid
              WHERE assets_fts MATCH ?1 AND a.deleted = 0
              LIMIT ?2",
         )?;
@@ -424,6 +563,70 @@ impl Store {
             out.push(hit?);
         }
         Ok(out)
+    }
+
+    /// 正文命中片段（D88）：返回 (uuid, 带命中标记的片段文本)。
+    ///
+    /// 只回「正文列有命中」的行——纯文件名命中的行 snippet 无标记，这里
+    /// 过滤掉，调用方据此回落头部预览。独立于 [`Self::search`] 限流：UI 只
+    /// 渲染可视窗口的文本卡，片段供前 N 条命中足够，深翻页的命中回落预览。
+    /// 标记常量见 [`SNIPPET_MARK_START`] / [`SNIPPET_MARK_END`]。
+    pub fn content_snippets(&self, query: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        let conn = self.lock();
+        let phrase = fts_phrase(query);
+        let mut stmt = conn.prepare(
+            "SELECT assets_fts.uuid,
+                    snippet(assets_fts, 2, char(57344), char(57345), '…', 12) AS snip
+             FROM assets_fts
+             JOIN assets a ON a.rowid = assets_fts.rowid
+             WHERE assets_fts MATCH ?1 AND a.deleted = 0
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![phrase, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uuid, snippet) = row?;
+            if snippet.contains(SNIPPET_MARK_START) {
+                out.push((uuid, snippet));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 写入文本正文（D88）：`assets.text_content` 是事实源，FTS 行由
+    /// v9 触发器同步（UPDATE OF text_content → rowid 点操作重写）。
+    /// 资产不存在返回 false（窗口期竞态，调用方可忽略）。
+    pub fn set_text_content(&self, uuid: &str, content: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE assets SET text_content = ?1 WHERE uuid = ?2",
+            params![content, uuid],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// KV 旗标（`store_meta`，v9）：存量库回填防重入等一次性标记。
+    pub fn set_meta_flag(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO store_meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meta_flag(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT value FROM store_meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
     }
 
     pub fn delete_asset(&self, uuid: &str) -> Result<bool> {
@@ -522,28 +725,40 @@ impl Store {
     /// 窄列改分类（D48「移动到分类」/D50「统一归入」的唯一写口）。
     ///
     /// 同 set_dimensions 的理由：派生/UI 侧只改这一个字段，不读出整行再写回
-    /// （并发下旧快照会覆盖新字段）。`None` = 归待分类（category 置 NULL）；
+    /// （并发下旧快照会覆盖新字段）。`None` = 归待分类（category_id 置 NULL）；
     /// 传入字面量 `INBOX_CATEGORY` 同样归 NULL（D85：收件箱没有字面量形态）。
     pub fn set_category(&self, uuid: &str, category: Option<&str>) -> Result<bool> {
-        let category = category.filter(|name| *name != INBOX_CATEGORY);
+        let name = category.filter(|name| *name != INBOX_CATEGORY);
         let conn = self.lock();
+        // D87：改写外键 id，而非名字。uuid 不存在时不创建 orphan 分类。
+        if name.is_some() {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assets WHERE uuid = ?1)",
+                params![uuid],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Ok(false);
+            }
+        }
+        let category_id = name
+            .map(|name| ensure_category_on(&conn, name))
+            .transpose()?;
         let n = conn.execute(
-            "UPDATE assets SET category = ?2 WHERE uuid = ?1",
-            params![uuid, category],
+            "UPDATE assets SET category_id = ?2 WHERE uuid = ?1",
+            params![uuid, category_id],
         )?;
         Ok(n > 0)
     }
 
-    /// 分类重命名：单条 UPDATE 批量改写引用旧名的资产行。
+    /// 分类重命名：改写 categories 表的一行，O(1)（D87）。
     ///
-    /// 分类不是独立表（D3：分面按资产元数据聚合），「改名」即改写所有引用行。
-    /// 语义上是 O(k)（k = 该分类下的行数），不是 O(1) 的目录项改名；v7 起
-    /// `idx_assets_category` 让定位行不再全表扫描（见 MIGRATION_V7）。
-    /// **含回收站行**——回收站素材的 category 同步改，恢复后语义一致。
-    /// 新名与旧名相同是合法 no-op（返回 0，不执行 UPDATE）；新名已存在则拒绝
-    /// （否则静默合并两个分类，用户无法撤销）。
-    /// **收件箱保留名两侧都拒绝**（D85）：它由 `category IS NULL` 定义，
-    /// 既不能被改名，也不能被别的分类改成这个名字。
+    /// 旧实现（D86 前）是 `UPDATE assets SET category=? WHERE category=?` 改写全行，
+    /// 语义 O(k)。分类成独立表后，「改名」只改目录行；引用方拿 id，不动行。
+    /// 返回被引用的行数（含回收站行）：保持原「改写了多少素材」的进度口径
+    /// （调用方据此回填进度条终点，不影响改名是否完成）。
+    /// **收件箱两侧都拒绝**（D85）：它由 `category_id IS NULL` 定义，既不可改名
+    /// 也不可被别的分类改名成这个名字。
     pub fn rename_category(&self, old: &str, new: &str) -> Result<usize> {
         if old == INBOX_CATEGORY || new == INBOX_CATEGORY {
             return Err(StoreError::ReservedInbox);
@@ -552,37 +767,121 @@ impl Store {
             return Ok(0);
         }
         let conn = self.lock();
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM assets WHERE category = ?1)",
-            params![new],
-            |row| row.get(0),
-        )?;
-        if exists {
-            return Err(StoreError::CategoryExists(new.to_string()));
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let old_id: Option<u32> = conn
+                .query_row(
+                    "SELECT id FROM categories WHERE name = ?1",
+                    params![old],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(old_id) = old_id else {
+                return Ok(0);
+            };
+            let taken: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM categories WHERE name = ?1)",
+                params![new],
+                |r| r.get(0),
+            )?;
+            if taken {
+                return Err(StoreError::CategoryExists(new.to_string()));
+            }
+            let refs: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM assets WHERE category_id = ?1",
+                params![old_id],
+                |r| r.get(0),
+            )?;
+            conn.execute(
+                "UPDATE categories SET name = ?1 WHERE id = ?2",
+                params![new, old_id],
+            )?;
+            Ok(refs as usize)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        let n = conn.execute(
-            "UPDATE assets SET category = ?1 WHERE category = ?2",
-            params![new, old],
-        )?;
-        Ok(n)
     }
 
-    /// 删除分类：引用该名的资产行 category 置 NULL（读取侧 COALESCE 显示为
-    /// 「待分类」），素材本身与对象文件不动。**含回收站行**（同上，恢复后
-    /// 不复活已删分类）。返回改写的行数。
+    /// 删除分类：引用该名的资产行 category_id 置 NULL（读取侧归待分类），
+    /// 素材本身与对象文件不动。**含回收站行**，返回改写行数。
     ///
-    /// 收件箱自身不可删（D85）：它不是一条分类，`clear_category(INBOX)`
-    /// 属于调用方错误，直接拒绝而不是静默 no-op。
+    /// 行内 `ON DELETE SET NULL` 也能完成一致性，但显式事务能统计影响行数
+    /// （用于进度回填）；删除分类行本身。
+    /// **收件箱不可删**（D85）：它不是一条分类，`clear_category(INBOX)` 直接拒绝。
     pub fn clear_category(&self, name: &str) -> Result<usize> {
         if name == INBOX_CATEGORY {
             return Err(StoreError::ReservedInbox);
         }
         let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE assets SET category = NULL WHERE category = ?1",
-            params![name],
-        )?;
-        Ok(n)
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let id: Option<u32> = conn
+                .query_row(
+                    "SELECT id FROM categories WHERE name = ?1",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(0);
+            };
+            let refs: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM assets WHERE category_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            conn.execute(
+                "UPDATE assets SET category_id = NULL WHERE category_id = ?1",
+                params![id],
+            )?;
+            conn.execute("DELETE FROM categories WHERE id = ?1", params![id])?;
+            Ok(refs as usize)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// 分类名 → 稳定 id（不存在则创建）。导入/移动只按名寻址，id 在 store
+    /// 边界解析；`INBOX_CATEGORY` 是系统项而非真分类，拒绝创建。
+    pub fn ensure_category(&self, name: &str) -> Result<u32> {
+        if name == INBOX_CATEGORY {
+            return Err(StoreError::ReservedInbox);
+        }
+        let conn = self.lock();
+        ensure_category_on(&conn, name)
+    }
+
+    /// 全部命名分类（含暂时没有素材的空分类），`(id, name)` 按名升序。
+    ///
+    /// 装载侧据此建侧栏条目：分类是一等实体（D87），空分类仍应可见可归入，
+    /// 不能像 D86 前那样只从资产行的去重名集合里反推。
+    pub fn list_categories(&self) -> Result<Vec<(u32, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT id, name FROM categories ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)? as u32, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// 窄列改名（D48 重命名）。UPDATE file_name 自动触发 FTS 重排（v1 触发器），
@@ -607,14 +906,16 @@ impl Store {
     /// 列出去重后的分类及其计数（分面视图入口），**排除回收站**（D46：回收站
     /// 素材不占分类计数）。
     ///
-    /// `category IS NULL` 显示的 `INBOX_CATEGORY` 是**只读映射**（D85）：
-    /// 库内不再存该名字面量，收件箱身份恒为 NULL。
+    /// `category_id IS NULL` 显示的 `INBOX_CATEGORY` 是**只读映射**（D85）：
+    /// 库内不再存该名字面量，收件箱身份恒为 NULL。名字来自 categories JOIN；
     /// 结果按分类名升序，确定性可测。
     pub fn distinct_categories(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT COALESCE(category, ?1) AS name, COUNT(*)
-             FROM assets WHERE deleted = 0 GROUP BY name ORDER BY name",
+            "SELECT COALESCE(c.name, ?1) AS name, COUNT(*)
+             FROM assets a
+             LEFT JOIN categories c ON c.id = a.category_id
+             WHERE a.deleted = 0 GROUP BY name ORDER BY name",
         )?;
         let rows = stmt.query_map(params![INBOX_CATEGORY], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -769,10 +1070,10 @@ impl Store {
     where
         F: FnMut(AssetMeta),
     {
-        const SQL_ALL: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
-             FROM assets ORDER BY uuid";
-        const SQL_ACTIVE: &str = "SELECT uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height
-             FROM assets WHERE deleted = 0 ORDER BY uuid";
+        const SQL_ALL: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+             FROM assets a LEFT JOIN categories c ON c.id = a.category_id ORDER BY a.uuid";
+        const SQL_ACTIVE: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+             FROM assets a LEFT JOIN categories c ON c.id = a.category_id WHERE a.deleted = 0 ORDER BY a.uuid";
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(if only_active { SQL_ACTIVE } else { SQL_ALL })?;
         let mut tag_stmt =
@@ -792,6 +1093,7 @@ impl Store {
                 content_hash: row.get(8)?,
                 width: row.get(9)?,
                 height: row.get(10)?,
+                category_id: row.get(11)?,
             };
             let tag_rows = tag_stmt.query_map(params![meta.uuid], |row| row.get::<_, String>(0))?;
             for tag in tag_rows {
@@ -826,15 +1128,50 @@ impl Store {
     }
 }
 
+/// FTS5 查询短语构造：引号包裹规避查询语法解析（search 与 content_snippets
+/// 共用，防止两处查询口径漂移）。
+fn fts_phrase(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
 /// 单行写入的具体 SQL 序列（静态化避免 Mutex 重入）；调用方必须已持锁。
 pub fn write_asset(conn: &Connection, meta: &AssetMeta) -> Result<()> {
+    let mut cache = HashMap::new();
+    write_asset_cached(conn, meta, &mut cache)
+}
+
+/// 带「分类名 → id」缓存的写入实现：批量 upsert 共用一份缓存，同一分类
+/// 只在首批付出一次 ensure；缓存作用域 = 一次调用/一个事务，不存在陈旧 id。
+fn write_asset_cached(
+    conn: &Connection,
+    meta: &AssetMeta,
+    category_cache: &mut HashMap<String, u32>,
+) -> Result<()> {
+    let category_id = match meta.category_id {
+        Some(id) => Some(id),
+        None => match meta.category.as_deref() {
+            // D85：收件箱身份是 NULL，字面量入库会被折成 NULL（防御旧调用方）。
+            Some(name) if name != INBOX_CATEGORY => {
+                let id = match category_cache.get(name) {
+                    Some(id) => *id,
+                    None => {
+                        let id = ensure_category_on(conn, name)?;
+                        category_cache.insert(name.to_string(), id);
+                        id
+                    }
+                };
+                Some(id)
+            }
+            _ => None,
+        },
+    };
     let n = conn.prepare_cached(
-        "INSERT INTO assets (uuid, file_name, rel_path, category, size_bytes, created_at, imported_at, phash, content_hash, width, height)
+        "INSERT INTO assets (uuid, file_name, rel_path, category_id, size_bytes, created_at, imported_at, phash, content_hash, width, height)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(uuid) DO UPDATE SET
            file_name = excluded.file_name,
            rel_path = excluded.rel_path,
-           category = excluded.category,
+           category_id = excluded.category_id,
            size_bytes = excluded.size_bytes,
            created_at = excluded.created_at,
            imported_at = excluded.imported_at,
@@ -847,7 +1184,7 @@ pub fn write_asset(conn: &Connection, meta: &AssetMeta) -> Result<()> {
         meta.uuid,
         meta.file_name,
         meta.rel_path,
-        meta.category,
+        category_id,
         meta.size_bytes,
         meta.created_at,
         meta.imported_at,

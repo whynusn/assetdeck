@@ -1173,6 +1173,28 @@ if (click_count % 2) == 1 {
 
 **验证**：ui-viewmodels / platform / app-ui `cargo check` 全绿；store 测试断言跟随 `SUPPORTED_SCHEMA_VERSION` 常量，v7 迁移自动纳入。UI 布局为静态定位/对齐改动，真机渲染验收待做。
 
+### D87 分类一等化：`categories` 表 + `assets.category_id`（schema v8，2026-10-24）
+
+- **问题（用户提出）**：D85/D86 已把收件箱收敛为 NULL 哨兵、把改名代价从 O(n) 降到 O(log n + k)，但分类的身份仍是「资产行上的一个字符串」——名字既是显示名又是身份。这带来三个固有代价：① 改名仍要改写所有引用行（O(k)）；② 引用方没有任何稳定凭据，装载侧只能按遍历序临时分配 CategoryId，任何库变更都要整体重排（D84/D86 反复出现「重载后回落全部」的补丁）；③ 分类不能存在于没有素材的时刻（空分类消失），排序/嵌套/封面等一等实体能力无从落地。
+- **决策（用户拍板）**：分类升为独立表，名字从「身份」降为「可改属性」，引用方持有不可变自增 id。**收件箱不进表**——它仍是 `category_id IS NULL`（D85 语义原样保留，AUTOINCREMENT 从 1 起、0 保留给视图层 `CategoryId(0)`）。
+- **schema（v8）**：`categories(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL DEFAULT (unixepoch()))`；`assets` 增 `category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`，随后删旧列 `category`。迁移三段（建表加列 → 按名去重回填 → 收尾删列）包在一个 `BEGIN IMMEDIATE` 事务里，中途失败整体回滚，不留半迁移库。**顺序约束**：删列前必须先 `DROP INDEX idx_assets_category`（SQLite 不允许删除被索引的列），收尾再建 `idx_assets_category_id`。
+- **写入语义**：`set_category` 解析名→id（`ensure_category_on`：`INSERT … ON CONFLICT(name) DO NOTHING` + SELECT，幂等）后只改一个外键；`upsert_assets` 整批共享一份「名→id」缓存，同一分类只 ensure 一次。`AssetMeta` 增 `category_id: Option<u32>`：读路径由 JOIN 回填（`category` 仍带出显示名），写入时给了 id 就直接用、只给名字则按名 ensure——**外部协议（导入清单 `category:<名>`、`.emo`、用户脚本）继续按名寻址，id 在 store 边界解析**，协议零改动。
+- **改名变 O(1)**：`UPDATE categories SET name=?1 WHERE id=?2` 单行，引用方一行不动（D86 记的 O(k) 彻底消失）。删除仍需把引用行置 NULL（外键语义，`ON DELETE SET NULL` 或显式事务），代价 O(该分类引用行数) 不可消除，但走索引且只动该分类的行；两处都保留「收件箱两侧拒绝」（`StoreError::ReservedInbox`）与「同名拒绝」（`StoreError::CategoryExists`）护栏。
+- **稳定 id 贯通装载与 UI**：`Store::list_categories()` 枚举全部分类（含暂时没有素材的空分类——分类独立于引用而存在）；`load_real_library` 直接用 `meta.category_id`（`None` → `CategoryId(0)` 收件箱），不再按遍历序分配，故**重载前后 CategoryId 恒定**。侧栏改为显式映射：`CategoryRows`（`ui-viewmodels`，`Vec<Option<CategoryId>>` 语义，行 0「全部」= None）与条目表同序，`apply_filter` 遇已失效 id（分类被删）自行归一为「全部」——D84/D86 那两处「重命名/删除后强制回落」的补丁因此删除。
+- **渲染契约（易错，勿改）**：Slint 侧栏高亮判据是 `(i - 1) == selected-category`，故 `selected-category` 的口径是**分类序号（模型下标减一）**、与「全部」共占 -1，而不是模型下标。这一加减收在 [`CategoryRows`] 的 `id_at` / `index_of` 里并有 5 项单测锁定（含稀疏 id 往返、收件箱占普通行）——壳层只查表、不做算术，勿把模型下标直接塞进该属性。
+- **验证**：store 新增 5 项（v7→v8 原地迁移、改名后 id 稳定、空分类存活至显式删除、按名写入幂等、收件箱不建行）、ui-viewmodels（`facets_spec` 新增改名后 id 恒定 + 空分类列出；`category_rows` 5 项映射单测）、index / library / sample-library 全绿；v7 迁移用例直接断言 `SELECT category` 报 no such column，重开库幂等。
+
+### D88 文本素材正文卡：单行预览 + 正文全文检索 + 命中片段高亮（schema v9，2026-10-24）
+
+- **问题（用户提出）**：txt 素材卡此前是随机色块（id%8 调色板）+ 随机占位高度（id 取模公式）+ 图标与首行 48 字预览，看不到正文；且 FTS 只有 file_name 列，按正文内容检索无从谈起。
+- **决策（用户拍板）**：txt 卡改**全宽行正文卡**——独占一行横贯瀑布流整个显示区域宽度（不参与分列），全类统一高度（`TEXT_TILE_HEIGHT = 28px`），默认显示正文开头、放不下 elide；搜索命中正文时该卡内容切换为**命中词附近片段**并高亮（多处命中全亮，首处保底是底线）。正文检索是 v1 新能力：FTS 加 content 列，**正文全文入索引、单文件 64KB 帽**（trigram 索引约 1.5~2 倍膨胀，帽把单文件索引代价钉在 ~150KB，约 2 万汉字覆盖正常笔记）；存量库一次性回填。trigram 限制照旧继承（2 字关键词搜不到，v1 不动分词器）。
+- **schema（v9）**：`assets.text_content` 列 = 正文事实源（library 写，store 不知道文件路径）；`assets_fts` 加 content 列整体重建，触发器直接读该列（导入/改名/正文回写都是单行 UPDATE + 触发器）；**FTS 行号锚定 `assets.rowid`**——旧触发器按 uuid 定位 FTS 行是虚拟表全表扫描，rowid 锚定后 DELETE/INSERT/JOIN 全是点操作，逐行正文回填才有 O(log n) 路径；`store_meta` KV 表承载回填防重入旗标。
+- **渲染（1.17.1 布局坑的正面硬刚）**：布局器里 Text 的 min 恒为文本 preferred（`min-width: 0` 压不动，见 appwindow 目标提示注释）——分段高亮在**数据侧按像素预算裁剪**（`fit_search_snippet`：CJK 1.0em/其余 0.55em 估宽，命中段拦腰截断时降级为普通文本防残词误导，尾部补省略号），slint 侧「Rectangle 绑 preferred-width + 内层 Text elide」做残余误差兜底。片段查询独立限流 200 条（UI 只渲染可视窗口文本卡），深翻页命中回落头部预览。
+- **复盘（用户真机打回两条，当日修正）**：①「占满列宽」被实现成单列宽——用户要的是横贯整个瀑布流显示区域的**全宽行**，布局层新增 `masonry_layout_mixed` + `LayoutItem::FullRow`（独占整行：起点取所有列最低底边、收笔把全部列压回同一底边，输出序 = ids 序；原 `masonry_layout` 变纯 Tile 薄封装）。②贴底名条把 28px 文本行整个盖住，正文不可见——名条与右上角徽标对文本卡退场，名改**行内前置**（file-text 图标 + 文件名 ≤30% 内宽 elide、text-3 退居次要，正文 text-2 作主角），片段预算 = 内宽 − 行内链路 27px − 名预留（`name_reserve_px` 估宽 ×1.1 保守、钳 30% 上限，slint 侧 preferred-width 精确值兜残差）。
+- **复盘二轮（真机再看，当日修正）**：排版按主流列表行（list-row）准则重整——①连续文本行由布局层 `FULL_ROW_GAP = 6px` 紧排构成「列表块」，与图片网格交界保持 masonry gap 12px（间距本身区分同组/换组，格式塔邻近原则）；②行圆角降 4px 档（`Theme.radius`，28px 行配 8px 圆角显药丸感）；③行内改「图标 + **固定宽名区**（卡宽 18% 钳 [150,240]px，`name_zone_px` 与 slint 侧同公式，不随单行名字长短变化）+ 1px 竖分隔线（line-strong，坐落 8px 区距正中）+ 正文」三区制——正文永远从同一 x 起步，表格化对齐扫读，替代首版「按名字估宽」导致每行正文起点漂移的散排；④字级从 label(11px) 升 body(12px)，名 text-3 + medium 字重、正文 text-2，深浅分区替代「凑近猜」。
+- **片段供给**：`Store::content_snippets` 用 FTS5 `snippet()`（标记 U+E000/U+E001 私有区）只回正文命中的行——纯文件名命中无片段，UI 自然回落头部预览；`Filter::NameIn` 白名单语义不变（名命中 ∪ 正文命中）。
+- **验证**：store 37 项（新增正文命中/片段标记、upsert 改名保留正文、meta 旗标、v8→v9 原地迁移幂等）、library 29 项、ui-viewmodels 全绿（新增 grid_text_tile_spec：文本卡跨列宽恒高、图片卡占位比不受伤、片段表进出）、sample-library/derive-thumbs/bench-harness check 通过、app-ui check+clippy(-D warnings) 通过。真机待验收：单行卡观感、搜索态片段高亮、存量库首开回填耗时。
+
 ### 未来规划（用户已拍板纳入，未排期）
 
 - **提权注入 broker（D79 评审的方案二）**：主程序保持普通权限，单独一个一次 UAC 授权常驻的提权小进程，经命名管道接收「hwnd + 点击点」代跑 HTCLIENT 守卫与点击链，用于向提权目标注入。主程序从此不需要提权（拖入/UAC 问题同时消失），提权面收窄到一个只做点击的哑执行器。**前置条件**：提权 IPC 服务必须校验客户端 + ACL 收紧（否则任何中完整性进程都能指挥一支"幽灵鼠标"）；工程量 = 新进程 + IPC 协议 + 生命周期管理，v2 评估。

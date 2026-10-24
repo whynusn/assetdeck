@@ -193,8 +193,14 @@ pub enum CopyState {
 
 /// 元数据写线程的批量操作。导入数万条时逐行 autocommit 在 Windows 上每行
 /// 一次 fsync（实测 ~4ms/行），攒批共享一次事务提交是恢复秒级入库的关键。
+/// `text_content`：文本素材的 FTS 正文（归一化 UTF-8 前 64KB，D88）——与
+/// meta 同票传递，元数据落库成功后才补写（FTS 行随 upsert 触发器才存在）。
 enum DbOp {
-    Upsert { ticket: u64, meta: store::AssetMeta },
+    Upsert {
+        ticket: u64,
+        meta: store::AssetMeta,
+        text_content: Option<String>,
+    },
 }
 
 struct Shared {
@@ -383,6 +389,9 @@ impl Library {
         if !store.deleted_uuids()?.is_empty() || root.join(TRASH_DIR).is_dir() {
             trash::reconcile_trash_at(root, &store)?;
         }
+
+        // D88：存量库 FTS 正文一次性回填（旗标防重入；新库空跑即置位）。
+        backfill_fts_content(root, &store)?;
 
         // 启动即装载全库 pHash 到内存（百万条约 8MB，进程生命周期内一次成本）。
         let phash_index: std::sync::Arc<Option<Mutex<PHashIndex>>> =
@@ -609,6 +618,8 @@ impl Library {
             file_name,
             rel_path: rel_path.clone(),
             category: req.category.filter(|name| name != INBOX_CATEGORY),
+            // 导入只按名寻址；id 由 store 边界 ensure 解析（D87）。
+            category_id: None,
             tags: req.tags,
             size_bytes,
             created_at,
@@ -671,7 +682,15 @@ impl Library {
 
         // 字节已就位；元数据进写队列攒批提交（D7「无半成品」不变式保持：
         // Done 由提交确认后才置位，完成票的元数据必然已落库）。
-        self.queue_db_op(DbOp::Upsert { ticket: id, meta })?;
+        // D88：FTS 正文 = 归一化文本的前 64KB（索引上限即展示片段同源）。
+        let text_content = normalized_text
+            .as_deref()
+            .map(|bytes| cap_fts_content(&String::from_utf8_lossy(bytes), FTS_CONTENT_CAP_BYTES).to_string());
+        self.queue_db_op(DbOp::Upsert {
+            ticket: id,
+            meta,
+            text_content,
+        })?;
 
         // D7 语义守护：enqueue 返回前元数据必须已可见（体感瞬时入库）。
         // 写线程攒批 flush 后一次 notify_all——并发导入下所有调用方一起醒，
@@ -902,20 +921,27 @@ fn meta_writer_loop(_root: PathBuf, dq: DbQueueLock, shared: SharedLock, max_bat
 
         let mut ups_meta: Vec<store::AssetMeta> = Vec::with_capacity(ops.len());
         let mut ups_tickets: Vec<u64> = Vec::with_capacity(ops.len());
+        let mut ups_texts: Vec<Option<String>> = Vec::with_capacity(ops.len());
         macro_rules! flush_ups {
             () => {
                 if !ups_meta.is_empty() {
-                    flush_upsert_batch(&store, &shared, &ups_tickets, &ups_meta);
+                    flush_upsert_batch(&store, &shared, &ups_tickets, &ups_meta, &ups_texts);
                     ups_meta.clear();
                     ups_tickets.clear();
+                    ups_texts.clear();
                 }
             };
         }
         for op in ops {
             match op {
-                DbOp::Upsert { ticket, meta } => {
+                DbOp::Upsert {
+                    ticket,
+                    meta,
+                    text_content,
+                } => {
                     ups_meta.push(meta);
                     ups_tickets.push(ticket);
+                    ups_texts.push(text_content);
                     if ups_meta.len() >= max_batch.max(1) {
                         flush_ups!();
                     }
@@ -928,15 +954,21 @@ fn meta_writer_loop(_root: PathBuf, dq: DbQueueLock, shared: SharedLock, max_bat
 
 /// 提交一批 Upsert 并把对应票标 ready。整批失败 → 逐行重试隔离毒行；
 /// 毒行票置 Failed（附带原因），成功的照常 ready。
+/// `texts` 与 metas 对位（D88）：元数据落库成功后才补写 FTS 正文——FTS 行
+/// 随 upsert 触发器创建，先写会空转。补写失败只降级（名字检索可用、正文
+/// 检索缺席并打日志），不回滚已提交的元数据。
 fn flush_upsert_batch(
     store: &Store,
     shared: &SharedLock,
     tickets: &[u64],
     metas: &[store::AssetMeta],
+    texts: &[Option<String>],
 ) {
     debug_assert_eq!(tickets.len(), metas.len());
+    debug_assert_eq!(tickets.len(), texts.len());
     match store.upsert_assets(metas) {
         Ok(()) => {
+            write_fts_texts(store, metas, texts);
             let (lock, cv) = &**shared;
             let mut g = lock.lock().unwrap();
             for t in tickets {
@@ -947,9 +979,14 @@ fn flush_upsert_batch(
         }
         Err(_) => {
             // 整批退化逐行：定位唯一坏行，不让一个毒素材拖死整批。
-            for (t, m) in tickets.iter().zip(metas.iter()) {
+            for ((t, m), text) in tickets.iter().zip(metas.iter()).zip(texts.iter()) {
                 match store.upsert_asset(m) {
                     Ok(()) => {
+                        if let Some(content) = text {
+                            if let Err(e) = store.set_text_content(&m.uuid, content) {
+                                eprintln!("FTS 正文写入失败 {}: {e}", m.uuid);
+                            }
+                        }
                         let (lock, cv) = &**shared;
                         let mut g = lock.lock().unwrap();
                         g.meta_ready.insert(*t);
@@ -970,8 +1007,28 @@ fn flush_upsert_batch(
     }
 }
 
+/// 批量补写 FTS 正文（D88）：仅文本素材（texts 对位 Some）。
+fn write_fts_texts(store: &Store, metas: &[store::AssetMeta], texts: &[Option<String>]) {
+    for (meta, text) in metas.iter().zip(texts.iter()) {
+        if let Some(content) = text {
+            if let Err(e) = store.set_text_content(&meta.uuid, content) {
+                eprintln!("FTS 正文写入失败 {}: {e}", meta.uuid);
+            }
+        }
+    }
+}
+
 /// 文本素材入库字节上限（D60 库内文本不变量的资源闸）：超过即入口硬拒绝。
 const TEXT_IMPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// FTS 正文索引上限（D88）：归一化 UTF-8 的前 64KB。trigram 索引约为文本的
+/// 1.5~2 倍，64KB 帽把单文件索引代价钉在 ~150KB 量级（约 2 万汉字，覆盖一切
+/// 正常笔记场景）；展示片段与索引同源，超帽部分搜不到是有意的诚实边界。
+const FTS_CONTENT_CAP_BYTES: usize = 64 * 1024;
+/// 存量库 FTS 正文回填的一次性旗标（store_meta，D88）。
+const FTS_BACKFILL_FLAG: &str = "fts_content_backfilled_v9";
+/// 回填分块：单块待写驻留 ≤ 256 × 64KB = 16MB，遵守 D3/D4 内存纪律。
+const FTS_BACKFILL_CHUNK: usize = 256;
 
 fn copy_with_progress(
     src: &Path,
@@ -1008,6 +1065,64 @@ fn copy_text_normalized(
     let normalized = media::normalize_text_to_utf8(&bytes);
     fs::write(dst, normalized.as_ref())?;
     on_progress(total.max(normalized.len() as u64));
+    Ok(())
+}
+
+/// 截到 UTF-8 字符边界（D88 FTS 正文帽，导入与回填共用同一上限）。
+fn cap_fts_content(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
+}
+
+/// 读文本文件头部并归一化（D88 回填用）：最多多读 8 字节盖住 BOM，按字符
+/// 边界截到 [`FTS_CONTENT_CAP_BYTES`]。读失败返回 None（调用方单文件跳过）。
+fn read_fts_content(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut raw = Vec::with_capacity(FTS_CONTENT_CAP_BYTES + 8);
+    (&mut file)
+        .take((FTS_CONTENT_CAP_BYTES + 8) as u64)
+        .read_to_end(&mut raw)
+        .ok()?;
+    let normalized = media::normalize_text_to_utf8(&raw);
+    let text = String::from_utf8_lossy(&normalized);
+    Some(cap_fts_content(&text, FTS_CONTENT_CAP_BYTES).to_string())
+}
+
+/// D88：存量库 FTS 正文一次性回填。V9 迁移只重建了 name 列；正文在库内文本
+/// 文件里（store 不知道路径，分层禁越），这里补读前 64KB 逐条写入。旗标防
+/// 重入（新库首开空跑一遍即置位）；文件缺失/读失败按单文件跳过——名字检索
+/// 不受影响，该素材的正文检索缺席是有意的诚实降级。
+fn backfill_fts_content(root: &Path, store: &Store) -> Result<()> {
+    if store.get_meta_flag(FTS_BACKFILL_FLAG)?.as_deref() == Some("1") {
+        return Ok(());
+    }
+    let mut pending: Vec<(String, PathBuf)> = Vec::new();
+    store.for_each_asset_active(|meta| {
+        let path = root.join(&meta.rel_path);
+        if media::kind_of(&path) == AssetKind::Text {
+            pending.push((meta.uuid, path));
+        }
+    })?;
+    for chunk in pending.chunks(FTS_BACKFILL_CHUNK) {
+        let mut rows: Vec<(String, String)> = Vec::with_capacity(chunk.len());
+        for (uuid, path) in chunk {
+            if let Some(text) = read_fts_content(path) {
+                rows.push((uuid.clone(), text));
+            }
+        }
+        for (uuid, text) in &rows {
+            if let Err(e) = store.set_text_content(uuid, text) {
+                eprintln!("FTS 正文回填失败 {uuid}: {e}");
+            }
+        }
+    }
+    store.set_meta_flag(FTS_BACKFILL_FLAG, "1")?;
     Ok(())
 }
 

@@ -44,6 +44,7 @@ fn scaffold(tag: &str) -> PathBuf {
                 file_name: file_name.to_string(),
                 rel_path: format!("objects/{uuid}/{file_name}"),
                 category: category.map(|c| c.to_string()),
+                category_id: None,
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 size_bytes: 1,
                 created_at: index as i64,
@@ -117,6 +118,7 @@ fn inbox_facet_is_synthesized_from_null_category_rows() {
                 file_name: file_name.to_string(),
                 rel_path: format!("objects/{uuid}/{file_name}"),
                 category: (*category).map(|c| c.to_string()),
+                category_id: None,
                 tags: vec![],
                 size_bytes: 1,
                 created_at: index as i64,
@@ -202,6 +204,63 @@ fn fuzzy_filter_no_match_returns_empty_set() {
         resolver.facets().fuzzy_filter("不存在的词"),
         Some(Filter::AnyOf(vec![])),
         "无命中回空集"
+    );
+    cleanup(&root);
+}
+
+/// D87：分类 id 来自 categories 表，跨重载稳定——改名只换显示名，
+/// 侧栏行序会因按名重排而变，但引用方持有的 CategoryId 不变。
+#[test]
+fn category_id_survives_rename_and_reload() {
+    let root = scaffold("facets-stable-id");
+    let (_index, first) = load_real_library(&root).expect("装载真实库失败");
+    let before = first.facets().category_id("测试素材").expect("应有该分类");
+
+    {
+        let store = Store::open(&root.join("meta.db")).unwrap();
+        store.rename_category("测试素材", "改名后").unwrap();
+    }
+    let (index, second) = load_real_library(&root).expect("重载失败");
+    let after = second
+        .facets()
+        .category_id("改名后")
+        .expect("改名后仍应可寻址");
+
+    assert_eq!(after, before, "改名不得改变 CategoryId");
+    assert!(
+        second.facets().category_id("测试素材").is_none(),
+        "旧名不再注册"
+    );
+    assert_eq!(
+        index.evaluate(&Filter::InCategory(after)).len(),
+        2,
+        "稳定 id 继续指向同一批素材"
+    );
+    cleanup(&root);
+}
+
+/// D87：空分类是一等实体，装载后仍在侧栏条目里（计数 0），可被选中。
+#[test]
+fn empty_category_still_listed_with_zero_count() {
+    let root = scaffold("facets-empty-cat");
+    {
+        let store = Store::open(&root.join("meta.db")).unwrap();
+        store.ensure_category("还没素材").unwrap();
+    }
+    let (index, resolver) = load_real_library(&root).expect("装载真实库失败");
+    let entry = resolver
+        .facets()
+        .categories()
+        .iter()
+        .find(|e| e.name == "还没素材")
+        .expect("空分类必须出现在侧栏条目");
+    assert_eq!(entry.count, 0);
+    assert_eq!(
+        index
+            .evaluate(&Filter::InCategory(CategoryId(entry.id)))
+            .len(),
+        0,
+        "空分类视图合法（空集）"
     );
     cleanup(&root);
 }

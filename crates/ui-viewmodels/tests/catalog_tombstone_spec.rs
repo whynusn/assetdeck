@@ -18,6 +18,7 @@ fn row(uuid: &str, name: &str, category: Option<&str>) -> AssetMeta {
         file_name: name.to_string(),
         rel_path: format!("objects/{uuid}/{name}"),
         category: category.map(|c| c.to_string()),
+        category_id: None,
         tags: vec![],
         size_bytes: 10,
         created_at: 1,

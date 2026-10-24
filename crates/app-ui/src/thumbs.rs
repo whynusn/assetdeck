@@ -27,15 +27,25 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use lru::LruCache;
-use slint::{Model, Timer, TimerMode, VecModel};
+use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
 
 use ui_viewmodels::grid_vm::{LibraryGridVm, MAX_VISIBLE};
 use ui_viewmodels::uuid::Uuid;
-use ui_viewmodels::{AssetId, RealAssetResolver, ShareVm};
+use ui_viewmodels::{AssetId, AssetKind, RealAssetResolver, ShareVm};
 
 use crate::cards::{ResolverCardProvider, TileCardData, TileCardDataProvider};
 use crate::ui_enums;
-use crate::{AppWindow, TileData};
+use crate::{AppWindow, TileData, TextSegment};
+
+/// 文本卡全宽行的渲染参数（D88 两轮复盘定稿）：与 slint 侧令牌对齐——内边距
+/// = Spacing.md（8px，左右各一），字号 = Typography.body（12px）。fit_search_snippet
+/// 用它们把片段裁进行内正文预算（slint 布局器里 Text min 锁死，超宽不会 elide）。
+const TILE_TEXT_PAD: f32 = 8.0;
+const TILE_TEXT_FONT_PX: f32 = 12.0;
+/// 行内链路占用：图标 13 + 图标-名距 6 + 名-正文距 8，与 slint 侧 content-x
+/// 公式逐字对齐。片段预算 = 内宽 − 链路 − 固定名区（name_zone_px，与 slint
+/// 名区公式同源：卡宽 18% 钳 [150,240]）。
+const TILE_TEXT_INLINE_CHROME: f32 = 27.0;
 
 /// 缩略图来源：真实库有派生 PNG 就取其路径，演示数据一律无图。
 ///
@@ -353,22 +363,56 @@ fn build_rows(
                 }
             };
 
+            // 角标显示素材文件名；索引查不到名字（迟到消息/演示库）才回落内部 #id。
+            let label: slint::SharedString = match vm.name_at(i) {
+                "" => format!("#{}", id.0),
+                name => name.to_string(),
+            }
+            .into();
+            // D88 检索态片段：正文命中的文本卡切分段渲染高亮（命中词垫底色）。
+            // slint 侧空模型 = 默认头部预览分支；非 Text 素材恒空。预算 = 卡内宽
+            // − 行内链路 − 固定名区（name_zone_px 与 appwindow 名区公式同源）。
+            let segments_model = {
+                let segments = match (kind, vm.search_snippet(id)) {
+                    (AssetKind::Text, Some(marked)) => {
+                        let inner = (r.w - 2.0 * TILE_TEXT_PAD).max(0.0);
+                        let budget = inner - TILE_TEXT_INLINE_CHROME
+                            - ui_viewmodels::name_zone_px(r.w);
+                        ui_viewmodels::fit_search_snippet(
+                            marked,
+                            budget.max(0.0),
+                            TILE_TEXT_FONT_PX,
+                        )
+                    }
+                    _ => Vec::new(),
+                };
+                if segments.is_empty() {
+                    ModelRc::default()
+                } else {
+                    ModelRc::from(Rc::new(VecModel::from(
+                        segments
+                            .into_iter()
+                            .map(|(text, hit)| TextSegment {
+                                text: text.into(),
+                                hit,
+                            })
+                            .collect::<Vec<_>>(),
+                    )))
+                }
+            };
+
             let tile = TileData {
                 x: r.x,
                 y: r.y,
                 w: r.w,
                 h: r.h,
                 asset_id: id.0 as i32,
-                // 角标显示素材文件名；索引查不到名字（迟到消息/演示库）才回落内部 #id。
-                label: match vm.name_at(i) {
-                    "" => format!("#{}", id.0),
-                    name => name.to_string(),
-                }
-                .into(),
+                label,
                 color: slint::Color::from_argb_encoded(PALETTE[(id.0 % 8) as usize]),
                 thumb,
                 kind: ui_enums::card_kind(kind),
                 preview: card.preview.into(),
+                search_segments: segments_model,
                 thumb_fade,
                 // D47 勾选态：瓦片重绘时从选区状态机现取（sync 由壳层在
                 // 选区变化后统一触发，这里不缓存）。

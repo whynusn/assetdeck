@@ -103,8 +103,13 @@ fn run_import_cli(paths_text: &str, library: &Path) -> String {
 fn categories(lib: &Path) -> Vec<String> {
     let mut cats: Vec<String> = {
         let conn = rusqlite::Connection::open(lib.join("meta.db")).unwrap();
+        // D87：分类名在 categories 表；NULL 外键 = 系统收件箱。
         let mut stmt = conn
-            .prepare("SELECT COALESCE(category, '待分类') AS c FROM assets GROUP BY c")
+            .prepare(
+                "SELECT COALESCE(c.name, '待分类') AS c
+                 FROM assets a LEFT JOIN categories c ON c.id = a.category_id
+                 GROUP BY c",
+            )
             .unwrap();
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
@@ -179,13 +184,17 @@ fn force_inbox_lands_in_inbox_category() {
     );
     {
         let conn = rusqlite::Connection::open(lib.join("meta.db")).unwrap();
-        let stored: Option<String> = conn
-            .query_row("SELECT category FROM assets", [], |row| row.get(0))
+        let stored: Option<i64> = conn
+            .query_row("SELECT category_id FROM assets", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
             stored, None,
-            "D85：收件箱必须存 NULL，不得写字面量「待分类」"
+            "D85/D87：收件箱必须存 NULL 外键，不得挂到任何分类行"
         );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM categories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "D87：收件箱不是 categories 表里的行");
     }
     std::fs::remove_dir_all(root).unwrap();
 }

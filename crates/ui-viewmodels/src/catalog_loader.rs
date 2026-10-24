@@ -58,6 +58,10 @@ impl From<std::io::Error> for CatalogError {
 pub type Result<T> = std::result::Result<T, CatalogError>;
 
 /// 一个分类/标签条目：稳定数字 id、显示名与命中计数。
+///
+/// 分类的 `id` 即 `categories.id`（D87），**跨重载稳定**——改名只换 name，
+/// 引用方持有的 id 不变；收件箱固定 `id = 0`（`category_id IS NULL`）。
+/// 标签仍是装载期分配的稠密 id（标签无独立表）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FacetEntry {
     pub id: u32,
@@ -66,8 +70,7 @@ pub struct FacetEntry {
 }
 
 /// 分类/标签名称注册表：检索器在内存里对名称做子串匹配组装 [`Filter`]，
-/// 不受 FTS5 trigram（≥3 连续字符）限制。id 与 `load_real_library` 分配给
-/// `FacetIndex` 的 [`CategoryId`]/[`TagId`] 一致。
+/// 不受 FTS5 trigram（≥3 连续字符）限制。分类 id 直取库内稳定 id（D87）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LibraryFacets {
     categories: Vec<FacetEntry>,
@@ -76,7 +79,8 @@ pub struct LibraryFacets {
 }
 
 impl LibraryFacets {
-    /// 全部分类（按名升序，含计数）。
+    /// 全部分类（按名升序，含计数）。条目即侧栏行序（跳过行首「全部」），
+    /// `id` 是稳定 [`CategoryId`]，UI 应据此建「行号 → id」映射。
     pub fn categories(&self) -> &[FacetEntry] {
         &self.categories
     }
@@ -86,20 +90,9 @@ impl LibraryFacets {
         &self.tags
     }
 
-    /// 按精确分类名取 id（工具栏点击某分类时用）。
+    /// 按精确分类名取稳定 id（工具栏点击某分类时用）。
     pub fn category_id(&self, name: &str) -> Option<CategoryId> {
         self.category_by_name.get(name).copied()
-    }
-
-    /// 分类名列表，下标即 [`CategoryId`]（保留旧 `category_names()` 语义）。
-    pub fn category_names(&self) -> Vec<String> {
-        let mut names = vec![String::new(); self.categories.len()];
-        for entry in &self.categories {
-            if let Some(slot) = names.get_mut(entry.id as usize) {
-                *slot = entry.name.clone();
-            }
-        }
-        names
     }
 
     /// 对分类名 + 标签名做子串模糊匹配，命中即组装 `Filter::AnyOf`。
@@ -212,11 +205,9 @@ impl RealAssetResolver {
         self.uuids.is_empty()
     }
 
-    /// 分类名列表，下标即 [`CategoryId`]（与 `load_real_library` 分配顺序一致）。
-    ///
-    /// 委托给 [`LibraryFacets::category_names`]；保留给现有 `apply_categories` 调用方。
-    pub fn category_names(&self) -> Vec<String> {
-        self.facets.category_names()
+    /// 分类条目（按名升序，`id` 为稳定 [`CategoryId`]，见 [`LibraryFacets::categories`]）。
+    pub fn categories(&self) -> &[FacetEntry] {
+        self.facets.categories()
     }
 
     /// 分类/标签名称注册表（检索器与工具栏计数用）。
@@ -259,6 +250,18 @@ impl RealAssetResolver {
     /// 全文/标签语义走这里，结果以 uuid 二分回 `uuids` 行号（D52）。
     pub fn store_search(&self, query: &str, limit: usize) -> Result<Vec<store::SearchHit>> {
         Ok(self.store.search(query, limit)?)
+    }
+
+    /// 正文命中片段（D88）：store 的标记片段按 uuid 二分映射为 AssetId 键表。
+    /// 未知 uuid（回收站彻底删除窗口期）跳过；库错误向上抛，壳层降级为空表
+    /// （文本卡回落头部预览，视图不断）。
+    pub fn content_snippets(&self, query: &str, limit: usize) -> Result<HashMap<AssetId, String>> {
+        Ok(self
+            .store
+            .content_snippets(query, limit)?
+            .into_iter()
+            .filter_map(|(uuid, snippet)| self.uuid_rank(&uuid).map(|id| (AssetId(id), snippet)))
+            .collect())
     }
 
     /// 行号 → uuid（子命令派发 `--cmd trash --uuid …` 与属性面板寻址用）。
@@ -476,13 +479,28 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
     let store = Store::open(&db)?;
     let mut idx = FacetIndex::new();
     let mut uuids = Vec::new();
-    let mut category_ids: HashMap<String, CategoryId> = HashMap::new();
-    // D85 系统收件箱：固定 CategoryId(0)，成员 = 活跃的 `category IS NULL` 行。
-    // 先注册保证「CategoryId == 侧栏下标」这条隐式契约在空库/无分类库上也不错位。
-    category_ids.insert(store::INBOX_CATEGORY.to_string(), CategoryId(0));
+    // D87：分类条目来自 categories 表（含暂时没有素材的空分类），id 跨重载
+    // 稳定——重命名只换显示名，引用方持有的 CategoryId 不变。收件箱不是表
+    // 里的行，固定 id 0（= `category_id IS NULL`，D85）。
+    let mut categories: Vec<FacetEntry> = store
+        .list_categories()?
+        .into_iter()
+        // 防御：字面量同名行若被外部写入，不得与系统收件箱并存。
+        .filter(|(_, name)| name != store::INBOX_CATEGORY)
+        .map(|(id, name)| FacetEntry { id, name, count: 0 })
+        .collect();
+    categories.push(FacetEntry {
+        id: 0,
+        name: store::INBOX_CATEGORY.to_string(),
+        count: 0,
+    });
+    categories.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut category_by_name = HashMap::with_capacity(categories.len());
+    for entry in &categories {
+        category_by_name.insert(entry.name.clone(), CategoryId(entry.id));
+    }
+    let mut category_counts: HashMap<u32, u32> = HashMap::new();
     let mut tag_ids: HashMap<String, TagId> = HashMap::new();
-    // 名称 → 命中计数（按 id 累加），装配 LibraryFacets 时排序为条目表。
-    let mut category_counts: HashMap<String, u32> = HashMap::new();
     let mut tag_counts: HashMap<String, u32> = HashMap::new();
     // D46：回收站清单先行（遍历回调内不可再查 store——连接锁自锁）。
     // 行号必须与 uuids 位置对齐（D52 的 FTS uuid 二分地基），所以回收站行
@@ -496,25 +514,8 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
             // 恢复语义走整库重载（与 FacetIndex::unmark_deleted 的 v1 边界一致）。
             (None, Vec::new())
         } else {
-            let category = match meta.category.as_deref() {
-                // 历史字面量同样归收件箱：v6 迁移后不应再出现，装载侧兜底
-                // 防止旧库/外部写入长出与系统项同名的「影子分类」。
-                None | Some(store::INBOX_CATEGORY) => {
-                    *category_counts
-                        .entry(store::INBOX_CATEGORY.to_string())
-                        .or_insert(0) += 1;
-                    Some(CategoryId(0))
-                }
-                Some(name) => {
-                    let next_category_id = category_ids.len() as u32;
-                    *category_counts.entry(name.to_string()).or_insert(0) += 1;
-                    Some(
-                        *category_ids
-                            .entry(name.to_string())
-                            .or_insert_with(|| CategoryId(next_category_id)),
-                    )
-                }
-            };
+            let category_id = CategoryId(meta.category_id.unwrap_or(0));
+            *category_counts.entry(category_id.0).or_insert(0) += 1;
             let next_tag_id = tag_ids.len() as u32;
             let tags = meta
                 .tags
@@ -526,7 +527,7 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
                         .or_insert_with(|| TagId(next_tag_id))
                 })
                 .collect();
-            (category, tags)
+            (Some(category_id), tags)
         };
         let kind = media::kind_of(std::path::Path::new(&meta.rel_path));
         let created_at = meta.created_at;
@@ -549,7 +550,13 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
         next_id += 1;
     })?;
 
-    let facets = assemble_facets(category_ids, tag_ids, &category_counts, &tag_counts);
+    let facets = assemble_facets(
+        categories,
+        category_by_name,
+        tag_ids,
+        &category_counts,
+        &tag_counts,
+    );
 
     Ok((
         idx,
@@ -563,25 +570,17 @@ pub fn load_real_library(root: &Path) -> Result<(FacetIndex, RealAssetResolver)>
     ))
 }
 
-/// 把 `名称→id` 映射与 `名称→计数` 汇成按名升序的条目表 + 反查映射。
+/// 把分类条目（id 已是库内稳定 id）与标签注册表汇成注册表。
 fn assemble_facets(
-    category_ids: HashMap<String, CategoryId>,
+    mut categories: Vec<FacetEntry>,
+    category_by_name: HashMap<String, CategoryId>,
     tag_ids: HashMap<String, TagId>,
-    category_counts: &HashMap<String, u32>,
+    category_counts: &HashMap<u32, u32>,
     tag_counts: &HashMap<String, u32>,
 ) -> LibraryFacets {
-    let mut category_by_name = HashMap::new();
-    let mut categories: Vec<FacetEntry> = category_ids
-        .into_iter()
-        .map(|(name, id)| {
-            category_by_name.insert(name.clone(), id);
-            FacetEntry {
-                id: id.0,
-                count: category_counts.get(&name).copied().unwrap_or(0),
-                name,
-            }
-        })
-        .collect();
+    for entry in &mut categories {
+        entry.count = category_counts.get(&entry.id).copied().unwrap_or(0);
+    }
     categories.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut tags: Vec<FacetEntry> = tag_ids

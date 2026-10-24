@@ -53,6 +53,12 @@ export global UiEnums {
     out property <int> share-badge-failed: 3;
 }
 
+// D88 检索态正文片段的分段：hit 段垫 accent-soft 高亮底，普通段透明。
+export struct TextSegment {
+    text: string,
+    hit: bool,
+}
+
 export struct TileData {
     x: length,
     y: length,
@@ -68,8 +74,10 @@ export struct TileData {
     thumb-fade: bool,
     // 素材类别（UiEnums.card-kind-*，与 domain::AssetKind 对齐）：卡片按类别切表现。
     kind: int,
-    // 文本类素材的预览（首行若干字符）；其余类别为空串。
+    // 文本类素材的头部预览（首行若干字符，默认态）；其余类别为空串。
     preview: string,
+    // D88 检索态正文片段（带命中标记的分段）；空模型 = 默认头部预览。
+    search-segments: [TextSegment],
     // D47 选中标记：勾选角标 + accent 描边由它驱动。
     selected: bool,
     // D80 共享角标（UiEnums.share-badge-*）：右上类型徽标下方一枚状态点。
@@ -1413,15 +1421,23 @@ export component AppWindow inherits Window {
 
                         // 按类别切卡片表现（ImageCard / TextCard / VideoCard 合体）：
                         // - image/video：缩略图铺满（video 额外画右上角徽标）；
-                        // - text：中央图标 + 首行预览，不依赖缩略图产物；
+                        // - text：单行正文卡（D88），统一高度由 VM 布局层给定；
                         // - other：中央图标，占位色块可辨识。
                         for tile in root.tiles: Rectangle {
                             x: tile.x;
                             y: tile.y;
                             width: tile.w;
                             height: tile.h;
-                            background: tile.color;
-                            border-radius: Theme.radius-lg;
+                            // 文本卡走主题中性底（随机色块自 D88 退场）；其余类别
+                            // 保留 palette 兜底色（缺图时仍可辨识可点）。
+                            background: tile.kind == UiEnums.card-kind-text
+                                ? Theme.bg-raised
+                                : tile.color;
+                            // 文本行降 4px 圆角档：28px 高的行配 8px 圆角显药丸感
+                            // （D88 复盘二轮）；图片/视频大卡维持 8px。
+                            border-radius: tile.kind == UiEnums.card-kind-text
+                                ? Theme.radius
+                                : Theme.radius-lg;
                             clip: true;
 
                             // 图像/视频：缩略图铺满（视频抽帧也走同一产物）。
@@ -1439,39 +1455,108 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 文本/文件卡没有缩略图，正文直接压占位色；加一层随主题
-                            // 翻转的色罩，保证两套主题下正文对比度都 ≥ 4.5:1。
-                            if tile.kind == UiEnums.card-kind-text || tile.kind == UiEnums.card-kind-other: Rectangle {
+                            // 文件卡没有缩略图，加一层随主题翻转的色罩，保证两套
+                            // 主题下图标对比度都达标（文本卡自 D88 起有专属底色，不再罩）。
+                            if tile.kind == UiEnums.card-kind-other: Rectangle {
                                 width: 100%;
                                 height: 100%;
                                 background: Theme.tile-veil;
                             }
 
-                            // 文本：中央图标 + 首行预览（文本素材从此可辨识，不再只是色块）。
-                            if tile.kind == UiEnums.card-kind-text: VerticalLayout {
+                            // 文本：全宽行列表卡（D88 两轮复盘定稿）——占满瀑布流
+                            // 整个显示区域宽度（布局层 FullRow），高度统一 28px。
+                            // 排版遵循列表行（list-row）准则：连续文本行由布局层
+                            // 6px 紧行距构成「列表块」（与图片网格 12px 交界，间距
+                            // 本身区分同组/换组）；行圆角降 4px 档（短行配大圆角
+                            // 显药丸感）。行内三区固定：图标 + 名区（固定宽、
+                            // 表格化对齐——正文从同一 x 起步）+ 1px 竖分隔线 +
+                            // 正文/片段；名与正文字号同档（body），靠色彩深浅与
+                            // 分隔线分区，不靠「凑近猜」。片段数据侧按「内宽 −
+                            // 行内链路 − 固定名区」预算裁剪（1.17.1 布局器里 Text
+                            // 的 min 恒为 preferred，超宽不会 elide），preferred-width
+                            // 绑定 + 内层 elide 只是残余兜底。
+                            if tile.kind == UiEnums.card-kind-text: Rectangle {
                                 width: 100%;
                                 height: 100%;
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                padding-top: 10px;
-                                padding-bottom: 10px;
-                                alignment: center;
-                                spacing: 6px;
+
+                                // 名区固定宽：卡宽 18%，钳 [150, 240]px——与
+                                // ui_viewmodels::name_zone_px 同公式，两侧常量
+                                // 必须逐字一致。不随单行名字长短变化（对齐扫描）。
+                                property <length> name-w: Math.min(
+                                    Math.max(parent.width * 0.18, 150px), 240px);
+                                // 行内链路 = 图标 13 + 图标-名距 6 + 名-正文距 8，
+                                // 与 thumbs.rs 的 TILE_TEXT_INLINE_CHROME 逐字对齐。
+                                // 注意此处不能写 parent.name-w——本层属性声明里的
+                                // parent 已是外层卡片。
+                                property <length> content-x:
+                                    Spacing.md + 13px + 6px + name-w + 8px;
 
                                 Icon {
+                                    x: Spacing.md;
+                                    y: (parent.height - self.height) / 2;
                                     commands: Glyph.file-text;
                                     tint: Theme.card-icon;
-                                    width: 28px;
-                                    height: 28px;
+                                    width: 13px;
+                                    height: 13px;
                                 }
 
-                                Text {
-                                    text: tile.preview;
-                                    horizontal-alignment: center;
-                                    color: Theme.text-2;
-                                    font-size: Typography.label;
-                                    wrap: word-wrap;
+                                name-text := Text {
+                                    x: Spacing.md + 19px;
+                                    width: parent.name-w;
+                                    height: 100%;
+                                    text: tile.label;
+                                    color: Theme.text-3;
+                                    font-size: Typography.body;
+                                    font-weight: Typography.medium;
+                                    vertical-alignment: center;
                                     overflow: elide;
+                                }
+
+                                // 竖分隔线：名区与正文的 UI 分界（坐在 8px 区距正中）。
+                                Rectangle {
+                                    x: parent.content-x - 5px;
+                                    y: 6px;
+                                    width: 1px;
+                                    height: parent.height - 12px;
+                                    color: Theme.line-strong;
+                                }
+
+                                if tile.search-segments.length == 0: Text {
+                                    x: parent.content-x;
+                                    width: parent.width - self.x - Spacing.md;
+                                    height: 100%;
+                                    text: tile.preview;
+                                    color: Theme.text-2;
+                                    font-size: Typography.body;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                if tile.search-segments.length > 0: Rectangle {
+                                    x: parent.content-x;
+                                    width: parent.width - self.x - Spacing.md;
+                                    height: 100%;
+
+                                    HorizontalLayout {
+                                        height: 100%;
+                                        alignment: start;
+
+                                        for seg in tile.search-segments: Rectangle {
+                                            preferred-width: seg-text.preferred-width;
+                                            background: seg.hit ? Theme.accent-soft : transparent;
+                                            border-radius: Spacing.xxs;
+
+                                            seg-text := Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: seg.text;
+                                                color: Theme.text-2;
+                                                font-size: Typography.body;
+                                                overflow: elide;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -1490,12 +1575,14 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 右上角类型徽标：小胶囊 + 类别图标，图片/视频/文本/文件四类
-                            // 统一示意。旧版是全宽透明文字横条——遮缩略图、图片类缺失，
+                            // 右上角类型徽标：小胶囊 + 类别图标，图片/视频/文件三类
+                            // 统一示意（文本卡自 D88 复盘起走行内名条自带 file-text
+                            // 图标，28px 行高放不下 22px 胶囊，退场）。
+                            // 旧版是全宽透明文字横条——遮缩略图、图片类缺失，
                             // 且胶囊宽度没钉死会撑满整卡（本条即那次回归的修复）。
                             // 图形直接按 kind 从 Glyph 表取（字符串名传不进 Path，
                             // kind 与图形本就一一对应，无须经 Rust 再转一道）。
-                            Rectangle {
+                            if tile.kind != UiEnums.card-kind-text: Rectangle {
                                 width: 22px;
                                 height: 22px;
                                 x: parent.width - self.width - 6px;
@@ -1517,7 +1604,9 @@ export component AppWindow inherits Window {
                             }
 
                             // 名称条：贴底整条，hover 时压深底色让长名字更好读。
-                            if tile.label != "": Rectangle {
+                            // 文本卡退场（D88 复盘）：28px 行高会被 20px 名条整个
+                            // 盖住正文——名改行内前置，见文本卡分支。
+                            if tile.label != "" && tile.kind != UiEnums.card-kind-text: Rectangle {
                                 y: parent.height - self.height;
                                 width: 100%;
                                 height: 20px;

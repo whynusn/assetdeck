@@ -90,6 +90,7 @@ pub fn generate_library(root: &Path, rows: u64, thumbs: usize) -> Result<()> {
                     // 镜像真实导入的行形态（library::enqueue 的 objects/<uuid>/raw.png 惯例）
                     rel_path: format!("objects/{}/raw.png", uuid_of(i)),
                     category: None,
+                    category_id: None,
                     tags: vec![],
                     size_bytes: 65_536 + ((i % 977) * 13) as i64,
                     created_at,

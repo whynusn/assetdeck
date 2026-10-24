@@ -24,12 +24,12 @@ use ui_viewmodels::grid_vm::LibraryGridVm;
 use ui_viewmodels::selection::{self, MenuAction};
 use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
-    AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, ControlError,
-    DarkThemeProvider, DomainKind, FacetIndex, Filter, InputPointOverride, LightThemeProvider,
-    PayloadKind, RealAssetResolver, SearchProvider, SendItem, ShareAction, ShareControlVm,
-    ShareRegistry, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId, TargetBarMode,
-    TargetBarSnapshot, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps, ThemeProvider,
-    ThemeTokens, TuningTarget,
+    AppSettings, Asset, AssetId, AssetKind, AssetPayload, CategoryId, CategoryRows, ControlError,
+    DarkThemeProvider, DomainKind, FacetEntry, FacetIndex, Filter, InputPointOverride,
+    LightThemeProvider, PayloadKind, RealAssetResolver, SearchProvider, SendItem, ShareAction,
+    ShareControlVm, ShareRegistry, ShareVm, SortDirection, SortField, SortSpec, Sorter, TagId,
+    TargetBarMode, TargetBarSnapshot, TargetNoticeTone, TargetRoutingRuntime, TargetRuntimeDeps,
+    ThemeProvider, ThemeTokens, TuningTarget,
 };
 
 use task_runner::ChildTask;
@@ -279,6 +279,9 @@ struct CrudCtx {
     resolver: ThumbSource,
     grid: Rc<GridCtx>,
     filter_categories: Rc<RefCell<Vec<String>>>,
+    /// 侧栏行号 → 库内稳定 [`CategoryId`]（下标与 `filter_categories` 对齐，
+    /// 行 0「全部」为 None）。D87：分类 id ≠ 行号，必须显式映射。
+    filter_category_ids: Rc<RefCell<CategoryRows>>,
     current_filter: Rc<RefCell<Filter>>,
     filter_label: Rc<RefCell<slint::SharedString>>,
     library_root: Option<String>,
@@ -391,6 +394,29 @@ impl CrudCtx {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+        // D87：分类 id 在重载间稳定，但分类被整条删除后 id 会从分面表消失。
+        // 失效 id 归一为「全部」，避免界面停在永远为空的分类视图。
+        let (f, label, selected) = match &f {
+            Filter::InCategory(id) => {
+                match self.filter_category_ids.borrow().index_of(*id) {
+                    Some(index) => {
+                        // 名字以侧栏当前条目为准：重命名后 id 不变，但旧 label
+                        // 会残留旧名（顶栏后缀必须跟随库）。
+                        let name = self
+                            .filter_categories
+                            .borrow()
+                            .get(index as usize + 1)
+                            .cloned()
+                            .unwrap_or_else(|| label.to_string());
+                        (f.clone(), slint::SharedString::from(name), index)
+                    }
+                    None => (Filter::All, slint::SharedString::from("全部"), -1),
+                }
+            }
+            Filter::All => (Filter::All, label, -1),
+            Filter::Trash => (Filter::Trash, label, TRASH_CATEGORY),
+            _ => (f.clone(), label, -2),
+        };
         *self.current_filter.borrow_mut() = f.clone();
         *self.filter_label.borrow_mut() = label.clone();
         {
@@ -400,13 +426,8 @@ impl CrudCtx {
         // 切视图清掉检索框：搜索与分类/回收站视图不叠加，避免「回收站里搜出
         // 正常素材」的口径混乱（R2：回收站不占搜索结果）。
         ui.set_search_text("".into());
-        // 高亮哨兵：-1=全部，-3=回收站，分类=其 0 基下标（与侧栏条目一致）。
-        ui.set_selected_category(match &f {
-            Filter::All => -1,
-            Filter::Trash => TRASH_CATEGORY,
-            Filter::InCategory(cat) => cat.0 as i32,
-            _ => -2,
-        });
+        // 高亮哨兵：-1=全部，-3=回收站，分类=其侧栏行号（与条目下标一致）。
+        ui.set_selected_category(selected);
         ui.set_filter_label(label);
         self.sync_view_after_filter();
     }
@@ -543,9 +564,12 @@ impl CrudCtx {
             .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
         match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
             Ok((index, resolver)) => {
-                let names = resolver.category_names();
-                let counts = category_counts_for(&resolver, &names);
-                apply_categories(&ui, &self.filter_categories, &names, &counts);
+                apply_categories(
+                    &ui,
+                    &self.filter_categories,
+                    &self.filter_category_ids,
+                    resolver.categories(),
+                );
                 let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
                 new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
                 if let Ok(aspects) = resolver.aspects() {
@@ -1961,47 +1985,49 @@ fn default_categories() -> Vec<String> {
     ]
 }
 
+/// 侧栏分类模型装配：行 0 = 「全部」，其后按名升序逐一对应 `entries`。
+///
+/// `filter_categories`（显示名）与 `filter_category_ids`（行号 → 库内稳定
+/// [`CategoryId`]）下标严格对齐。D87：分类 id ≠ 行号，行 ↔ id 的换算一律
+/// 交给 [`CategoryRows`]（有单测锁定 Slint 的「序号 = 模型下标减一」）。
 fn apply_categories(
     ui: &AppWindow,
     filter_categories: &Rc<RefCell<Vec<String>>>,
-    category_names: &[String],
-    category_counts: &[i32],
+    filter_category_ids: &Rc<RefCell<CategoryRows>>,
+    entries: &[FacetEntry],
 ) {
-    let mut all = vec!["全部".to_string()];
-    all.extend(category_names.iter().cloned());
-    *filter_categories.borrow_mut() = all.clone();
+    let mut names = vec!["全部".to_string()];
+    names.extend(entries.iter().map(|entry| entry.name.clone()));
+    *filter_categories.borrow_mut() = names.clone();
+    *filter_category_ids.borrow_mut() = CategoryRows::from_entries(entries);
     let model = Rc::new(VecModel::from(
-        all.iter()
+        names
+            .iter()
             .map(|name| slint::SharedString::from(name.as_str()))
             .collect::<Vec<_>>(),
     ));
     ui.set_categories(ModelRc::from(model));
 
-    // 计数模型：下标 0 = 「全部」= 各分类计数之和；下标 i 对应 category_names[i-1]。
-    let total: i32 = category_counts.iter().sum();
+    // 计数模型：下标 0 = 「全部」= 各分类计数之和；其余与 `entries` 同序。
+    let total: i32 = entries.iter().map(|entry| entry.count as i32).sum();
     let mut counts = vec![total];
-    counts.extend_from_slice(category_counts);
+    counts.extend(entries.iter().map(|entry| entry.count as i32));
     ui.set_category_counts(ModelRc::from(Rc::new(VecModel::from(counts))));
     // 重载分类后回落到「全部」高亮，顶栏后缀同步回落，避免残留旧分类名。
     ui.set_selected_category(-1);
     ui.set_filter_label("全部".into());
 }
 
-/// 按分类名对齐取计数：`category_names()` 按 CategoryId 下标排序，而
-/// `facets().categories()` 按名升序，两者顺序未必一致，故按名查找。
-fn category_counts_for(resolver: &RealAssetResolver, names: &[String]) -> Vec<i32> {
-    names
-        .iter()
-        .map(|name| {
-            resolver
-                .facets()
-                .categories()
-                .iter()
-                .find(|entry| &entry.name == name)
-                .map(|entry| entry.count as i32)
-                .unwrap_or(0)
+/// 演示库的分类行表（与 [`demo_index`] 的 `CategoryId(i % 5)` 对齐）。
+fn default_category_rows() -> CategoryRows {
+    let entries: Vec<FacetEntry> = (0..5)
+        .map(|i| FacetEntry {
+            id: i,
+            name: format!("分类{i}"),
+            count: 0,
         })
-        .collect()
+        .collect();
+    CategoryRows::from_entries(&entries)
 }
 
 /// 运行时主题注入：把 [`ThemeTokens`] 铺到 slint 的 Theme 全局（暗/浅两套）。
@@ -2716,6 +2742,7 @@ fn main() {
 
     let app = AppWindow::new().expect("AppWindow 创建失败");
     let filter_categories = Rc::new(RefCell::new(default_categories()));
+    let filter_category_ids = Rc::new(RefCell::new(default_category_rows()));
 
     // 主题：启动时按设置注入（浅色主题设置切换时也会实时重铺）。
     {
@@ -2766,9 +2793,12 @@ fn main() {
     let real_resolver: ThumbSource = match library_root.as_deref() {
         Some(root) => match ui_viewmodels::load_real_library(std::path::Path::new(root)) {
             Ok((index, resolver)) => {
-                let names = resolver.category_names();
-                let counts = category_counts_for(&resolver, &names);
-                apply_categories(&app, &filter_categories, &names, &counts);
+                apply_categories(
+                    &app,
+                    &filter_categories,
+                    &filter_category_ids,
+                    resolver.categories(),
+                );
 
                 let mut vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
                 vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
@@ -2893,6 +2923,7 @@ fn main() {
         resolver: real_resolver.clone(),
         grid: grid.clone(),
         filter_categories: filter_categories.clone(),
+        filter_category_ids: filter_category_ids.clone(),
         current_filter: current_filter.clone(),
         filter_label: filter_label.clone(),
         library_root: library_root.clone(),
@@ -2939,15 +2970,9 @@ fn main() {
     {
         let crud = crud.clone();
         app.on_libcmd_finished(move |success, message, label| {
+            // D87：重载后 `apply_filter` 会自行判定当前分类 id 是否仍在分面表里
+            // （改名不动 id；删除则 id 消失 → 归一「全部」），这里不再特判。
             crud.reload_after_cmd(success, message.as_str(), label.as_str());
-            // D84 分类级写操作（重命名/删除）会整体重排 CategoryId（装载按
-            // 遍历序重新分配），当前分类视图的 id 已失效——统一回落「全部」，
-            // 避免停留在错误/空的分类视图。其他子命令不动当前视图（既有语义）。
-            if (label == "删除分类" || label == "重命名分类")
-                && matches!(crud.filter(), Filter::InCategory(_))
-            {
-                crud.apply_filter(Filter::All, "全部".into());
-            }
         });
     }
 
@@ -4668,13 +4693,19 @@ fn main() {
             } else if cat < 0 {
                 (Filter::All, slint::SharedString::from("全部"))
             } else {
-                let categories = crud.filter_categories.borrow();
-                let name: slint::SharedString = categories
+                // D87：行号只用于取显示名，过滤凭据是库内稳定 id。
+                let category_id = crud.filter_category_ids.borrow().id_at(cat as usize);
+                let name: slint::SharedString = crud
+                    .filter_categories
+                    .borrow()
                     .get((cat as usize) + 1)
                     .cloned()
-                    .unwrap_or_else(|| format!("分类{cat}"))
+                    .unwrap_or_default()
                     .into();
-                (Filter::InCategory(CategoryId(cat as u32)), name)
+                match category_id {
+                    Some(id) => (Filter::InCategory(id), name),
+                    None => (Filter::All, slint::SharedString::from("全部")),
+                }
             };
             ui.set_selected_category(cat);
             crud.apply_filter(filter, label);
@@ -4689,6 +4720,7 @@ fn main() {
         let resolver = real_resolver.clone();
         let current_filter = current_filter.clone();
         let filter_label = filter_label.clone();
+        let filter_category_ids = filter_category_ids.clone();
         let grid = grid.clone();
         Rc::new(move |query_text: &str, scope_code: i32| {
             let Some(ui) = ui.upgrade() else { return };
@@ -4713,7 +4745,9 @@ fn main() {
             // 检索态清掉侧栏分类高亮（-2），避免与「全部/某分类」的选中状态冲突。
             if query.trim().is_empty() {
                 ui.set_selected_category(match &filter {
-                    Filter::InCategory(id) => id.0 as i32,
+                    Filter::InCategory(id) => {
+                        filter_category_ids.borrow().index_of(*id).unwrap_or(-1)
+                    }
                     Filter::Trash => TRASH_CATEGORY,
                     _ => -1,
                 });
@@ -4728,9 +4762,29 @@ fn main() {
                 };
                 ui.set_filter_label(format!("搜索「{}」{suffix}", query.trim()).into());
             }
+            // D88：检索态正文片段（文本卡高亮预览）。FTS 参与路由（All/FileName
+            // 档 + ≥3 字符）才拉取；纯文件名命中无片段，瓦片自然回落头部预览。
+            // 库错误降级为空表（视图不断，只是没有高亮片段）。
+            let snippets = if query.trim().is_empty()
+                || !matches!(
+                    scope,
+                    ui_viewmodels::SearchScope::All | ui_viewmodels::SearchScope::FileName
+                )
+                || !ui_viewmodels::fts_query_eligible(query.trim())
+            {
+                std::collections::HashMap::new()
+            } else {
+                match resolver.borrow().as_ref() {
+                    Some(r) => r
+                        .content_snippets(query.trim(), ui_viewmodels::SNIPPET_QUERY_LIMIT)
+                        .unwrap_or_default(),
+                    None => std::collections::HashMap::new(),
+                }
+            };
             {
                 let mut guard = vm.borrow_mut();
                 guard.set_filter(&filter);
+                guard.set_search_snippets(snippets);
             }
             ui.set_content_y(0.0);
             sync_counts(&ui, vm.borrow().total(), resolver.borrow().is_some());
@@ -4895,6 +4949,7 @@ fn main() {
         let thumbs = real_resolver.clone();
         let library_root = library_root.clone();
         let filter_categories = filter_categories.clone();
+        let filter_category_ids = filter_category_ids.clone();
         let cache = thumb_cache.clone();
         let grid = grid.clone();
         let importing = importing.clone();
@@ -4918,9 +4973,12 @@ fn main() {
             // 立即整库重载：与库状态对齐（与 on_thumbnails_generated 同路径）。
             match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
                 Ok((index, resolver)) => {
-                    let names = resolver.category_names();
-                    let counts = category_counts_for(&resolver, &names);
-                    apply_categories(&ui, &filter_categories, &names, &counts);
+                    apply_categories(
+                        &ui,
+                        &filter_categories,
+                        &filter_category_ids,
+                        resolver.categories(),
+                    );
 
                     let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
                     new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
@@ -5535,6 +5593,7 @@ fn main() {
         let thumbs = real_resolver.clone();
         let library_root = library_root.clone();
         let filter_categories = filter_categories.clone();
+        let filter_category_ids = filter_category_ids.clone();
         let cache = thumb_cache.clone();
         let grid = grid.clone();
 
@@ -5548,9 +5607,12 @@ fn main() {
                 .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
             match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
                 Ok((index, resolver)) => {
-                    let names = resolver.category_names();
-                    let counts = category_counts_for(&resolver, &names);
-                    apply_categories(&ui, &filter_categories, &names, &counts);
+                    apply_categories(
+                        &ui,
+                        &filter_categories,
+                        &filter_category_ids,
+                        resolver.categories(),
+                    );
 
                     let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
                     new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
@@ -5603,6 +5665,7 @@ fn main() {
         let thumbs = real_resolver.clone();
         let library_root = library_root.clone();
         let filter_categories = filter_categories.clone();
+        let filter_category_ids = filter_category_ids.clone();
         let cache = thumb_cache.clone();
         let grid = grid.clone();
 
@@ -5621,9 +5684,12 @@ fn main() {
                 .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
             match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
                 Ok((index, resolver)) => {
-                    let names = resolver.category_names();
-                    let counts = category_counts_for(&resolver, &names);
-                    apply_categories(&ui, &filter_categories, &names, &counts);
+                    apply_categories(
+                        &ui,
+                        &filter_categories,
+                        &filter_category_ids,
+                        resolver.categories(),
+                    );
 
                     let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
                     new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
@@ -5658,6 +5724,7 @@ fn main() {
         let thumbs = real_resolver.clone();
         let library_root = library_root.clone();
         let filter_categories = filter_categories.clone();
+        let filter_category_ids = filter_category_ids.clone();
         let cache = thumb_cache.clone();
         let grid = grid.clone();
         let importing = importing.clone();
@@ -5733,7 +5800,7 @@ fn main() {
             *vm.borrow_mut() = new_vm;
             ui.set_content_y(0.0);
             sync_counts(&ui, 0, false);
-            apply_categories(&ui, &filter_categories, &[], &[]);
+            apply_categories(&ui, &filter_categories, &filter_category_ids, &[]);
             cache.borrow_mut().clear();
             grid.sync();
 

@@ -10,7 +10,7 @@ use domain::{AssetId, AssetKind, Filter, Sorter};
 use index::FacetIndex;
 use lru::LruCache;
 
-use crate::layout::{masonry_layout, Rect};
+use crate::layout::{masonry_layout_mixed, LayoutItem, Rect};
 use crate::selection::{ContextMenuSpec, MenuItem, Modifiers, Selection};
 
 /// VM → UI 事件。双击素材的语义止步于 OpenAsset；auto-send 属粘贴管线（M6）且默认关。
@@ -42,6 +42,11 @@ pub const OVERSCAN: usize = 20;
 /// 超过此数的尾部条目本帧不物化，滚动会在下一帧继续补齐。
 pub const MAX_VISIBLE: usize = 512;
 
+/// 文本卡统一高度（逻辑像素，D88）：单行正文 + 上下留白，与 Metrics.row-compact
+/// 同档。所有文本卡等高是检索态的地基——片段替换头部预览时版式零抖动
+/// （分档高度会让每次搜索都重排整墙），也顺带消灭了 id 取模的随机占位高度。
+pub const TEXT_TILE_HEIGHT: f32 = 28.0;
+
 /// 默认布局参数（壳层可经 `set_layout_params` 覆盖）。
 const DEFAULT_CONTAINER_WIDTH: f32 = 984.0;
 const DEFAULT_COLUMNS: u32 = 6;
@@ -65,6 +70,10 @@ pub struct LibraryGridVm {
     rects: Vec<Rect>,
     /// 真实宽高比（w/h），按 AssetId 索引；缺项回落 [`fallback_aspect`]。
     aspects: HashMap<AssetId, f32>,
+    /// 检索态正文片段（D88）：AssetId → 带命中标记的片段文本。空表 = 退出
+    /// 检索态。只影响文本卡表现（片段替换头部预览），不影响布局——文本卡
+    /// 统一高度，片段替换不触发重排。
+    search_snippets: HashMap<AssetId, String>,
     /// 当前 rect 表中最高瓦片的高度：可见区间回退扫描的上界依据。
     max_item_height: f32,
     content_height: f32,
@@ -90,6 +99,7 @@ impl LibraryGridVm {
             ids: Vec::new(),
             rects: Vec::new(),
             aspects: HashMap::new(),
+            search_snippets: HashMap::new(),
             max_item_height: 0.0,
             content_height: 0.0,
             container_width: DEFAULT_CONTAINER_WIDTH,
@@ -115,6 +125,18 @@ impl LibraryGridVm {
     pub fn set_aspects(&mut self, aspects: HashMap<AssetId, f32>) {
         self.aspects = aspects;
         self.rebuild_rects();
+    }
+
+    /// 注入检索态正文片段（D88）：AssetId → 带命中标记的片段文本。
+    /// 空 map = 退出检索态（文本卡回落头部预览）。不改布局：文本卡统一高度，
+    /// 片段替换头部预览不触发重排。
+    pub fn set_search_snippets(&mut self, snippets: HashMap<AssetId, String>) {
+        self.search_snippets = snippets;
+    }
+
+    /// 瓦片渲染取用：该素材有检索片段（正文命中）则返回带标记文本。
+    pub fn search_snippet(&self, id: AssetId) -> Option<&str> {
+        self.search_snippets.get(&id).map(String::as_str)
     }
 
     /// 调整布局参数并重算 Rect 表（容器几何变化时由壳层调用）。
@@ -403,18 +425,35 @@ impl LibraryGridVm {
     }
 
     fn rebuild_rects(&mut self) {
-        let aspects: Vec<f32> = self
+        // 文本卡 = 全宽行（D88 复盘）：不参与分列，独占一行横贯瀑布流整个显示
+        // 区域，高度恒为 TEXT_TILE_HEIGHT；图片/视频/文件照旧按真实/占位 aspect
+        // 分列。检索态片段只改表现不改布局（全宽行高度恒定，替换内容零抖动）。
+        let aspects = &self.aspects;
+        let index = &self.index;
+        let items: Vec<LayoutItem> = self
             .ids
             .iter()
             .map(|&id| {
-                self.aspects
-                    .get(&id)
-                    .copied()
-                    .filter(|a| a.is_finite() && *a > 0.0)
-                    .unwrap_or_else(|| fallback_aspect(id))
+                if index.kind(id.0) == AssetKind::Text {
+                    LayoutItem::FullRow
+                } else {
+                    LayoutItem::Tile(
+                        aspects
+                            .get(&id)
+                            .copied()
+                            .filter(|a| a.is_finite() && *a > 0.0)
+                            .unwrap_or_else(|| fallback_aspect(id)),
+                    )
+                }
             })
             .collect();
-        self.rects = masonry_layout(self.container_width, self.columns, self.gap, &aspects);
+        self.rects = masonry_layout_mixed(
+            self.container_width,
+            self.columns,
+            self.gap,
+            &items,
+            TEXT_TILE_HEIGHT,
+        );
         // 内容总高 = 所有列的最低底边。masonry 下最后一项不一定落在最深的列，
         // 取 `rects.last()` 会漏掉尾部差值，滚动到底时最后一行被裁掉。
         let (height, max_h) = self.rects.iter().fold((0.0f32, 0.0f32), |(bot, tall), r| {

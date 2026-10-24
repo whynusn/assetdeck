@@ -22,6 +22,7 @@ fn write_rows(root: &Path, rows: &[(&str, &str, Option<&str>)]) {
                 file_name: file_name.to_string(),
                 rel_path: format!("objects/{uuid}/{file_name}"),
                 category: category.map(|c| c.to_string()),
+                category_id: None,
                 tags: Vec::new(),
                 size_bytes: 1,
                 created_at: index as i64,

@@ -9,6 +9,7 @@ fn meta(uuid: &str, name: &str) -> AssetMeta {
         file_name: name.to_string(),
         rel_path: format!("objects/{uuid}/{name}"),
         category: Some("photo".to_string()),
+        category_id: None,
         tags: vec!["red".to_string(), "promo".to_string()],
         size_bytes: 1024,
         created_at: 1_700_000_000,
@@ -151,6 +152,148 @@ fn fts_search_chinese_hits_trigram() {
     assert!(stale.is_empty(), "改名后旧名不应再命中");
     let fresh = s.search("深蓝夹克", 10).unwrap();
     assert_eq!(fresh.len(), 1);
+}
+
+/// D88 正文检索：正文命中进 search 白名单；片段只发给正文命中的行
+/// （纯文件名命中无标记，UI 回落头部预览）；标记夹住的正是命中词本身。
+#[test]
+fn fts_content_search_hits_body_and_snippets() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("u-body", "会议纪要.txt")).unwrap();
+    s.upsert_asset(&meta("u-name", "季度预算表.txt")).unwrap();
+    assert!(s
+        .set_text_content("u-body", "本季度预算削减百分之十二，渠道费同步下调")
+        .unwrap());
+    assert!(s.set_text_content("u-name", "与本季度无关的正文内容").unwrap());
+
+    let hits = s.search("季度预算", 10).unwrap();
+    assert_eq!(hits.len(), 2, "文件名命中与正文命中都进结果白名单");
+
+    let snippets = s.content_snippets("季度预算", 10).unwrap();
+    assert_eq!(snippets.len(), 1, "纯文件名命中不产生片段");
+    assert_eq!(snippets[0].0, "u-body");
+    let marked = &snippets[0].1;
+    let (start_mark, end_mark) = (store::SNIPPET_MARK_START, store::SNIPPET_MARK_END);
+    let start = marked.find(start_mark).expect("片段应含起始标记");
+    let end = marked.find(end_mark).expect("片段应含结束标记");
+    assert!(start < end);
+    assert_eq!(&marked[start + start_mark.len_utf8()..end], "季度预算");
+
+    // 名字命中、正文无关键词 → 片段为空但不报错。
+    let s2 = Store::open_in_memory().unwrap();
+    s2.upsert_asset(&meta("u-only", "季度预算表.txt")).unwrap();
+    assert!(s2.content_snippets("季度预算", 10).unwrap().is_empty());
+
+    assert!(
+        !s.set_text_content("missing", "x").unwrap(),
+        "uuid 不存在只返回 false，不报错"
+    );
+}
+
+/// D88 正文写入经 upsert 改名后必须保留：au 触发器从 assets.text_content
+/// 事实源重建 FTS 行，冲突路径不动该列 → 内容跟随，不随改名蒸发。
+#[test]
+fn fts_upsert_rename_preserves_content() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_asset(&meta("u-r", "旧名.txt")).unwrap();
+    assert!(s.set_text_content("u-r", "正文带检索关键词的内容").unwrap());
+
+    let renamed = AssetMeta {
+        file_name: "新名.txt".to_string(),
+        ..meta("u-r", "旧名.txt")
+    };
+    s.upsert_asset(&renamed).unwrap();
+
+    assert_eq!(s.search("检索关键词", 10).unwrap().len(), 1);
+    assert!(s.search("旧名", 10).unwrap().is_empty(), "旧名索引随改名消失");
+    let snippets = s.content_snippets("检索关键词", 10).unwrap();
+    assert_eq!(snippets.len(), 1, "改名后正文片段必须保留");
+    assert_eq!(snippets[0].0, "u-r");
+}
+
+/// D88 store_meta 旗标：存量库回填防重入的载体，set/get/覆盖语义固化。
+#[test]
+fn meta_flag_roundtrip() {
+    let s = Store::open_in_memory().unwrap();
+    assert_eq!(s.get_meta_flag("fts_content_backfilled").unwrap(), None);
+    s.set_meta_flag("fts_content_backfilled", "1").unwrap();
+    assert_eq!(
+        s.get_meta_flag("fts_content_backfilled").unwrap().as_deref(),
+        Some("1")
+    );
+    s.set_meta_flag("fts_content_backfilled", "2").unwrap();
+    assert_eq!(
+        s.get_meta_flag("fts_content_backfilled").unwrap().as_deref(),
+        Some("2")
+    );
+}
+
+/// v8 旧库必须能原地升到 v9：FTS 表重建（加 content 列、行号锚定 rowid），
+/// 旧名字索引语义原样保留，正文回写走新触发器即刻可检索。
+#[test]
+fn v8_database_migrates_to_v9_rebuilding_fts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("v8.db");
+
+    // 造一个 v8 形态的库：无 text_content 列、FTS 无 content 列、旧触发器。
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL,
+               file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '',
+               size_bytes INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash BLOB,
+               content_hash BLOB,
+               width INTEGER,
+               height INTEGER,
+               deleted INTEGER NOT NULL DEFAULT 0,
+               category_id INTEGER
+             );
+             CREATE VIRTUAL TABLE assets_fts USING fts5(uuid UNINDEXED, name, tokenize='trigram');
+             CREATE TRIGGER assets_fts_ai AFTER INSERT ON assets BEGIN
+               INSERT INTO assets_fts(uuid, name) VALUES (new.uuid, new.file_name);
+             END;
+             CREATE TRIGGER assets_fts_au AFTER UPDATE OF file_name ON assets BEGIN
+               DELETE FROM assets_fts WHERE uuid = old.uuid;
+               INSERT INTO assets_fts(uuid, name) VALUES (new.uuid, new.file_name);
+             END;
+             CREATE TRIGGER assets_fts_ad AFTER DELETE ON assets BEGIN
+               DELETE FROM assets_fts WHERE uuid = old.uuid;
+             END;
+             INSERT INTO assets (uuid, file_name) VALUES ('legacy-1', '旧笔记.txt');
+             INSERT INTO assets_fts (uuid, name) VALUES ('legacy-1', '旧笔记.txt');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+    }
+
+    let s = Store::open(&db_path).unwrap();
+    assert_eq!(
+        s.schema_version(),
+        store::SUPPORTED_SCHEMA_VERSION,
+        "打开 v8 库后必须升到当前支持版本"
+    );
+
+    // 名字索引在 FTS 重建后原样可用。
+    let hits = s.search("旧笔记", 10).unwrap();
+    assert_eq!(hits.len(), 1, "迁移重建不得丢名字索引");
+
+    // 正文回写 → 触发器同步 → 片段即刻可检索。
+    assert!(s.set_text_content("legacy-1", "迁移前的存量正文含季度预算字样").unwrap());
+    let snippets = s.content_snippets("季度预算", 10).unwrap();
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].0, "legacy-1");
+    assert!(snippets[0].1.contains(store::SNIPPET_MARK_START));
+
+    // 重开幂等：不得重复 ALTER / 重建（会报 duplicate column）。
+    drop(s);
+    let reopened = Store::open(&db_path).unwrap();
+    assert_eq!(reopened.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert_eq!(reopened.search("季度预算", 10).unwrap().len(), 1);
 }
 
 #[test]
@@ -876,4 +1019,219 @@ fn read_category_by_uuid_does_not_migrate_user_version() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(v, 4, "读取不得触发迁移改写");
+}
+
+// ---------------------------------------------------------------------------
+// D87 分类一等化（schema v8）：分类从「资产行上的一个字符串」升为独立表 +
+// 外键。契约：v7 旧库原地迁移不丢分类归属；改名只动 categories 一行、
+// 引用方 id 不变（O(1)）；空分类仍可枚举；收件箱不进表（NULL 外键）。
+// ---------------------------------------------------------------------------
+
+/// 名字 → 分类 id 直查（测试用；生产路径走 list_categories）。
+fn category_id_of(s: &Store, name: &str) -> u32 {
+    s.list_categories()
+        .unwrap()
+        .into_iter()
+        .find(|(_, n)| n == name)
+        .unwrap_or_else(|| panic!("分类 {name} 不存在"))
+        .0
+}
+
+/// v7 旧库（分类是 assets.category 字符串列 + 索引）打开必须原地升 v8：
+/// 去重分类落到 categories 表并回填外键，旧列 `category` 消失，历史行不丢。
+#[test]
+fn v7_database_migrates_in_place_to_v8() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("legacy7.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE assets (
+               uuid TEXT PRIMARY KEY NOT NULL,
+               file_name TEXT NOT NULL,
+               rel_path TEXT NOT NULL DEFAULT '',
+               category TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               imported_at INTEGER NOT NULL DEFAULT 0,
+               phash BLOB,
+               width INTEGER,
+               height INTEGER,
+               deleted INTEGER NOT NULL DEFAULT 0,
+               content_hash BLOB
+             );
+             CREATE TABLE tags (
+               asset_uuid TEXT NOT NULL REFERENCES assets(uuid) ON DELETE CASCADE,
+               tag TEXT NOT NULL,
+               PRIMARY KEY (asset_uuid, tag)
+             );
+             CREATE VIRTUAL TABLE assets_fts USING fts5(uuid UNINDEXED, name, tokenize='trigram');
+             CREATE INDEX idx_assets_phash ON assets(phash);
+             CREATE INDEX idx_assets_content_hash ON assets(content_hash);
+             CREATE INDEX idx_assets_category ON assets(category);
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('a-1', '甲.png', 'objects/a-1/raw.png', '风景');
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('a-2', '乙.png', 'objects/a-2/raw.png', '风景');
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('a-3', '丙.png', 'objects/a-3/raw.png', '表情');
+             INSERT INTO assets (uuid, file_name, rel_path, category) VALUES ('a-4', '丁.png', 'objects/a-4/raw.png', NULL);
+             INSERT INTO assets (uuid, file_name, rel_path, category, deleted) VALUES ('a-5', '戊.png', 'objects/a-5/raw.png', '表情', 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 7).unwrap();
+    }
+
+    let s = Store::open(&db_path).unwrap();
+    assert_eq!(s.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert!(s.has_table("categories"), "v8 必须建出 categories 表");
+
+    // 去重分类（含只被回收站行引用的）各一行，按名给出稳定 id。
+    let cats = s.list_categories().unwrap();
+    let names: Vec<&str> = cats.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(names, vec!["表情", "风景"], "分类按名升序落表");
+    let scenery = category_id_of(&s, "风景");
+
+    // 归属按外键回填；旧列已删，读取走 JOIN 出的显示名。
+    let a1 = s.get_asset("a-1").unwrap().unwrap();
+    assert_eq!(a1.category.as_deref(), Some("风景"));
+    assert_eq!(a1.category_id, Some(scenery));
+    assert_eq!(
+        s.get_asset("a-4").unwrap().unwrap().category_id,
+        None,
+        "NULL 行（收件箱）迁移后仍是 NULL，不得凭空建分类"
+    );
+    assert_eq!(
+        s.get_asset("a-5").unwrap().unwrap().category_id,
+        s.get_asset("a-3").unwrap().unwrap().category_id,
+        "回收站行同步带上外键（恢复后归属不丢）"
+    );
+
+    // 旧列确实被删掉：直查会报 no such column。
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        assert!(
+            conn.query_row("SELECT category FROM assets", [], |r| r.get::<_, String>(0))
+                .is_err(),
+            "v8 后 assets.category 列必须消失（名字降为 categories 行的属性）"
+        );
+    }
+
+    // 重开幂等：不得重复 ALTER / 重复回填。
+    drop(s);
+    let again = Store::open(&db_path).unwrap();
+    assert_eq!(again.schema_version(), store::SUPPORTED_SCHEMA_VERSION);
+    assert_eq!(again.list_categories().unwrap().len(), 2);
+}
+
+/// D87 核心收益：改名只改 categories 一行，引用方持有的 id 不变——
+/// 素材侧零改写，故「改名代价与引用行数解耦」。
+#[test]
+fn rename_category_keeps_ids_stable_for_referencing_rows() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("r-1", "a.jpg");
+    a.category = Some("旧名".to_string());
+    let mut b = meta("r-2", "b.jpg");
+    b.category = Some("旧名".to_string());
+    s.upsert_asset(&a).unwrap();
+    s.upsert_asset(&b).unwrap();
+
+    let before = category_id_of(&s, "旧名");
+    assert_eq!(s.rename_category("旧名", "新名").unwrap(), 2);
+
+    // 同一个 id，换了个名字：引用方无需任何改写。
+    assert_eq!(category_id_of(&s, "新名"), before);
+    assert_eq!(
+        s.get_asset("r-1").unwrap().unwrap().category_id,
+        Some(before)
+    );
+    assert_eq!(
+        s.get_asset("r-1").unwrap().unwrap().category.as_deref(),
+        Some("新名")
+    );
+    assert_eq!(
+        s.get_asset("r-2").unwrap().unwrap().category.as_deref(),
+        Some("新名")
+    );
+    assert!(s
+        .list_categories()
+        .unwrap()
+        .iter()
+        .all(|(_, n)| n != "旧名"));
+}
+
+/// 空分类是一等实体：最后一个素材移走后分类行仍在（可继续归入），
+/// `list_categories` 必须列得出来。
+#[test]
+fn empty_category_survives_until_explicitly_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("e-1", "a.jpg");
+    a.category = Some("会变空的".to_string());
+    s.upsert_asset(&a).unwrap();
+    let id = category_id_of(&s, "会变空的");
+
+    s.set_category("e-1", None).unwrap();
+    let cats = s.list_categories().unwrap();
+    assert_eq!(
+        cats,
+        vec![(id, "会变空的".to_string())],
+        "素材移走后分类行保留（D87：分类独立于引用而存在）"
+    );
+    assert!(
+        s.distinct_categories()
+            .unwrap()
+            .iter()
+            .all(|(name, _)| name != "会变空的"),
+        "空分类不占资产计数（素材已归收件箱）"
+    );
+
+    // 显式删除才消失。
+    assert_eq!(s.clear_category("会变空的").unwrap(), 0);
+    assert!(s.list_categories().unwrap().is_empty());
+}
+
+/// 外键归属：写入侧只给名字（`category_id: None`）时由 store 边界 ensure，
+/// 且同一名字跨调用拿到同一 id（不产生影子分类）。
+#[test]
+fn write_by_name_resolves_to_same_category_row() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("w-1", "a.jpg");
+    a.category = Some("图片".to_string());
+    let mut b = meta("w-2", "b.jpg");
+    b.category = Some("图片".to_string());
+    b.phash = Some(vec![0xCD; 8]);
+    s.upsert_assets(&[a, b]).unwrap();
+
+    let cats = s.list_categories().unwrap();
+    assert_eq!(cats.len(), 1, "同名只应有一行");
+    let id = cats[0].0;
+    assert_eq!(s.get_asset("w-1").unwrap().unwrap().category_id, Some(id));
+    assert_eq!(s.get_asset("w-2").unwrap().unwrap().category_id, Some(id));
+
+    // 显式给 id 的写入路径直接落库（不经名字解析）。
+    assert_eq!(s.ensure_category("图片").unwrap(), id, "ensure 幂等");
+    assert!(matches!(
+        s.ensure_category(store::INBOX_CATEGORY),
+        Err(StoreError::ReservedInbox)
+    ));
+}
+
+/// 收件箱不进表：NULL 外键是其唯一身份，`clear_category`/`rename_category`
+/// 两侧都拒绝，`list_categories` 永不返回该系统名。
+#[test]
+fn inbox_never_becomes_a_category_row() {
+    let s = Store::open_in_memory().unwrap();
+    let mut a = meta("i-1", "a.jpg");
+    a.category = None;
+    s.upsert_asset(&a).unwrap();
+
+    assert!(s.list_categories().unwrap().is_empty(), "收件箱不建行");
+    assert!(
+        s.distinct_categories()
+            .unwrap()
+            .iter()
+            .any(|(name, _)| name == store::INBOX_CATEGORY),
+        "但读取侧仍以系统名显示 NULL 行"
+    );
+    assert!(matches!(
+        s.clear_category(store::INBOX_CATEGORY),
+        Err(StoreError::ReservedInbox)
+    ));
 }
