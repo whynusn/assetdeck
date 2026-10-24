@@ -39,16 +39,22 @@ pub enum MenuAction {
     /// 进回收站（D46 软删），非彻底删除。
     Delete,
     /// 共享到设备（D80）：弹设备选择器，显式推送、零默认共享。
+    /// D90 拍板④：UI 默认隐藏（设置 `direct_send_enabled` 门控），代码保留。
     Share,
     /// 共享态管理（D80-M1）：弹共享域勾选弹窗，标记/撤销某素材的
     /// 「对某域共享中」事实。只改共享态，不触发任何传输。
+    /// D90：域模型被共享空间取代，菜单项不再渲染（枚举保留兼容旧 id）。
     ShareToDomain,
+    /// 添加到共享空间（D90）：主库视图右键，选区复制入空间库 = 副本集。
+    AddToSpace,
+    /// 保存到我的素材（D90）：空间视图右键，把空间副本导入主库。
+    SaveToLibrary,
 }
 
-/// 菜单七项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除，
-/// 再加 D80 追加的「共享到设备…」与 D80-M1 追加的「共享到域…」）。
-/// 顺序即渲染顺序；`LibraryGridVm::context_menu` 据此组装。追加项一律在尾：
-/// 不动既有项的 id 编码，回归面最小。
+/// 菜单项 + 文案（CONTEXT.md 用语穷举：复制/移动到分类/重命名/属性/删除，
+/// 再加 D80 追加的「共享到设备…」、D90 追加的「添加到共享空间…」与
+/// 「保存到我的素材」）。顺序即渲染序；`LibraryGridVm::context_menu` 据此
+/// 组装。追加项一律在尾：不动既有项的 id 编码，回归面最小。
 pub const MENU_ITEMS: &[(MenuAction, &str)] = &[
     (MenuAction::Copy, "复制"),
     (MenuAction::MoveToCategory, "移动到分类"),
@@ -57,6 +63,8 @@ pub const MENU_ITEMS: &[(MenuAction, &str)] = &[
     (MenuAction::Delete, "删除"),
     (MenuAction::Share, "共享到设备…"),
     (MenuAction::ShareToDomain, "共享到域…"),
+    (MenuAction::AddToSpace, "添加到共享空间…"),
+    (MenuAction::SaveToLibrary, "保存到我的素材"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

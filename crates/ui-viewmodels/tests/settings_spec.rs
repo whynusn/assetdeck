@@ -39,6 +39,9 @@ fn defaults_are_conservative() {
         s.suppress_activate_on_asset_click,
         "默认开素材点击免激活（D83，用户拍板新方案即默认）"
     );
+    assert!(s.space_sync_gate, "默认开大小闸（D90 拍板②：500MB 起可调）");
+    assert_eq!(s.space_sync_gate_mb, 500, "默认闸值 500MB");
+    assert!(!s.direct_send_enabled, "默认隐藏直发（D90 拍板④）");
 }
 
 #[test]
@@ -60,6 +63,9 @@ fn save_then_load_roundtrips() {
         nudge_offscreen_window: false,
         auto_elevate_on_launch: true,
         suppress_activate_on_asset_click: false,
+        space_sync_gate: false,
+        space_sync_gate_mb: 2048,
+        direct_send_enabled: true,
         input_point_overrides: BTreeMap::new(),
     };
     s.save(&path).expect("写设置失败");

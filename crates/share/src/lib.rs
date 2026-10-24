@@ -12,6 +12,7 @@ pub mod record;
 pub mod registry;
 pub mod request;
 pub mod sharing;
+pub mod space;
 pub mod sync;
 
 pub use domain::{DomainError, DomainKind, PairedDevice, PairedDevices, ShareDomain};
@@ -31,4 +32,8 @@ pub use request::{
     MDNS_SERVICE,
 };
 pub use sharing::{SharedState, SharingEntry};
+pub use space::{
+    merge_lamport, parse_space_invite_code, space_invite_code, SpaceAssetKind, SpaceAssetMeta,
+    SpaceError, SpaceInviteCode, SpaceMeta, SpaceOp, SpaceOpKind, SpaceRegistry, SpaceRole,
+};
 pub use sync::{PeerSyncState, ShareOffer, SyncBookState, SyncError, SyncMessage};

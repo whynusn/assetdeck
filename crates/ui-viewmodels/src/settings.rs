@@ -99,6 +99,19 @@ pub struct AppSettings {
     /// false = 恢复系统默认激活行为（所有点击都上浮）。
     #[serde(default = "default_suppress_activate_on_asset_click")]
     pub suppress_activate_on_asset_click: bool,
+    /// D90 共享空间·大小闸：true（默认）= 离线期间空间累计新增超过
+    /// [`Self::space_sync_gate_mb`] 时元数据照收、字节改为手动点同步
+    /// （防队友误传大文件吃满磁盘）；false = 全部自动。
+    #[serde(default = "default_space_sync_gate")]
+    pub space_sync_gate: bool,
+    /// 大小闸阈值（MB，手编 settings.toml 可调，设置面板不暴露数值——
+    /// D90 拍板③：复杂度不暴露给用户）。读回时夹取 1..=100_000。
+    #[serde(default = "default_space_sync_gate_mb")]
+    pub space_sync_gate_mb: u32,
+    /// D90 拍板④：M0 直发（右键「共享到设备…」）保留代码但 UI 默认隐藏，
+    /// 熟手经设置打开；空间模型落地后按使用情况再定去留。
+    #[serde(default)]
+    pub direct_send_enabled: bool,
     /// 目标「上框点位」的 UI 覆盖（D76.4）：key = 目标 id（如 qianniu）。
     /// 空 = 该目标用画像链上的值（手编 user.toml 或内置）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -111,6 +124,14 @@ fn default_nudge_offscreen_window() -> bool {
 
 fn default_suppress_activate_on_asset_click() -> bool {
     true
+}
+
+fn default_space_sync_gate() -> bool {
+    true
+}
+
+fn default_space_sync_gate_mb() -> u32 {
+    500
 }
 
 fn default_auto_update_check() -> bool {
@@ -140,6 +161,7 @@ impl AppSettings {
         self.sidebar_width = self
             .sidebar_width
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        self.space_sync_gate_mb = self.space_sync_gate_mb.clamp(1, 100_000);
         self
     }
 
@@ -239,6 +261,9 @@ impl Default for AppSettings {
             nudge_offscreen_window: default_nudge_offscreen_window(),
             auto_elevate_on_launch: false,
             suppress_activate_on_asset_click: default_suppress_activate_on_asset_click(),
+            space_sync_gate: default_space_sync_gate(),
+            space_sync_gate_mb: default_space_sync_gate_mb(),
+            direct_send_enabled: false,
             input_point_overrides: BTreeMap::new(),
         }
     }
@@ -302,6 +327,8 @@ impl AppSettings {
             "nudge_offscreen_window" => self.nudge_offscreen_window,
             "auto_elevate_on_launch" => self.auto_elevate_on_launch,
             "suppress_activate_on_asset_click" => self.suppress_activate_on_asset_click,
+            "space_sync_gate" => self.space_sync_gate,
+            "direct_send_enabled" => self.direct_send_enabled,
             _ => false,
         }
     }
@@ -320,6 +347,8 @@ impl AppSettings {
             "nudge_offscreen_window" => Some(&mut self.nudge_offscreen_window),
             "auto_elevate_on_launch" => Some(&mut self.auto_elevate_on_launch),
             "suppress_activate_on_asset_click" => Some(&mut self.suppress_activate_on_asset_click),
+            "space_sync_gate" => Some(&mut self.space_sync_gate),
+            "direct_send_enabled" => Some(&mut self.direct_send_enabled),
             _ => None,
         }
     }
@@ -345,6 +374,8 @@ impl AppSettings {
             "nudge_offscreen_window" => "窗口滑出屏幕时上框前自动拉回，立即生效。",
             "suppress_activate_on_asset_click" => "与目标应用重叠时左键点素材不弹本窗到最前，避免层序闪烁（右键照常上浮）；此时键盘焦点仍在目标应用。立即生效。",
             "auto_elevate_on_launch" => "开启即弹 UAC 以管理员重启，可向管理员运行的目标注入；代价：无法再从资源管理器拖入素材。",
+            "space_sync_gate" => "开启：共享空间一次性新增超过上限时，先列出清单等你确认再下载，防止误传大文件占满磁盘；平时小额内容仍自动同步。",
+            "direct_send_enabled" => "旧功能：右键菜单出现「共享到设备…」，可直接传给局域网在线设备。日常共享建议用左侧的共享空间。",
             _ => "",
         }
     }
@@ -404,6 +435,18 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
         "fast_import_mode",
         "前台高速导入",
         "导入",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
+        "space_sync_gate",
+        "大空间同步手动确认",
+        "共享",
+        SettingKind::Toggle,
+    ),
+    SettingSpec::new(
+        "direct_send_enabled",
+        "直发到在线设备",
+        "共享",
         SettingKind::Toggle,
     ),
     SettingSpec::new("light_theme", "浅色主题", "外观", SettingKind::Toggle),
@@ -482,15 +525,18 @@ mod tests {
             nudge_offscreen_window: false,
             auto_elevate_on_launch: false,
             suppress_activate_on_asset_click: true,
+            space_sync_gate: true,
+            space_sync_gate_mb: 500,
+            direct_send_enabled: false,
             input_point_overrides: BTreeMap::new(),
         };
         let views = settings.describe();
 
-        // 分区标题按 section 变化插入：4 组 → 恰好 4 条 header，且位置正确。
+        // 分区标题按 section 变化插入：5 组 → 恰好 5 条 header，且位置正确。
         let headers: Vec<&SettingView> = views.iter().filter(|v| v.header).collect();
         assert_eq!(
             headers.iter().map(|h| h.title.as_str()).collect::<Vec<_>>(),
-            ["上框行为", "导入", "外观", "高级"],
+            ["上框行为", "导入", "共享", "外观", "高级"],
             "分区标题按顺序恰好出现一次"
         );
 
@@ -518,6 +564,8 @@ mod tests {
                 "nudge_offscreen_window" => settings.nudge_offscreen_window,
                 "auto_elevate_on_launch" => settings.auto_elevate_on_launch,
                 "suppress_activate_on_asset_click" => settings.suppress_activate_on_asset_click,
+                "space_sync_gate" => settings.space_sync_gate,
+                "direct_send_enabled" => settings.direct_send_enabled,
                 other => unreachable!("SETTING_SPECS 出现未知 key: {other}"),
             };
             assert_eq!(

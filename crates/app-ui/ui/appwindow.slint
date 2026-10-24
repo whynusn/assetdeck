@@ -159,6 +159,14 @@ export struct ShareCtlMemberData {
     checked: bool,
 }
 
+// D90 共享空间行（侧栏空间段 + 空间管理弹窗 + 添加到空间弹窗共用）：
+// id = 空间 uuid 文本（回调回传寻址）；sub-label = 成员数（P2 追加同步态）。
+export struct SpaceRowData {
+    id: string,
+    name: string,
+    sub-label: string,
+}
+
 // D80-M1-b 发现面行：对端（id 供选中回传 / detail = 可得项数）与它的可得清单行
 //（asset-id 供索取回调回传；kind = UiEnums.card-kind-*；size = 人话字节数）。
 export struct ShareFacePeerData {
@@ -319,65 +327,42 @@ export component AppWindow inherits Window {
     in property <string> share-offer-text: "";
     callback share-offer-accept();
     callback share-offer-reject();
-    // 多选操作条「共享」入口（右键菜单走 menu-action(5)）。
+    // 多选操作条「共享」入口（D90：主库视图 = 添加到共享空间；右键菜单走
+    // menu-action(7)）。M0 直发经设置 direct-send-enabled 打开后语义不变。
     callback share-selection-requested();
     // 在途批次摘要条（多批并发「；」连接；空串 = 不渲染）。
         in property <string> share-summary-text: "";
 
-        // —— D80-M1-b 发现面（接收侧）：谁共享了什么 + 索取审批 ——
-        // D80-M2 发现面已并入共享中心弹窗（模型/回调沿用 face 前缀）：
-        // 对端行（单选）+ 其可得清单；点「索取」走审批弹窗，对端显式同意
-        // 后才推送（素材移动原语 = 推送 + 接收侧双确认）。
-        in property <[ShareFacePeerData]> share-face-peers;
-        in property <[ShareFaceOfferData]> share-face-offers;
-        in property <int> share-face-selected-peer: -1;
-        in property <string> share-face-hint: "";
-        callback share-face-refresh();
-        callback share-face-peer-picked(int);
-        callback share-face-offer-requested(string);
-        // 索取审批弹窗（接收侧第二道门）：正文由壳层从请求 + 目录解析生成。
-        in property <bool> share-request-open: false;
-        in property <string> share-request-text: "";
-        callback share-request-accept();
-        callback share-request-reject();
-
-        // —— D80-M1 共享控制面：共享态勾选弹窗 + 配对册/域册管理弹窗 ——
-        // 共享态弹窗：右键「共享到域…」逐域标记/撤销「对该域共享中」。
-        in property <bool> share-domains-open: false;
-        in property <[ShareCtlDomainData]> share-asset-domains;
-        in property <string> share-domains-hint: "";
-        callback share-domains-closed();
-        callback share-domain-toggled(string);
-        callback share-ctl-open-requested();
-        // 管理弹窗：设备册增删 + 域册增删删选 + 选中域成员勾选。
-        in property <bool> share-ctl-open: false;
-        in property <[ShareCtlDeviceData]> share-ctl-devices;
-        in property <[ShareCtlDomainData]> share-ctl-domains;
-        in property <int> share-ctl-selected-domain: -1;
-        in property <string> share-ctl-selected-domain-id: "";
-        in property <[ShareCtlMemberData]> share-ctl-members;
-        in-out property <string> share-ctl-new-domain-name: "";
-        // M1-c 配对码 → D80-M2 收敛为「我的邀请码」：52 位标识本身就是设备
-        // 邀请码（一个东西一个名字）。配对码指纹展示移除（邀请直发模型里
-        // 核对动作消失，故障排查时日志仍可查）。
-        in-out property <string> share-ctl-self-id: "";
-        // D80-M2 邀请机制：顶部贴码加入（一次输入，设备/群组邀请码通吃）+
-        // 群组域邀请码展示 + 未读可得角标（接收侧盲区修复）。
-        in-out property <string> share-ctl-join-code: "";
-        in property <string> share-ctl-invite-code: "";
-        in property <int> share-ctl-unseen: 0;
-        callback share-ctl-join(string);
-        callback share-ctl-domain-invite(string);
-        callback share-ctl-closed();
-        // D80-M2 收敛：手动「备注名+标识+配对」行移除（贴原始标识走邀请码
-        // 框即可，备注名改在设备列表行内改名）。
-        callback share-ctl-device-remove(string);
-        callback share-ctl-device-rename(string, string);
-        callback share-ctl-personal-create(string);
-        callback share-ctl-domain-selected(int);
-        callback share-ctl-domain-create(string);
-        callback share-ctl-domain-remove(string);
-        callback share-ctl-member-toggled(string, bool);
+    // —— D90 共享空间 ——
+    // 作用域：进入空间 = 分类列表换成空间自己的（回收站/维护区只在主库
+    // 视图渲染），顶栏后缀显示空间名。selected-space = 空间行下标。
+    in property <bool> in-space-view: false;
+    in property <int> selected-space: -1;
+    in property <[SpaceRowData]> space-rows;
+    // D90 拍板④：M0 直发默认隐藏，熟手经设置打开（菜单项据此渲染）。
+    in property <bool> direct-send-enabled: false;
+    callback space-picked(string);
+    callback space-exit-requested();
+    callback space-manage-open-requested();
+    // 空间管理弹窗（D90 后唯一的共享管理面）：创建 + 清单 + 邀请码。
+    in property <bool> space-ctl-open: false;
+    in property <bool> space-ctl-ready: false;
+    in-out property <string> space-new-name: "";
+    in property <string> space-ctl-error: "";
+    // 邀请码展示（space-ctl-invite-for 指明所属空间；空串 = 收起展示）。
+    in property <string> space-ctl-invite: "";
+    in property <string> space-ctl-invite-for: "";
+    callback space-create(string);
+    callback space-leave(string);
+    callback space-invite-copy(string);
+    callback space-invite-reset(string);
+    callback space-ctl-closed();
+    // 「添加到共享空间」弹窗：行即空间，点击即加（右键菜单 menu-action(7)）。
+    in property <bool> space-add-open: false;
+    in property <[SpaceRowData]> space-add-rows;
+    in property <string> space-add-hint: "";
+    callback space-add-picked(string);
+    callback space-add-closed();
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
@@ -583,8 +568,7 @@ export component AppWindow inherits Window {
         || root.target-rename-open
         || root.tuning-open
         || root.share-devices-open || root.share-offer-open
-        || root.share-request-open
-        || root.share-domains-open || root.share-ctl-open
+        || root.space-ctl-open || root.space-add-open
         || root.update-open;
 
     // 浮层全部收拢后把焦点还给壳层根：弹窗输入框随条件元素销毁会清空焦点，
@@ -1001,7 +985,7 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // D80-M2 共享中心入口（管理面 + 发现面合并体）。
+                    // D90 共享空间管理入口（创建/清单/邀请码；取代 M1/M2 共享中心）。
                     face-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: Metrics.icon-button;
@@ -1009,24 +993,11 @@ export component AppWindow inherits Window {
 
                         IconButton {
                             glyph: Glyph.share;
-                            tip: "共享中心：邀请码加入、配对设备、共享域与发现";
-                            active: root.share-ctl-open;
+                            tip: "共享空间：创建或加入团队空间，把素材共享给同事";
+                            active: root.space-ctl-open;
                             clicked => {
-                                root.share-ctl-open-requested();
+                                root.space-manage-open-requested();
                             }
-                        }
-
-                        // M2 未读可得角标：红点压图标右上角，开共享中心看详情。
-                        // 8px 是「余光可辨」的下限（同 D56 更新角标）。
-                        if root.share-ctl-unseen > 0: Rectangle {
-                            x: parent.width - 9px;
-                            y: 1px;
-                            width: 8px;
-                            height: 8px;
-                            border-radius: self.width / 2;
-                            background: Theme.danger;
-                            border-width: 1px;
-                            border-color: Theme.bg-bar;
                         }
                     }
 
@@ -1192,7 +1163,44 @@ export component AppWindow inherits Window {
                     background: Theme.bg-panel;
 
                     VerticalLayout {
-                        SectionLabel {
+                        // D90 作用域头：主库视图 = 「分类」标签；空间视图 = 空间
+                        // 身份行（点击返回我的素材，当前空间一眼可辨）。
+                        if root.in-space-view: Rectangle {
+                            height: 36px;
+                            background: scope-back.has-hover ? Theme.bg-raised : Theme.accent-soft;
+
+                            HorizontalLayout {
+                                padding-left: Spacing.xl;
+                                padding-right: Spacing.xl;
+                                spacing: Spacing.sm;
+
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.share;
+                                    tint: Theme.accent;
+                                    width: 13px;
+                                    height: 13px;
+                                }
+
+                                Text {
+                                    text: root.filter-label;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    color: Theme.text;
+                                    font-size: Typography.body;
+                                    overflow: elide;
+                                }
+                            }
+
+                            scope-back := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.space-exit-requested();
+                                }
+                            }
+                        }
+
+                        if !root.in-space-view: SectionLabel {
                             x: Spacing.xl;
                             height: Metrics.row-compact;
                             text: "分类";
@@ -1267,7 +1275,8 @@ export component AppWindow inherits Window {
                         }
 
                         // D46 回收站入口（侧栏系统分类项）：选中 = 专用 Trash 视图。
-                        Rectangle {
+                        // D90：空间库没有本地回收站（移出 = 直删），空间视图整行隐藏。
+                        if !root.in-space-view: Rectangle {
                             height: 36px;
                             background: root.selected-category == -3 ? Theme.accent-soft
                                 : (trash-touch.has-hover ? Theme.bg-raised : transparent);
@@ -1322,14 +1331,102 @@ export component AppWindow inherits Window {
                             background: Theme.line;
                         }
 
-                        // 素材库维护区：导入目录 / 导出 / 清空。
+                        // —— D90 共享空间段：行 = 已加入空间，点击进入（换根浏览）——
+                        SectionLabel {
+                            x: Spacing.xl;
+                            height: Metrics.row-compact;
+                            text: "共享空间";
+                        }
+
+                        for space[i] in root.space-rows: Rectangle {
+                            height: 36px;
+                            background: i == root.selected-space ? Theme.accent-soft
+                                : (space-touch.has-hover ? Theme.bg-raised : transparent);
+                            animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+
+                            Rectangle {
+                                x: 0;
+                                width: 3px;
+                                height: parent.height;
+                                background: i == root.selected-space ? Theme.accent : transparent;
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Spacing.xl;
+                                padding-right: Spacing.xl;
+                                spacing: Spacing.sm;
+
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.share;
+                                    tint: i == root.selected-space ? Theme.accent : Theme.text-3;
+                                    width: 13px;
+                                    height: 13px;
+                                }
+
+                                Text {
+                                    text: space.name;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    color: i == root.selected-space ? Theme.text : Theme.text-2;
+                                    font-size: Typography.body;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: space.sub-label;
+                                    vertical-alignment: center;
+                                    color: Theme.text-3;
+                                    font-size: Typography.caption;
+                                }
+                            }
+
+                            space-touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.space-picked(space.id);
+                                }
+                                Tooltip {
+                                    text: @markdown("共享空间：素材已同步到本地，**双击即可发给客户**");
+                                }
+                            }
+                        }
+
+                        // 空状态：一次点击直达创建/加入（管理弹窗）。
+                        if root.space-rows.length == 0: Rectangle {
+                            height: 36px;
+                            background: space-empty-touch.has-hover ? Theme.bg-raised : transparent;
+
+                            HorizontalLayout {
+                                padding-left: Spacing.xl;
+                                padding-right: Spacing.xl;
+
+                                Text {
+                                    text: "+ 创建或加入空间";
+                                    vertical-alignment: center;
+                                    color: Theme.text-3;
+                                    font-size: Typography.body;
+                                }
+                            }
+
+                            space-empty-touch := TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.space-manage-open-requested();
+                                }
+                            }
+                        }
+
+                        // —— 素材库维护区：导入常驻（空间视图 = 向空间投放素材，
+                        // id 锚点不得进条件块——导入菜单浮层要跨作用域引用）；
+                        // 导出是主库概念，空间视图隐藏 ——
                         VerticalLayout {
                             padding: Spacing.lg;
                             spacing: Spacing.md;
 
                             SectionLabel {
                                 height: 18px;
-                                text: "素材库";
+                                text: root.in-space-view ? "共享空间" : "素材库";
                             }
 
                             // 导入单入口：一个按钮弹出菜单，按来源二选一「文件 / 文件夹」。
@@ -1350,9 +1447,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 高度必须显式钉死：裸 std Button 会参与纵向布局的
-                            // 剩余空间分配，被拉成一百多 px 的高块（渲染实测）。
-                            Button {
+                            if !root.in-space-view: Button {
                                 height: Metrics.control;
                                 text: "导出为 .emo…";
                                 clicked => {
@@ -1518,7 +1613,7 @@ export component AppWindow inherits Window {
                                     y: 6px;
                                     width: 1px;
                                     height: parent.height - 12px;
-                                    color: Theme.line-strong;
+                                    background: Theme.line-strong;
                                 }
 
                                 if tile.search-segments.length == 0: Text {
@@ -2437,10 +2532,10 @@ export component AppWindow inherits Window {
         }
 
         // —— D48 右键菜单浮层：锚右键命中点，坐标由壳层夹取（贴边不越窗）——
-        // 夹取高度随菜单行数：6 行（D80 追加共享后）约 310px。
+        // 夹取高度随菜单行数：最多 7 行（D90 空间项 + 直发门控项）约 360px。
         if root.context-menu-open: Rectangle {
             x: Math.min(root.context-menu-x, root.width - 220px);
-            y: Math.min(root.context-menu-y, root.height - 310px);
+            y: Math.min(root.context-menu-y, root.height - 360px);
             width: 220px;
             height: menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2498,17 +2593,20 @@ export component AppWindow inherits Window {
                     height: 1px;
                     background: Theme.line;
                 }
+                // D90：主库视图 = 删除进回收站；空间视图 = 移出空间（副本直删，
+                // 我的素材原件不动）。
                 MenuItem {
                     glyph: Glyph.trash;
-                    text: "删除";
-                    detail: "进回收站，可恢复";
+                    text: root.in-space-view ? "从空间移除" : "删除";
+                    detail: root.in-space-view ? "只影响共享空间，我的素材不动" : "进回收站，可恢复";
                     danger: true;
                     clicked => {
                         root.menu-action(4);
                     }
                 }
-                // D80 共享入口（id=5 追加在删除之后：既有 id 0–4 语义不变）。
-                MenuItem {
+                // D90 拍板④：M0 直发默认隐藏，设置 direct-send-enabled 打开后
+                // 出现（id=5 语义不变）。
+                if root.direct-send-enabled: MenuItem {
                     glyph: Glyph.share;
                     text: "共享到设备…";
                     detail: "局域网直传";
@@ -2516,14 +2614,22 @@ export component AppWindow inherits Window {
                         root.menu-action(5);
                     }
                 }
-                // D80-M1 共享态入口（id=6）：标记/撤销对某域的「共享中」，
-                // 只改可获得性，不触发任何传输。
-                MenuItem {
+                // D90 共享空间：主库视图添加进空间（副本即落本地+广播）。
+                if !root.in-space-view: MenuItem {
                     glyph: Glyph.share;
-                    text: "共享到域…";
-                    detail: "标记可获得性";
+                    text: "添加到共享空间…";
+                    detail: "同步给空间里的每位成员";
                     clicked => {
-                        root.menu-action(6);
+                        root.menu-action(7);
+                    }
+                }
+                // D90：空间视图把副本存回我的素材（同一导入管线，内容等值自动去重）。
+                if root.in-space-view: MenuItem {
+                    glyph: Glyph.share;
+                    text: "保存到我的素材";
+                    detail: "复制一份到我的素材";
+                    clicked => {
+                        root.menu-action(8);
                     }
                 }
             }
@@ -2723,8 +2829,9 @@ export component AppWindow inherits Window {
                     text: "移动到分类";
                     clicked => { root.move-selection-requested(); }
                 }
-                // D80 共享入口：与右键菜单 menu-action(5) 殊途同归（壳层同函数）。
-                if root.selection-bar == UiEnums.bar-multi: Button {
+                // D90 共享入口：主库视图 = 添加到共享空间（与右键菜单
+                // menu-action(7) 殊途同归，壳层同函数）；空间视图隐藏。
+                if root.selection-bar == UiEnums.bar-multi && !root.in-space-view: Button {
                     height: Metrics.control;
                     enabled: root.selection-count > 0;
                     text: "共享";
@@ -2942,12 +3049,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // —— D80-M1-b 索取审批弹窗（接收侧第二道门：同意才推送）——
-        if root.share-request-open: Rectangle {
+        // —— D90「添加到共享空间」弹窗：行即空间，点哪加哪 ——
+        // 副本立即落本地；在线成员即时收到，离线成员上线自动补齐（副本集）。
+        if root.space-add-open: Rectangle {
             x: (root.width - 340px) / 2;
             y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
-            height: share-request-layout.preferred-height;
+            height: space-add-layout.preferred-height;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: Theme.line-strong;
@@ -2956,80 +3064,27 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            share-request-layout := VerticalLayout {
+            space-add-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
-                    text: "收到索取";
+                    text: "添加到共享空间";
                 }
                 Text {
-                    text: root.share-request-text;
-                    color: Theme.text-2;
-                    font-size: Typography.body;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: "同意后素材将以局域网直传发送给对方，发送前再无其他确认步骤。";
+                    text: "素材会复制进空间并同步给每位成员；对方不在线也没关系，上线后自动收到。";
                     color: Theme.text-3;
                     font-size: Typography.label;
                     wrap: word-wrap;
                 }
 
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        height: Metrics.control;
-                        text: "拒绝";
-                        clicked => { root.share-request-reject(); }
-                    }
-                    Button {
-                        height: Metrics.control;
-                        primary: true;
-                        text: "发送";
-                        clicked => { root.share-request-accept(); }
-                    }
-                }
-            }
-        }
-
-        // —— D80-M1 共享态弹窗：逐域勾选（只改可获得性，不触发传输）——
-        if root.share-domains-open: Rectangle {
-            x: (root.width - 340px) / 2;
-            y: Math.max(16px, (root.height - self.height) / 2);
-            width: 340px;
-            height: share-domains-layout.preferred-height;
-            border-radius: Theme.radius-lg;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-            background: Theme.bg-overlay;
-            drop-shadow-blur: 16px;
-            drop-shadow-offset-y: 4px;
-            drop-shadow-color: Theme.scrim;
-
-            share-domains-layout := VerticalLayout {
-                padding: Spacing.dialog-pad;
-                spacing: 10px;
-
-                TitleLabel {
-                    text: "共享态";
-                }
-                Text {
-                    text: "共享 = 让域内设备知道这些素材可得；对方点开仍需确认接收，不会自动送达。";
+                if root.space-add-rows.length == 0: Text {
+                    text: root.space-add-hint;
                     color: Theme.text-3;
                     font-size: Typography.label;
                     wrap: word-wrap;
                 }
-
-                if root.share-asset-domains.length == 0: Text {
-                    text: root.share-domains-hint;
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                for domain[i] in root.share-asset-domains: Rectangle {
+                for space in root.space-add-rows: Rectangle {
                     height: 36px;
                     border-radius: Theme.radius;
                     background: Theme.bg-raised;
@@ -3039,57 +3094,62 @@ export component AppWindow inherits Window {
                         padding-right: 10px;
                         spacing: 8px;
 
-                        VerticalLayout {
-                            alignment: center;
-
-                            Text {
-                                text: domain.name;
-                                color: Theme.text;
-                                font-size: Typography.body;
-                                overflow: elide;
-                            }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
                         Text {
-                            text: domain.shared ? "共享中" : "未共享";
-                            color: domain.shared ? Theme.shared : Theme.text-3;
-                            font-size: Typography.label;
+                            text: space.name;
+                            color: Theme.text;
+                            font-size: Typography.body;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Text {
+                            text: space.sub-label;
+                            color: Theme.text-3;
+                            font-size: Typography.caption;
                             vertical-alignment: center;
                         }
-                    }
-
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            root.share-domain-toggled(domain.id);
+                        Button {
+                            height: Metrics.row-compact;
+                            primary: true;
+                            text: "添加";
+                            clicked => {
+                                root.space-add-picked(space.id);
+                            }
                         }
                     }
+                }
+                if root.space-add-rows.length == 0: HorizontalLayout {
+                    spacing: 8px;
+
+                    Button {
+                        height: Metrics.control;
+                        text: "创建共享空间…";
+                        clicked => { root.space-manage-open-requested(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 HorizontalLayout {
                     spacing: 8px;
 
-                    Button {
-                        height: Metrics.control;
-                        text: "共享中心…";
-                        clicked => { root.share-ctl-open-requested(); }
-                    }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
                         height: Metrics.control;
-                        text: "关闭";
-                        clicked => { root.share-domains-closed(); }
+                        text: "取消";
+                        clicked => { root.space-add-closed(); }
                     }
                 }
             }
         }
 
-        // —— D80-M1 共享域管理弹窗：配对册 + 域册 + 成员勾选 ——
-        if root.share-ctl-open: Rectangle {
+        // —— D90 共享空间管理弹窗：创建 + 清单 + 邀请码（唯一共享管理面）——
+        // 心智模型（拍板：语义简单清晰）：空间 = 大家共用的素材柜，放进去的
+        // 素材自动同步到每位成员电脑；不在线的成员上线后自动补齐。
+        if root.space-ctl-open: Rectangle {
             x: (root.width - 420px) / 2;
             y: Math.max(16px, (root.height - self.height) / 2);
             width: 420px;
-            height: share-ctl-layout.preferred-height;
+            height: space-ctl-layout.preferred-height;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: Theme.line-strong;
@@ -3098,63 +3158,62 @@ export component AppWindow inherits Window {
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            share-ctl-layout := VerticalLayout {
+            space-ctl-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
                 spacing: 10px;
 
                 TitleLabel {
-                    text: "共享中心";
+                    text: "共享空间";
                 }
-
-                // D80-M2 邀请机制：全流程只认一个凭据——「我的邀请码」
-                // （52 位标识本身）+ 贴对方邀请码（设备/群组通吃，一次输入）。
-                // QUIC 握手证书交换身份，群主确认后名册广播把设备带进组
-                //（O(N) 免两两配对）。
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    Text {
-                        text: "我的邀请码";
-                        color: Theme.text-2;
-                        font-size: Typography.label;
-                        vertical-alignment: center;
-                    }
-                    LineEdit {
-                        text <=> root.share-ctl-self-id;
-                        read-only: true;
-                        placeholder-text: "共享通道未就绪";
-                        horizontal-stretch: 1;
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    LineEdit {
-                        text <=> root.share-ctl-join-code;
-                        placeholder-text: "粘贴对方的邀请码（设备或群组均可）";
-                        horizontal-stretch: 2;
-                    }
-                    Button {
-                        height: Metrics.control;
-                        primary: true;
-                        text: "加入";
-                        clicked => { root.share-ctl-join(root.share-ctl-join-code); }
-                    }
-                }
-
                 Text {
-                    text: "已配对设备（改名：直接编辑名称后回车）";
-                    color: Theme.text-2;
-                    font-size: Typography.label;
-                    font-weight: Typography.semibold;
-                }
-                if root.share-ctl-devices.length == 0: Text {
-                    text: "还没有配对设备。把上面「我的邀请码」发给对方，对方贴入即可互相配对。";
+                    text: "共享空间像大家共用的素材柜：加进去的素材自动同步到每位成员的电脑，不在线也会在上线后收到，用起来和自己的素材完全一样。";
                     color: Theme.text-3;
                     font-size: Typography.label;
                     wrap: word-wrap;
                 }
-                for device[i] in root.share-ctl-devices: Rectangle {
+
+                // 创建行：名字 + 创建（创建即进入空间视图，直接往里拖素材）。
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.space-new-name;
+                        placeholder-text: "新空间名称（如：团队素材）";
+                        horizontal-stretch: 1;
+                        accepted(text) => {
+                            root.space-create(text);
+                        }
+                    }
+                    Button {
+                        height: Metrics.control;
+                        primary: true;
+                        text: "创建";
+                        clicked => {
+                            root.space-create(root.space-new-name);
+                        }
+                    }
+                }
+                if root.space-ctl-error != "": Text {
+                    text: root.space-ctl-error;
+                    color: Theme.danger;
+                    font-size: Typography.label;
+                    wrap: word-wrap;
+                }
+                if !root.space-ctl-ready: Text {
+                    text: "共享引擎启动中，稍候片刻即可创建空间";
+                    color: Theme.text-3;
+                    font-size: Typography.label;
+                    wrap: word-wrap;
+                }
+
+                // 空间清单：行 = 名称 + 成员数 + 邀请码/退出。
+                if root.space-rows.length == 0: Text {
+                    text: "还没有共享空间。创建一个，把素材右键「添加到共享空间」，团队的素材库就一致了。";
+                    color: Theme.text-3;
+                    font-size: Typography.label;
+                    wrap: word-wrap;
+                }
+                for space in root.space-rows: Rectangle {
                     height: Metrics.control;
                     border-radius: Theme.radius;
                     background: Theme.bg-raised;
@@ -3164,245 +3223,62 @@ export component AppWindow inherits Window {
                         padding-right: 6px;
                         spacing: 8px;
 
-                        LineEdit {
-                            text: device.name;
-                            horizontal-stretch: 2;
-                            accepted(text) => {
-                                root.share-ctl-device-rename(device.id, text);
-                            }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        // M1-c 个人域：单设备专属域（个人域恒 1 成员）。
-                        Button {
-                            height: Metrics.row-compact;
-                            text: "个人域";
-                            clicked => { root.share-ctl-personal-create(device.id); }
-                        }
-                        Button {
-                            height: Metrics.row-compact;
-                            text: "移除";
-                            clicked => { root.share-ctl-device-remove(device.id); }
-                        }
-                    }
-                }
-
-                Text {
-                    text: "共享域（点选一行后勾成员）";
-                    color: Theme.text-2;
-                    font-size: Typography.label;
-                    font-weight: Typography.semibold;
-                }
-                if root.share-ctl-domains.length == 0: Text {
-                    text: "还没有共享域——为设备建个人域，或新建群组域后勾选成员。";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                }
-                for domain[i] in root.share-ctl-domains: Rectangle {
-                    height: Metrics.control;
-                    border-radius: Theme.radius;
-                    border-width: domain.selected ? 1px : 0px;
-                    border-color: Theme.accent;
-                    background: domain.selected ? Theme.accent-soft : Theme.bg-raised;
-
-                    // 整行选择用 TouchArea 必须**垫底**（声明在布局之前）：
-                    // Slint 后声明者在顶层收点击，垫在后会吃掉行内
-                    // 「邀请码/删除」按钮的点击（1.17.1 实测点不动）。
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            root.share-ctl-domain-selected(i);
-                        }
-                    }
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 6px;
-                        spacing: 8px;
-
                         Text {
-                            text: domain.name;
+                            text: space.name;
                             color: Theme.text;
                             font-size: Typography.body;
                             vertical-alignment: center;
                             overflow: elide;
                         }
                         Text {
-                            text: domain.is-personal ? "个人" : domain.member-count + " 成员";
+                            text: space.sub-label;
                             color: Theme.text-3;
                             font-size: Typography.caption;
                             vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; }
-                        // D80-M2 群组域邀请码：点击生成展示（发给对方即可加入）。
-                        if !domain.is-personal: Button {
+                        Button {
                             height: Metrics.row-compact;
                             text: "邀请码";
-                            clicked => { root.share-ctl-domain-invite(domain.id); }
+                            clicked => { root.space-invite-copy(space.id); }
                         }
                         Button {
                             height: Metrics.row-compact;
-                            text: "删除";
-                            clicked => { root.share-ctl-domain-remove(domain.id); }
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    LineEdit {
-                        text <=> root.share-ctl-new-domain-name;
-                        placeholder-text: "新域名称";
-                        horizontal-stretch: 1;
-                    }
-                    Button {
-                        height: Metrics.control;
-                        text: "新建群组域";
-                        clicked => {
-                            root.share-ctl-domain-create(root.share-ctl-new-domain-name);
+                            text: "退出";
+                            clicked => { root.space-leave(space.id); }
                         }
                     }
                 }
 
-                if root.share-ctl-selected-domain >= 0 && root.share-ctl-members.length > 0: Text {
-                    text: "勾选成员（个人域至多 1 名）";
-                    color: Theme.text-2;
-                    font-size: Typography.label;
-                    font-weight: Typography.semibold;
-                }
-                for member[j] in root.share-ctl-members: CheckBox {
-                    text: member.name;
-                    checked: member.checked;
-                    toggled => {
-                        root.share-ctl-member-toggled(member.id, self.checked);
-                    }
-                }
-
-                // D80-M2 群组邀请码展示：只读可选中复制（发给对方粘贴加入）。
-                if root.share-ctl-invite-code != "": VerticalLayout {
+                // 邀请码展示：只读可选中复制 + 重置（旧码即刻失效，拍板③：
+                // 旋转机制保留，「重置」一个词对用户）。
+                if root.space-ctl-invite != "": VerticalLayout {
                     spacing: 4px;
                     Text {
-                        text: "本群组邀请码（发给对方，对方粘贴后等你确认）";
+                        text: "空间邀请码（发给同事，对方点这里输入即可加入）";
                         color: Theme.text-2;
                         font-size: Typography.label;
                         font-weight: Typography.semibold;
                     }
                     LineEdit {
-                        text: root.share-ctl-invite-code;
+                        text: root.space-ctl-invite;
                         read-only: true;
                     }
-                }
-
-                // —— D80-M2 发现分区（原共享发现弹窗并入）：对端行单选 +
-                // 选中对端的可得清单逐行「索取」；索取走审批弹窗，不自动投递。
-                Text {
-                    text: "来自对端的共享（发现）";
-                    color: Theme.text-2;
-                    font-size: Typography.label;
-                    font-weight: Typography.semibold;
-                }
-                Text {
-                    text: root.share-face-hint;
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                if root.share-face-peers.length == 0: Text {
-                    text: "暂无共享——已配对对端共享素材后这里会列出";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                for peer[i] in root.share-face-peers: Rectangle {
-                    height: 36px;
-                    border-radius: Theme.radius;
-                    border-width: peer.selected ? 1px : 0px;
-                    border-color: Theme.accent;
-                    background: peer.selected ? Theme.accent-soft : Theme.bg-raised;
-
                     HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
                         spacing: 8px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: Spacing.xxs;
-
-                            Text {
-                                text: peer.name;
-                                color: Theme.text;
-                                font-size: Typography.body;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: peer.detail;
-                                color: Theme.text-3;
-                                font-size: Typography.caption;
-                                overflow: elide;
-                            }
-                        }
-                    }
-
-                    TouchArea {
-                        mouse-cursor: MouseCursor.pointer;
-                        clicked => {
-                            root.share-face-peer-picked(i);
-                        }
-                    }
-                }
-                if root.share-face-selected-peer >= 0 && root.share-face-offers.length == 0: Text {
-                    text: "该设备暂无共享素材";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                }
-                for offer in root.share-face-offers: Rectangle {
-                    height: 36px;
-                    border-radius: Theme.radius;
-                    background: Theme.bg-raised;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: Spacing.xxs;
-
-                            Text {
-                                text: offer.name;
-                                color: Theme.text;
-                                font-size: Typography.body;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: offer.size;
-                                color: Theme.text-3;
-                                font-size: Typography.caption;
-                                overflow: elide;
-                            }
-                        }
-
-                        Rectangle { horizontal-stretch: 1; }
 
                         Button {
                             height: Metrics.row-compact;
-                            text: "索取";
-                            clicked => {
-                                root.share-face-offer-requested(offer.asset-id);
-                            }
+                            text: "复制";
+                            clicked => { root.space-invite-copy(root.space-ctl-invite-for); }
                         }
+                        Button {
+                            height: Metrics.row-compact;
+                            text: "重置邀请码";
+                            clicked => { root.space-invite-reset(root.space-ctl-invite-for); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    Button {
-                        height: Metrics.control;
-                        text: "刷新发现";
-                        clicked => { root.share-face-refresh(); }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 HorizontalLayout {
@@ -3412,11 +3288,13 @@ export component AppWindow inherits Window {
                     Button {
                         height: Metrics.control;
                         text: "关闭";
-                        clicked => { root.share-ctl-closed(); }
+                        clicked => { root.space-ctl-closed(); }
                     }
                 }
             }
         }
+
+
 
         // —— 重命名弹窗 ——
         if root.rename-open: Rectangle {

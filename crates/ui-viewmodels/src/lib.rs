@@ -11,6 +11,7 @@ pub mod selection;
 pub mod settings;
 pub mod share_control;
 pub mod share_vm;
+pub mod space_vm;
 pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
 pub mod target_runtime;
@@ -19,8 +20,8 @@ pub mod update_apply;
 pub mod update_check;
 
 pub use catalog_loader::{
-    load_library_catalog, load_real_library, CatalogError, FacetEntry, LibraryFacets,
-    MaterializedAsset, RealAssetResolver,
+    ensure_library_skeleton, load_library_catalog, load_real_library, CatalogError, FacetEntry,
+    LibraryFacets, MaterializedAsset, RealAssetResolver,
 };
 pub use category_rows::CategoryRows;
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent, TEXT_TILE_HEIGHT};
@@ -51,6 +52,12 @@ pub use share_control::{ControlError, ShareControlVm};
 pub use share::{DeviceEntry, SendItem, ShareOffer};
 // D80-M1-c 配对码指纹（share pairing 模块）：app-ui 走本 crate。
 pub use share::pairing_code;
+// D90 共享空间：模型与 VM 经此转发（app-ui 白名单不含 share，同上）。
+pub use share::{
+    parse_space_invite_code, space_invite_code, SpaceError, SpaceInviteCode, SpaceMeta, SpaceOp,
+    SpaceOpKind, SpaceRegistry, SpaceRole,
+};
+pub use space_vm::SpaceVm;
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,

@@ -86,7 +86,7 @@ pub fn parse_invite_code(code: &str) -> Result<InviteCode, InviteError> {
 }
 
 /// 16 字节（域 id）→ 26 字符 z32（128 位 → ceil(128/5)=26，末组零填充）。
-fn z32_encode(bytes: &[u8]) -> String {
+pub(crate) fn z32_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(26);
     let mut acc: u32 = 0;
     let mut bits = 0u32;
@@ -105,7 +105,7 @@ fn z32_encode(bytes: &[u8]) -> String {
 }
 
 /// 26 字符 z32 → 16 字节（长度/表外字符即非法）。
-fn z32_decode(text: &str) -> Result<Uuid, ()> {
+pub(crate) fn z32_decode(text: &str) -> Result<Uuid, ()> {
     let bytes = text.as_bytes();
     if bytes.len() != 26 {
         return Err(());

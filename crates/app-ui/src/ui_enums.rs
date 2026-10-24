@@ -64,6 +64,9 @@ pub fn menu_action(id: i32) -> Option<MenuAction> {
         5 => Some(MenuAction::Share),
         // D80-M1 共享态入口（同追加在尾纪律）。
         6 => Some(MenuAction::ShareToDomain),
+        // D90 共享空间两项（同追加在尾纪律）。
+        7 => Some(MenuAction::AddToSpace),
+        8 => Some(MenuAction::SaveToLibrary),
         _ => None,
     }
 }

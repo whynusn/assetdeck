@@ -59,6 +59,46 @@ fn parse_staging_root(args: &[String]) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn parse_key_file(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .position(|a| a == "--key-file")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+}
+
+/// 设备密钥持久化（D90）：endpoint 私钥落盘，52 位设备标识跨重启稳定——
+/// 空间名册的成员 id、邀请码的 owner 段都以它为唯一身份。M1 的临时密钥
+/// 形态下标识每次启动漂移，配对册跨重启本就失效（真机批次未跑故未暴露）。
+/// 文件 = 32 字节裸密钥；缺失/长度不符 = 重新生成并覆盖（旧身份作废，
+/// 诚实代价：所有以旧 id 建立的信任关系需重新邀请）。
+fn load_or_create_secret_key(path: Option<&std::path::Path>) -> iroh::SecretKey {
+    use std::io::Read;
+    let Some(path) = path else {
+        logging::warn!("未指定 --key-file，设备标识本次会话后将漂移（测试模式）");
+        return iroh::SecretKey::generate();
+    };
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut bytes = [0u8; 32];
+        if file.read_exact(&mut bytes).is_ok() {
+            return iroh::SecretKey::from_bytes(&bytes);
+        }
+    }
+    let key = iroh::SecretKey::generate();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    // 先写 tmp 再 rename（同壳层 atomic_write 模式）：半写文件下次读不出
+    // 32 字节即重生成，不会载入半截密钥。
+    let tmp = path.with_extension("key.tmp");
+    match std::fs::write(&tmp, key.to_bytes()).and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => logging::info!("设备密钥已持久化 {}", path.display()),
+        Err(error) => logging::warn!("设备密钥写入失败（本次会话仍可用）: {error}"),
+    }
+    key
+}
+
 /// 设备表 → EndpointAddr（id + 直连地址）。地址全非法或为空时仍以纯 id
 /// 拨号（M1-c pkarr 信令/DNS 地址发现 + 本地地址簿缓存解析直连地址——
 /// 邀请流的贴码方就是靠这条路径首次连上签发方）。
@@ -90,7 +130,10 @@ async fn main() {
     // 直连）；portmapper 不再显式关闭（Builder 默认 Enabled，网关映射地址
     // 被当作可拨直连地址发布——直连成功率的关键增量）。信令与映射的真机
     // 连通性（iroh.link 可达性、NAT 网关放行）归真机批次验证。
+    // D90：secret_key 显式注入（--key-file 持久化，身份跨重启稳定）。
+    let secret_key = load_or_create_secret_key(parse_key_file(&args).as_deref());
     let endpoint = match Endpoint::builder(presets::N0DisableRelay)
+        .secret_key(secret_key)
         .alpns(vec![
             share::ALPN.as_bytes().to_vec(),
             share::ALPN_SYNC.as_bytes().to_vec(),

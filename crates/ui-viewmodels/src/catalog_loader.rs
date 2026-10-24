@@ -464,6 +464,16 @@ impl RealAssetResolver {
     }
 }
 
+/// 建库骨架（D90 空间库首次打开）：`Store::open` 建库即跑迁移，空库即刻
+/// 可装载。无并发写者的 schema 初始化；此后的导入/库写仍走子进程（单写者
+/// 纪律不破）。app-ui 依赖白名单不含 store，经此转发。
+pub fn ensure_library_skeleton(root: &Path) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let db = root.join("meta.db");
+    drop(Store::open(&db)?);
+    Ok(())
+}
+
 /// 打开真实库目录并同时返回 `FacetIndex` 与素材 resolver。
 ///
 /// `index` 由 meta.db 流式装载；`uuids` 按同样的 `AssetId` 顺序保存，确保
