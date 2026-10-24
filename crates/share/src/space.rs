@@ -232,6 +232,20 @@ pub struct SpaceAssetMeta {
     pub content_hash: Vec<u8>,
 }
 
+impl SpaceAssetMeta {
+    /// 结构性守卫：文件名安全、摘要 32 字节、大小在上限内（Add/Fetch 共用）。
+    pub fn validate(&self) -> Result<(), SpaceError> {
+        if !is_safe_display_name(&self.file_name)
+            || self.content_hash.len() != 32
+            || self.size_bytes > MAX_ASSET_BYTES
+        {
+            Err(SpaceError::BadAsset)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// op 载荷的素材类别（store 的 AssetKind 不进契约层：share 不依赖 domain
 /// 之外的分类面，枚举自持避免 crate 间漂移）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,14 +341,7 @@ impl SpaceOp {
             return Err(SpaceError::BadAuthor);
         }
         match &self.op {
-            SpaceOpKind::Add { asset } => {
-                if !is_safe_display_name(&asset.file_name)
-                    || asset.content_hash.len() != 32
-                    || asset.size_bytes > MAX_ASSET_BYTES
-                {
-                    return Err(SpaceError::BadAsset);
-                }
-            }
+            SpaceOpKind::Add { asset } => asset.validate()?,
             SpaceOpKind::SetCategory { category, .. } => {
                 if let Some(name) = category {
                     if !is_safe_label(name) {
