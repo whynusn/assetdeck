@@ -17,6 +17,18 @@
 - 设计目标规模：**10–100 万条资产必须丝滑**。任何全量载入内存的实现（如把全部元数据读进 Vec）都违反 D3/D4。
 - 内存回归监控要进 CI（行动项 A3）；在监控落地前，新增依赖或缓存时手动评估常驻内存增量。
 
+## 构建验证纪律（全量构建实测 28 分钟，禁止随手全量）
+
+- **只验证被改动的 crate**：`cargo check -p <crate>`（2026-10-24 实测：改 store 后增量 1.2s）/ `cargo clippy -p <crate> --all-targets` / `cargo test -p <crate>`。改底层 crate（如 store）波及 library→ui-viewmodels→app-ui，验证补上链上受影响 crate 的 `-p` 即可，**不要升级成全量**。
+- `--workspace` 全量只在两处跑：提交前最后一次本地验证（CI 同款）、跨 crate 结构性改动。日常迭代全程用 `-p`。
+- **check / clippy / build 三套产物缓存互不共享**：同一轮验证选定一种工具，交替跑等于反复全量重编。
+- 抓语法/类型错误用 `check` 就够；`cargo build`（含链接）只在需要跑 exe 或打包时才用。
+- clippy 无自定义规则集（无 clippy.toml、无 [workspace.lints]）：CI = `cargo clippy --workspace --all-targets -- -D warnings`（工具链钉死 1.98.0）。本地对齐标准 = `cargo clippy -p <crate> --all-targets -- -D warnings`。
+- cargo 卡在 `Updating ... index` 就是源问题：TUNA 镜像 2026-10-24 起连不通，`~/.cargo/config.toml` 已临时切 crates.io 直连（TUNA 段保留注释，恢复后可切回）。
+- **磁盘纪律**：cargo 从不自动删失效产物——profile/工具链/flags 变更或清目录重建后，旧指纹产物永久滞留 `target\debug`，每轮全量净增几十 GB（2026-10-24 实测 42GB→清后重建）。**全量重建完成后必须清死缓存**：保留 mtime 晚于重建起点的文件，删其余。
+- sccache 已启用（`~/.cargo/config.toml` 的 `[build] rustc-wrapper`，20G 上限）：依赖层编译缓存，清 target/切分支后依赖重编从缓存秒回；workspace 自身 crate 走增量编译不受影响。
+- `[profile.dev] debug = "line-tables-only"`（根 Cargo.toml）：产物小、build 提速；调试器只看堆栈不看变量，排障走日志/UIA 截图。
+
 ## 架构红线
 
 - **进程模型**：UI 主进程单实例，永不执行缩略图生成/视频抽帧/pHash 计算——这些全部放独立 worker 进程池（核数封顶、IO idle 优先级）。
@@ -38,7 +50,7 @@
 - 本地工具链：rustup `stable-x86_64-pc-windows-gnu`（位于 `~/.rustup`）；cargo/rustc/clippy 等经 **scoop shims**（`~/scoop/shims`）暴露。CI 用 runner 自带 MSVC——源码级兼容。
 - **MinGW 依赖**：scoop `gcc` 包提供 binutils；`dlltool`/`gcc`/`ld` 的 shims 是 raw-dylib（windows-* crate 族）硬依赖，**禁止删除**。缺 dlltool 时构建报 "error calling dlltool"。
 - `.cargo/config.toml` 为 gnu target 注入 `-L native=<mingw lib>`（解决 nuwen 发行版导入库搜索路径问题），勿删。
-- rustup 镜像已配用户级环境变量 `RUSTUP_DIST_SERVER`/`RUSTUP_UPDATE_ROOT` → TUNA。
+- rustup 源：用户级 `RUSTUP_DIST_SERVER`/`RUSTUP_UPDATE_ROOT`（→TUNA）已于 2026-10-24 删除——官方 `static.rust-lang.org` 直连实测 1.7s 可用，且 TUNA 间歇性挂（10-22、10-24 两次）不值得再绕。cargo 源同理：`~/.cargo/config.toml` 已切 crates.io 直连（index 0.6s / 下载 1.5s 实测），TUNA 段注释保留可切回。cargo 命令若卡 `Updating ... index` 即源问题，先测 `curl -m 15 https://index.crates.io/config.json`。
 - Slint 以 `default-features = false` 使用时**必须带 `compat-1-2` feature**，否则编译期 compile_error!。
 
 ## 大文件自建清单（Slint 生态缺口，评估工期时计入）

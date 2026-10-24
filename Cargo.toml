@@ -11,6 +11,12 @@ publish = false
 lto = "thin"
 strip = "symbols"
 
+[profile.dev]
+# debuginfo 只留行号表（2026-10-24）：debug 构建提速 + target/debug 膨胀大幅放缓
+# （当天已达 42GB，大头是 DWARF）。排障走日志/UIA 截图，调试器只看堆栈不看变量；
+# 需要完整变量查看时临时改回 debug = true 重编一次。
+debug = "line-tables-only"
+
 [patch.crates-io]
 # D80：iroh 1.1.0 / iroh-relay 1.1.0 上游为 FFI 场景声明 cdylib，cargo 会连带产出动态库；
 # windows-gnu 的 ld 用 16 位导出序号，6.8 万符号直接爆表（export ordinal too large）——
