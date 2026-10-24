@@ -12,11 +12,14 @@ use platform::HttpTextFetcher;
 use serde::Deserialize;
 use serde_json::Value;
 
-/// 默认更新源（D56：GitHub API 主源，与 ci.yml release job 的发布端点同一仓库）。
-/// 国内镜像顺序回落清单不写死在代码里——D56 留了「实测哪个可用再定默认」，
-/// 在 `update_feeds.toml`（与 settings.toml 同目录）配置后即覆盖本清单。
-pub const DEFAULT_FEEDS: &[&str] =
-    &["https://api.github.com/repos/whynusn/assetdeck/releases/latest"];
+/// 默认更新源（D56/D86）：GitHub API 主源 + jsDelivr 上的 Cargo.toml 版本清单。
+/// 国内网络直连 api.github.com 常不可达（DNS/连接被劫持），jsDelivr 的
+/// `@latest` 走 CDN 且能解析 GitHub 标签，作为顺序回落的第二源。
+/// `update_feeds.toml`（与 settings.toml 同目录）配置后即覆盖本清单。
+pub const DEFAULT_FEEDS: &[&str] = &[
+    "https://api.github.com/repos/whynusn/assetdeck/releases/latest",
+    "https://cdn.jsdelivr.net/gh/whynusn/assetdeck@latest/Cargo.toml",
+];
 
 /// 静默检查最小间隔（D56：≥24h）。上次检查无论成败都刷新节流钟——
 /// 源持续不可达时每次启动都白打一发，不是用户想要的「检查」。
@@ -31,7 +34,9 @@ pub fn silent_check_due(last_check_unix: u64, now_unix: u64, auto_enabled: bool)
 }
 
 /// 单源网络超时（毫秒）。检查在后台线程执行，慢只影响结果何时回来，不阻塞 UI。
-pub const FETCH_TIMEOUT_MS: u64 = 10_000;
+/// D86 收紧到 6s：主源在受限网络里常是「连接挂住」而非快速拒绝，10s×每相位
+/// 会让回落源等太久；6s 足够正常网络完成一次小 JSON/TOML 拉取。
+pub const FETCH_TIMEOUT_MS: u64 = 6_000;
 
 /// release notes 进 UI 的截断上限（字符）。超长 notes 会把弹窗滚动区拖成
 /// 万行文档；发布页才是完整变更日志的家。
@@ -150,6 +155,50 @@ pub fn parse_release_json(text: &str) -> Result<ReleaseInfo, String> {
     })
 }
 
+/// 解析版本清单（D86）：jsDelivr 的 `@latest/Cargo.toml`。国内直连 GitHub API
+/// 失败时这是第二条路；版本取自 `[workspace.package] version`，发布物文件名
+/// 由 `scripts/package.ps1` 的固定规则派生，因此无需额外维护 release.json。
+/// notes 留空——完整变更日志在发布页，弹窗的「打开发布页」仍可用。
+fn parse_version_manifest(text: &str) -> Result<ReleaseInfo, String> {
+    let value: toml::Value =
+        toml::from_str(text).map_err(|error| format!("TOML 解析失败: {error}"))?;
+    let version = value
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .ok_or("缺少 [workspace.package] version")?;
+    if parse_version(version).is_none() {
+        return Err(format!("workspace version 不是可识别的版本号: {version}"));
+    }
+    let tag = format!("v{version}");
+    let release_base = format!("https://github.com/whynusn/assetdeck/releases/download/{tag}");
+    let asset = |name: String| ReleaseAsset {
+        url: format!("{release_base}/{name}"),
+        name,
+    };
+    Ok(ReleaseInfo {
+        version: tag.clone(),
+        notes: String::new(),
+        url: format!("https://github.com/whynusn/assetdeck/releases/tag/{tag}"),
+        assets: vec![
+            asset(format!("assetdeck-installer-{version}.exe")),
+            asset(format!("assetdeck-portable-{version}.zip")),
+            asset("SHA256SUMS.txt".to_string()),
+        ],
+    })
+}
+
+/// 单源响应解析：先按 GitHub release JSON，再按版本清单 TOML。两种格式都
+/// 失败时把两条错误一起带回，便于区分「网络不可达」与「响应不是预期格式」。
+fn parse_feed(text: &str) -> Result<ReleaseInfo, String> {
+    match parse_release_json(text) {
+        Ok(info) => Ok(info),
+        Err(json_error) => parse_version_manifest(text)
+            .map_err(|manifest_error| format!("JSON: {json_error}；版本清单: {manifest_error}")),
+    }
+}
+
 /// 顺序回落（D56：不并发竞速——白烧限流配额且镜像数据可能滞后）：
 /// 主源成功即采纳（哪怕答案是不更新——主源健康时镜像的滞后数据不可信），
 /// 失败或解析不出才落到下一源；全部失败把各源错误拼成一串带回。
@@ -162,7 +211,7 @@ pub fn check_update(
     for url in feeds {
         let outcome = fetcher
             .fetch_text(url, FETCH_TIMEOUT_MS)
-            .and_then(|text| parse_release_json(&text).map_err(platform::PlatformError::Network));
+            .and_then(|text| parse_feed(&text).map_err(platform::PlatformError::Network));
         match outcome {
             Err(error) => errors.push(format!("{url}: {error}")),
             Ok(info) => {
@@ -174,7 +223,10 @@ pub fn check_update(
             }
         }
     }
-    CheckOutcome::Failed(errors.join("；"))
+    CheckOutcome::Failed(format!(
+        "{}（可在 update_feeds.toml 配置可用镜像源）",
+        errors.join("；")
+    ))
 }
 
 /// 更新源清单：`update_feeds.toml`（`feeds = [...]`，可配镜像顺序回落）覆盖
@@ -474,6 +526,65 @@ mod tests {
         let info = parse_release_json(&text).unwrap();
         assert_eq!(info.notes.chars().count() - 1, NOTES_MAX_CHARS); // 截断 + 省略号
         assert!(info.notes.ends_with('…'));
+    }
+
+    #[test]
+    fn parse_version_manifest_builds_release_info() {
+        let text = r#"
+            [workspace]
+            members = ["crates/*"]
+
+            [workspace.package]
+            version = "0.2.0"
+            edition = "2021"
+        "#;
+        let info = parse_version_manifest(text).unwrap();
+        assert_eq!(info.version, "v0.2.0");
+        assert_eq!(
+            info.url,
+            "https://github.com/whynusn/assetdeck/releases/tag/v0.2.0"
+        );
+        assert!(info.notes.is_empty());
+        assert_eq!(info.assets.len(), 3);
+        assert_eq!(info.assets[0].name, "assetdeck-installer-0.2.0.exe");
+        assert_eq!(info.assets[1].name, "assetdeck-portable-0.2.0.zip");
+        assert_eq!(info.assets[2].name, "SHA256SUMS.txt");
+    }
+
+    #[test]
+    fn parse_version_manifest_rejects_bad_or_missing_version() {
+        assert!(parse_version_manifest("[workspace.package]\nedition = \"2021\"").is_err());
+        assert!(parse_version_manifest("[workspace.package]\nversion = \"dev\"").is_err());
+        assert!(parse_version_manifest("不是 TOML").is_err());
+    }
+
+    #[test]
+    fn check_update_falls_back_from_json_to_version_manifest() {
+        // 主源是 GitHub API JSON（失败），回落源是 jsDelivr 的 Cargo.toml。
+        let fetcher = MockFetcher::fail_then_ok(
+            1,
+            "[workspace.package]\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+        );
+        let feeds = vec![
+            "https://api.github.com/releases/latest".to_string(),
+            "https://cdn.jsdelivr.net/gh/whynusn/assetdeck@latest/Cargo.toml".to_string(),
+        ];
+        let outcome = check_update(&fetcher, &feeds, "0.1.0");
+        let CheckOutcome::Available(info) = outcome else {
+            panic!("应当发现新版本");
+        };
+        assert_eq!(info.version, "v0.2.0");
+        assert_eq!(info.assets.len(), 3);
+        assert_eq!(fetcher.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn default_feeds_include_reachable_mirror() {
+        // D86：主源之外必须有国内可达的回落源（jsDelivr）。
+        assert!(DEFAULT_FEEDS.len() >= 2);
+        assert!(DEFAULT_FEEDS
+            .iter()
+            .any(|feed| feed.contains("cdn.jsdelivr.net")));
     }
 
     #[test]

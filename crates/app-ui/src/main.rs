@@ -3140,10 +3140,18 @@ fn main() {
     }
 
     // Ctrl+A（key-root bubble 兜底：弹层关闭、持焦输入未认领时才到壳层）：等价「全选」。
+    // D86：必须与多选模式原子化——只全选不进多选会留下「全选中但底栏不出现、
+    // 找不到取消入口」的死状态；先 enter_multi 再全选，底栏/Esc 出口才存在。
     {
         let crud = crud.clone();
         app.on_key_a_pressed(move || {
-            crud.vm.borrow_mut().select_all_visible();
+            {
+                let mut vm = crud.vm.borrow_mut();
+                if !vm.multi_mode() {
+                    vm.enter_multi();
+                }
+                vm.select_all_visible();
+            }
             crud.sync_selection();
         });
     }
@@ -5015,10 +5023,39 @@ fn main() {
         });
     }
 
-    // D82 日志导出：把本次会话日志文件交给上框管线。画像声明了 file 行
-    // （且实测确认不会即发）才注入；未声明/无热目标时管线降级为「仅复制」，
-    // 日志文件仍在剪贴板里，用户可在聊天框手动 Ctrl+V。两段确认的装填态
-    // 在此复位。
+    /// D86 日志导出正文：只读文件末尾 256 KiB，避免长会话日志整文件进内存/
+    /// 剪贴板；开头写明文件名与截断事实。完整文件仍由「定位本次日志」提供。
+    fn read_log_export_text(path: &std::path::Path) -> Result<String, String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        const MAX_BYTES: u64 = 256 * 1024;
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let len = file.metadata().map_err(|error| error.to_string())?.len();
+        let truncated = len > MAX_BYTES;
+        if truncated {
+            file.seek(SeekFrom::Start(len - MAX_BYTES))
+                .map_err(|error| error.to_string())?;
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.is_empty() {
+            return Err("日志文件为空".to_string());
+        }
+        let body = String::from_utf8_lossy(&bytes);
+        let header = if truncated {
+            format!("【素材管理器日志 {name}（完整文件 {len} 字节，以下为末尾部分）】\n\n")
+        } else {
+            format!("【素材管理器日志 {name}】\n\n")
+        };
+        Ok(format!("{header}{body}"))
+    }
+
+    // D86 日志导出：日志正文作为 Text 载荷走上框管线，目标未就绪时管线自动
+    // 降级为只复制。D82 的 file 载荷保留给未来实测过的目标——内置画像当前
+    // 未声明 file 行，走文件载荷会永远停在 CopiedOnly（用户反馈的根因）。
+    // 两段确认的装填态在此复位。
     {
         let ui = app.as_weak();
         let routing = routing.clone();
@@ -5034,14 +5071,28 @@ fn main() {
                 return;
             };
             logging::flush();
-            logging::info!("导出日志 path={}", path.display());
-            // 日志导出走与素材上框完全相同的 paste 入口（D82 统一）：File 载荷
-            // 进协商表；未声明 file 行时管线写剪贴板并返回 CopiedOnly。
+            let text = match read_log_export_text(&path) {
+                Ok(text) => text,
+                Err(error) => {
+                    logging::warn!("导出日志读取失败 path={}：{error}", path.display());
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        format!("读取日志失败：{error}"),
+                    );
+                    return;
+                }
+            };
+            logging::info!(
+                "导出日志 path={} chars={}",
+                path.display(),
+                text.chars().count()
+            );
             let payload = AssetPayload {
-                kind: PayloadKind::File,
+                kind: PayloadKind::Text,
                 png_bytes: &[],
                 source_path: path,
-                text: String::new(),
+                text,
             };
             let notice = routing.borrow_mut().paste(&payload);
             logging::info!("导出日志完成 tone={:?} text={}", notice.tone, notice.text);

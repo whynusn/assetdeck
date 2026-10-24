@@ -1159,6 +1159,20 @@ if (click_count % 2) == 1 {
 - **装载**：`load_real_library` 固定注册 `CategoryId(0) = 待分类`（成员 = 活跃 NULL 行），侧栏恒显示该项（计数可为 0），`CategoryId == 侧栏下标` 的映射不变；`distinct_categories` 的 COALESCE 仅作只读显示映射（测试/名册口径）。
 - **边界（未做）**：收件箱显示名不可自定义（若需要，走设置项 `inbox_name`：O(1) 改标签，不批量改资产行）；「所有分类上不可变 id」留待分类成为一等实体（排序/嵌套/封面等）时统一做——届时才值得新增 categories 表并付 `assets.category_id` 迁移成本。存量若已有用户把旧的「待分类」改名成别的名字，v6 不去猜意图：那些行保留为普通分类，NULL 行重新显示为「待分类」，两份桶由用户自行合并/移动。
 
+### D86 用户复盘批次：分类索引 + 更新源回落 + 日志/多选/危险入口/弹窗定位（2026-10-23）
+
+用户七项复盘，逐条定盘：
+
+1. **分类重命名复杂度**：语义上不是 O(1)——分类不是独立表（D3），改名 = 单条 `UPDATE assets SET category=?1 WHERE category=?2` 改写所有引用行，代价 O(k)（k = 该分类行数）。旧实现连定位都靠全表扫描（EXISTS + UPDATE 各一遍），10 万/百万行库退化为 O(n)。**优化（schema v7）**：新增 `idx_assets_category`，定位降为索引 seek，总代价收敛到 O(log n + k)；写入侧每行 INSERT/改分类多维护一个索引项，相对导入批量写可忽略。不做「分类表 + category_id」：它把 O(k) 改名换成 O(1)，但要付全库外键迁移 + 所有分面/查询改写成本，而分类改名是低频操作——D85 已记「分类成为一等实体（排序/嵌套/封面）时统一做」。索引单列不带 deleted 谓词：回收站行也参与改名（`rename_category` 语义）。
+2. **检查更新国内不可达**：主源 `api.github.com` 在无代理的国内网络超时。两道修复：① 默认源改顺序回落——GitHub API → jsDelivr `cdn.jsdelivr.net/gh/whynusn/assetdeck@latest/Cargo.toml`（2026-10-23 实测国内直连 200，`@latest` 解析到最新 tag）；新增 `parse_version_manifest` 从 `[workspace.package] version` 构造 ReleaseInfo 与三个资产名（下载 URL 用确定性 tag 拼接，不需要 release JSON）。单源超时 10s → 6s（两源全失败最坏 12s，可接受）。② WinHTTP 的 `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` 只读系统代理（WinINET/IE 设置），不读 `HTTPS_PROXY` 等环境变量——机场客户端「只写环境变量」时更新请求绕过代理直连而超时。新增 `apply_env_proxy`：会话建立后按 `HTTPS_PROXY`→`HTTP_PROXY`→`ALL_PROXY`（含小写）取第一个 http(s) 代理，`WinHttpSetOption(WINHTTP_OPTION_PROXY)` 显式设置；失败 warn 并回落系统代理。三条网络路径（fetch_text/probe_sample/download_to_file）统一生效。用户仍可用 `update_feeds.toml` 自定义镜像，全失败提示里补了这条出路。
+3. **设置页日志项独立分组**：「定位本次日志」「日志导出」从「上框点位（高级）」挪进独立「日志」组——原分组语义是上框管线调参，日志与之无关。
+4. **日志导出永远仅复制**：根因是 D82 红线——内置画像未在真机验证 file 行的自动发送行为，故没有任何内置画像声明 `file` 行；日志导出发 `PayloadKind::File`，协商表判 Unsupported，管线按设计降级 CopiedOnly。**修复**：日志导出改发 `PayloadKind::Text`（日志文件末尾 256 KiB + 文件名/截断说明头部），文本是内置画像全都支持的能力，因此真正进入目标输入框；auto-send 仍默认关、注入序列仍无 0x0D。完整文件仍走「定位本次日志」。D82 约束不变：已验证目标前内置画像不得声明 file 行。
+5. **Ctrl+A 与底部 dock 不原子**：根因是 Ctrl+A 只调 `select_all_visible()` 未调 `enter_multi()`——全选生效但 dock 不出现、没有取消出口。修复：Ctrl+A 先 `enter_multi()` 再全选；顶栏「选择」更名「多选/取消」。底部操作条（48px 高）加 `cross-axis-alignment: center`——默认 stretch 会把 30px 控件顶在条上沿。
+6. **清空素材库误触**：从侧栏左下角（紧邻导入/导出）迁到设置页底部独立「危险操作」组（带说明文案），保留两段确认；侧栏不再有常驻危险入口。
+7. **弹窗位置硬编码**：重命名/属性/移动到分类等弹窗的 y 是写死常量，不随窗口尺寸变化；统一改为 `x: (root.width - self.width) / 2`、`y: Math.max(16px, (root.height - self.height) / 2)`（最小 16px 防小窗顶出），更新/归类/导入结果弹窗同样处理。
+
+**验证**：ui-viewmodels / platform / app-ui `cargo check` 全绿；store 测试断言跟随 `SUPPORTED_SCHEMA_VERSION` 常量，v7 迁移自动纳入。UI 布局为静态定位/对齐改动，真机渲染验收待做。
+
 ### 未来规划（用户已拍板纳入，未排期）
 
 - **提权注入 broker（D79 评审的方案二）**：主程序保持普通权限，单独一个一次 UAC 授权常驻的提权小进程，经命名管道接收「hwnd + 点击点」代跑 HTCLIENT 守卫与点击链，用于向提权目标注入。主程序从此不需要提权（拖入/UAC 问题同时消失），提权面收窄到一个只做点击的哑执行器。**前置条件**：提权 IPC 服务必须校验客户端 + ACL 收紧（否则任何中完整性进程都能指挥一支"幽灵鼠标"）；工程量 = 新进程 + IPC 协议 + 生命周期管理，v2 评估。

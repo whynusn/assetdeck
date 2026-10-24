@@ -4177,9 +4177,10 @@ pub mod http {
     use windows_sys::Win32::Networking::WinHttp::{
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
         WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-        WinHttpSendRequest, WinHttpSetTimeouts, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_FLAG_SECURE, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_QUERY_STATUS_CODE,
+        WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
+        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ACCESS_TYPE_NAMED_PROXY, WINHTTP_FLAG_SECURE,
+        WINHTTP_OPTION_PROXY, WINHTTP_PROXY_INFO, WINHTTP_QUERY_CONTENT_LENGTH,
+        WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
     };
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -4208,6 +4209,49 @@ pub mod http {
 
     fn last_error() -> u32 {
         unsafe { GetLastError() }
+    }
+
+    /// 进程级环境代理（D86）：WinHTTP 的 AUTOMATIC_PROXY 只跟随系统代理，
+    /// 不读 HTTPS_PROXY/HTTP_PROXY。机场/代理客户端常只给进程设代理，
+    /// 这里显式覆盖；仅接受 http(s) 地址（socks5:// 等 WinHTTP 不支持，
+    /// 交给系统代理）。代理串必须活到 WinHttpSetOption 返回——WinHTTP
+    /// 在调用内复制配置。
+    fn apply_env_proxy(session: *mut core::ffi::c_void) {
+        let proxy = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"));
+        let Some(proxy) = proxy else { return };
+        let mut proxy_w = wide(&proxy);
+        let mut info = WINHTTP_PROXY_INFO {
+            dwAccessType: WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+            lpszProxy: proxy_w.as_mut_ptr(),
+            lpszProxyBypass: ptr::null_mut(),
+        };
+        let ok = unsafe {
+            WinHttpSetOption(
+                session,
+                WINHTTP_OPTION_PROXY,
+                &mut info as *mut WINHTTP_PROXY_INFO as *const core::ffi::c_void,
+                std::mem::size_of::<WINHTTP_PROXY_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            log::warn!(
+                "环境代理 {proxy} 设置失败（错误码 {}），回落系统代理",
+                last_error()
+            );
+        } else {
+            log::info!("WinHTTP 使用环境代理 {proxy}");
+        }
     }
 
     /// 拆 URL 为 (是否 https, 主机, 端口, 路径)。仅接受 http(s)——更新源清单
@@ -4269,6 +4313,7 @@ pub mod http {
                         last_error()
                     )));
                 }
+                apply_env_proxy(session.0);
                 let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
 
                 let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
@@ -4435,6 +4480,7 @@ pub mod http {
                         last_error()
                     )));
                 }
+                apply_env_proxy(session.0);
                 let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
 
                 let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));
@@ -4602,6 +4648,7 @@ pub mod http {
                         last_error()
                     )));
                 }
+                apply_env_proxy(session.0);
                 let _ = WinHttpSetTimeouts(session.0, timeout, timeout, timeout, timeout);
 
                 let connection = HttpHandle(WinHttpConnect(session.0, host_w.as_ptr(), port, 0));

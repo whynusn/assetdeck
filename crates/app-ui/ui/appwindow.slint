@@ -791,7 +791,7 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 2;
                     }
 
-                    // D47 顶栏「选择」：进入/退出多选模式的显式入口。
+                    // D47 顶栏「多选」：进入/退出多选模式的显式入口。
                     select-anchor := Rectangle {
                         y: (parent.height - self.height) / 2;
                         width: 62px;
@@ -829,7 +829,7 @@ export component AppWindow inherits Window {
                                     height: 12px;
                                 }
                                 select-label := Text {
-                                    text: root.select-mode-active ? "取消" : "选择";
+                                    text: root.select-mode-active ? "取消" : "多选";
                                     color: root.select-mode-active ? Theme.accent : Theme.text-2;
                                     font-size: 11px;
                                     vertical-alignment: center;
@@ -1324,21 +1324,8 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 危险隔离线：清空素材库是不可逆操作，与常规导入/导出
-                            // 拉开一组，降低顺手误触（与回收站清空同款二段确认兜底）。
-                            Rectangle {
-                                height: 1px;
-                                background: Theme.line;
-                            }
-
-                            // armed：壳层把文案改成确认提示时，按钮转为实心红。
-                            DangerButton {
-                                text: root.clear-button-text;
-                                armed: root.clear-button-armed;
-                                clicked => {
-                                    root.clear-library-requested();
-                                }
-                            }
+                            // 清空素材库已迁到设置 → 危险操作（D86）：侧栏左下角
+                            // 紧邻导入/导出，误触代价是整库不可逆丢失。
                         }
                     }
                 }
@@ -1803,7 +1790,8 @@ export component AppWindow inherits Window {
         // 留空保存 = 恢复默认名（默认名回显在标题行）。
         if root.target-rename-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            // D86 弹窗族统一居中原点：窗口过矮时至少留 16px 顶边，不跑到窗外。
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: target-rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2067,28 +2055,39 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // D38：一键定位本次会话日志（全部子进程日志同目录）。
-                        // 归入「高级」组末尾（模型里最后一组是高级），样式走通用 FlatButton。
-                        FlatButton {
-                            text: "定位本次日志";
-                            glyph: Glyph.folder-search;
-                            tip: "在资源管理器中选中本次运行的日志文件；全部进程的日志都在同一目录";
-                            clicked => { root.open-logs-requested(); }
-                        }
+                        // D38/D82 日志：定位与导出独立成组，不再挂在上框点位下
+                        //（两者与上框点位无关，混排会让人以为日志也属于点位配置）。
+                        VerticalLayout {
+                            spacing: 5px;
 
-                        // D82 日志导出：两段确认（第一击装填、第二击复制）——
-                        // 先复制到剪贴板，用户在聊天框按 Ctrl+V 手动粘贴；
-                        // 未实测 file 行不走自动上框（只上框不发送红线）。
-                        FlatButton {
-                            text: root.logs-export-armed ? "再次点击确认复制" : "复制本次日志";
-                            glyph: Glyph.folder-search;
-                            tip: "把本次运行的日志文件复制到剪贴板；在聊天框按 Ctrl+V 手动粘贴（不自动上框/发送）";
-                            clicked => {
-                                if (root.logs-export-armed) {
-                                    root.logs-export-armed = false;
-                                    root.export-logs-requested();
-                                } else {
-                                    root.logs-export-armed = true;
+                            SectionLabel {
+                                height: 14px;
+                                text: "日志";
+                            }
+
+                            // D38：一键定位本次会话日志（全部子进程日志同目录）。
+                            FlatButton {
+                                text: "定位本次日志";
+                                glyph: Glyph.folder-search;
+                                tip: "在资源管理器中选中本次运行的日志文件；全部进程的日志都在同一目录";
+                                clicked => { root.open-logs-requested(); }
+                            }
+
+                            // D82/D86 日志导出：两段确认（第一击装填、第二击导出）——
+                            // 日志正文作为文本走上框管线，目标未就绪时管线自动降级为
+                            // 只复制。不再用 file 载荷：内置画像未声明 file 行（D82
+                            // 红线），只复制文件永远到不了目标输入框。
+                            FlatButton {
+                                text: root.logs-export-armed ? "再次点击确认导出" : "日志导出";
+                                glyph: Glyph.export;
+                                tip: "把本次日志正文送入目标输入框（不自动发送）；没有热目标时复制到剪贴板。完整日志文件用上方「定位本次日志」";
+                                clicked => {
+                                    if (root.logs-export-armed) {
+                                        root.logs-export-armed = false;
+                                        root.export-logs-requested();
+                                    } else {
+                                        root.logs-export-armed = true;
+                                    }
                                 }
                             }
                         }
@@ -2170,6 +2169,37 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                         }
+
+                        // D86 危险操作：清空库从侧栏左下角迁到设置底部——原位置
+                        // 紧邻导入/导出，误触代价是整库不可逆丢失。两段确认不变。
+                        VerticalLayout {
+                            spacing: 5px;
+
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.line;
+                            }
+
+                            SectionLabel {
+                                height: 14px;
+                                text: "危险操作";
+                            }
+
+                            Text {
+                                text: "清空素材库会删除全部素材、缩略图与索引，且无法恢复。";
+                                color: Theme.text-3;
+                                font-size: 10px;
+                                wrap: word-wrap;
+                            }
+
+                            DangerButton {
+                                text: root.clear-button-text;
+                                armed: root.clear-button-armed;
+                                clicked => {
+                                    root.clear-library-requested();
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2180,7 +2210,7 @@ export component AppWindow inherits Window {
         // 教训在这里兜死。
         if root.tuning-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: tuning-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2415,7 +2445,7 @@ export component AppWindow inherits Window {
         // —— 「移动到分类」弹层：现有分类逐条 + 输入新名新建（统一归入同款交互）——
         if root.move-menu-open: Rectangle {
             x: Math.max(0px, (root.width - 280px) / 2);
-            y: 120px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 280px;
             height: move-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2522,6 +2552,9 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.scrim;
 
             HorizontalLayout {
+                // 条高 48、控件高 30：显式按交叉轴居中，否则默认 stretch 会把
+                // 按钮顶在条的上沿（用户实拍反馈）。
+                cross-axis-alignment: center;
                 padding-left: 14px;
                 padding-right: 14px;
                 spacing: 8px;
@@ -2629,7 +2662,7 @@ export component AppWindow inherits Window {
         // —— D80 设备选择弹窗（共享发送入口）：mDNS 扫描 + 单选 + 发送 ——
         if root.share-devices-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: share-picker-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2726,7 +2759,7 @@ export component AppWindow inherits Window {
         // —— D80 首连确认弹窗（接收侧第一道门：确认后才暂存+导入）——
         if root.share-offer-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: share-offer-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2782,7 +2815,7 @@ export component AppWindow inherits Window {
         // —— D80-M1-b 索取审批弹窗（接收侧第二道门：同意才推送）——
         if root.share-request-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: share-request-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2838,7 +2871,7 @@ export component AppWindow inherits Window {
         // —— D80-M1 共享态弹窗：逐域勾选（只改可获得性，不触发传输）——
         if root.share-domains-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: share-domains-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2930,7 +2963,7 @@ export component AppWindow inherits Window {
         // —— D80-M1 共享域管理弹窗：配对册 + 域册 + 成员勾选 ——
         if root.share-ctl-open: Rectangle {
             x: (root.width - 420px) / 2;
-            y: 96px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 420px;
             height: share-ctl-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -3267,7 +3300,7 @@ export component AppWindow inherits Window {
         // —— 重命名弹窗 ——
         if root.rename-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -3327,7 +3360,7 @@ export component AppWindow inherits Window {
         // 共用弹窗要在确认处理器里判 pending 归属，分支比弹窗本身更贵。
         if root.cat-rename-open: Rectangle {
             x: (root.width - 340px) / 2;
-            y: 150px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 340px;
             height: cat-rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -3384,7 +3417,7 @@ export component AppWindow inherits Window {
         // —— 属性弹窗（R13：尺寸/大小/导入时间/绝对路径）——
         if root.properties-open: Rectangle {
             x: (root.width - 420px) / 2;
-            y: 120px;
+            y: Math.max(16px, (root.height - self.height) / 2);
             width: 420px;
             height: props-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -3460,7 +3493,7 @@ export component AppWindow inherits Window {
 
             opacity: shown ? 1.0 : 0.0;
             x: (root.width - 400px) / 2;
-            y: 130px + (shown ? 0px : 8px);
+            y: Math.max(16px, (root.height - self.height) / 2) + (shown ? 0px : 8px);
             width: 400px;
             height: update-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -3601,7 +3634,7 @@ export component AppWindow inherits Window {
             property <bool> shown: root.classify-shown;
 
             opacity: shown ? 1.0 : 0.0;
-            y: 96px + (shown ? 0px : 8px);
+            y: Math.max(16px, (root.height - self.height) / 2) + (shown ? 0px : 8px);
             x: (root.width - self.width) / 2;
             width: 480px;
             height: classify-layout.preferred-height;
@@ -3706,15 +3739,15 @@ export component AppWindow inherits Window {
             }
         }
 
-        // D65 导入结果弹窗：跳过/相似/失败的持久逐项点名。顶部锚定 y120（弹窗
-        // 族约定 96–150px，不做垂直居中）；行数超窗走 ScrollView（高度钉
+        // D65 导入结果弹窗：跳过/相似/失败的持久逐项点名。D86 起与弹窗族
+        // 统一水平+垂直居中（原先顶部锚定 y120）；行数超窗走 ScrollView（高度钉
         // min(320px, 内容高)，不钉会塌成内建 min-height——update 弹窗同款坑）。
         if root.import-result-open: Rectangle {
             property <bool> shown: root.import-result-shown;
 
             opacity: shown ? 1.0 : 0.0;
             x: (root.width - self.width) / 2;
-            y: 120px + (shown ? 0px : 8px);
+            y: Math.max(16px, (root.height - self.height) / 2) + (shown ? 0px : 8px);
             width: 560px;
             height: result-layout.preferred-height;
             border-radius: Theme.radius-lg;

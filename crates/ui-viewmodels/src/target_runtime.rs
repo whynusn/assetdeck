@@ -192,8 +192,9 @@ impl TargetRoutingRuntime {
         // 当场激活本应用、抢走首次注入前校验的前台。因此首次注入成功后的短窗内，
         // 同素材请求按连击尾随半程并入：不再重复上框。降级/失败清空记录，失败后的
         // 立即重试不受影响。
-        // File 载荷例外（D82）：日志导出每次都是同一个路径，750ms 内再次导出
-        // 不是连击尾随，而是用户的明确重复请求——合并会静默吞掉第二次导出。
+        // File 载荷例外（D82）：文件上框每次都是用户明确选择的目标文件，750ms
+        // 内再次请求是重复意图而非连击尾随——合并会静默吞掉第二次。日志导出自
+        // D86 起改发 Text 正文（两段确认本身已排除连击触发），不再依赖此分支。
         if payload.kind != PayloadKind::File {
             if let Some((last_path, at)) = &self.last_injected {
                 if *last_path == payload.source_path

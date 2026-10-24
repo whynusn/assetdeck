@@ -10,7 +10,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 6;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 7;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -198,6 +198,15 @@ ALTER TABLE assets ADD COLUMN content_hash BLOB;
 CREATE INDEX IF NOT EXISTS idx_assets_content_hash ON assets(content_hash);
 ";
 
+/// v7：分类索引（D86）。分类不是独立表（D3），改名/删除/存在性检查都是
+/// `WHERE category = ?` 的批量改写。没有索引时 UPDATE 与 EXISTS 全表扫描——
+/// 10 万行库改一次分类名要扫整表。索引把定位降为 O(log n + k)，重命名代价
+/// 收敛到「实际引用该分类的行数」。单列、不带 deleted 谓词：回收站行也参与
+/// 改名（见 `rename_category`），不能按 deleted 过滤。
+const MIGRATION_V7: &str = "
+CREATE INDEX IF NOT EXISTS idx_assets_category ON assets(category);
+";
+
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -278,6 +287,9 @@ impl Store {
                 "UPDATE assets SET category = NULL WHERE category = ?1",
                 params![INBOX_CATEGORY],
             )?;
+        }
+        if found < 7 {
+            conn.execute_batch(MIGRATION_V7)?;
         }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
@@ -525,6 +537,8 @@ impl Store {
     /// 分类重命名：单条 UPDATE 批量改写引用旧名的资产行。
     ///
     /// 分类不是独立表（D3：分面按资产元数据聚合），「改名」即改写所有引用行。
+    /// 语义上是 O(k)（k = 该分类下的行数），不是 O(1) 的目录项改名；v7 起
+    /// `idx_assets_category` 让定位行不再全表扫描（见 MIGRATION_V7）。
     /// **含回收站行**——回收站素材的 category 同步改，恢复后语义一致。
     /// 新名与旧名相同是合法 no-op（返回 0，不执行 UPDATE）；新名已存在则拒绝
     /// （否则静默合并两个分类，用户无法撤销）。
