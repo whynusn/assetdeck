@@ -268,6 +268,18 @@ impl From<domain::AssetKind> for SpaceAssetKind {
     }
 }
 
+impl From<SpaceAssetKind> for domain::AssetKind {
+    /// 反向映射：Fetch 应答走引擎推送通道，SendItem.kind 需要 store 的枚举。
+    fn from(kind: SpaceAssetKind) -> Self {
+        match kind {
+            SpaceAssetKind::Image => domain::AssetKind::Image,
+            SpaceAssetKind::Video => domain::AssetKind::Video,
+            SpaceAssetKind::Text => domain::AssetKind::Text,
+            SpaceAssetKind::Other => domain::AssetKind::Other,
+        }
+    }
+}
+
 impl SpaceAssetKind {
     pub fn as_str(self) -> &'static str {
         match self {

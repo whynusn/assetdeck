@@ -9,6 +9,11 @@
 //!   （M1-b；worker 应答 PULL 的唯一数据源）
 //! - `SYNC_SEND\t<对端id>\t<addr;addr>\t<SyncMessage JSON>` —— 发出一条
 //!   同步报文（M1-b；Pull 等应答，Delta 即发即收）
+//! - `SPACE_STATE\t<SpaceBookState JSON>` —— 整册替换空间服务册（D90-P2）
+//! - `SPACE_SYNC\t<对端id>\t<addr;addr>` —— 发起一轮空间抗熵（D90-P2；
+//!   worker 代发 Summary，Ops 应答经 SYNC_RECV 上抛）
+//! - `SPACE_JOIN\t<空间主id>\t<邀请码>\t<加入者名>` —— 贴码加入（D90-P2；
+//!   JoinOk/JoinErr 应答经 SYNC_RECV 上抛）
 //! - `EXIT` —— 优雅退出（stdin 关闭/EOF 同效：父进程死则 worker 死）
 //!
 //! stdout 事件（worker → UI）：
@@ -24,13 +29,15 @@
 //!   对端身份取自 QUIC 握手，非报文自报）
 //! - `SYNC_SENT\t<对端id>\t<ok|failed>\t<明细>` —— 我方同步报文结局
 //!   （M1-b；推送丢失由对端补拉自愈，仅知情不重试）
+//! - `SPACE_ADMITTED\t<space_id>\t<对端id>` —— 空间主侧受理了新成员
+//!   （D90-P2；UI 落盘名册 + op 并重推 SPACE_STATE）
 //! - `NOTICE\t<提示：…|警示：…>` —— 用户知情消息（D64 前缀约定）
 //!
 //! stderr 归日志门面（D39），不承载协议。
 
 use uuid::Uuid;
 
-use share::{is_device_id, SendRequest, SyncBookState, SyncMessage};
+use share::{is_device_id, SendRequest, SpaceBookState, SyncBookState, SyncMessage};
 
 /// stdin 一条命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +55,21 @@ pub enum Command {
         peer_id: String,
         addrs: Vec<String>,
         message: SyncMessage,
+    },
+    /// D90-P2：整册替换空间服务册（应答 Summary/Join、执行 Fetch 的唯一数据源）。
+    SpaceState(SpaceBookState),
+    /// D90-P2：向对端发起一轮空间抗熵（worker 代发 Summary，Ops 应答经
+    /// SYNC_RECV 上抛 UI 应用）。
+    SpaceSync {
+        peer_id: String,
+        addrs: Vec<String>,
+    },
+    /// D90-P2：贴码加入——拨空间主（纯 id，pkarr/DNS 地址发现），Join/
+    /// JoinOk 应答经 SYNC_RECV 上抛 UI。
+    SpaceJoin {
+        owner_id: String,
+        code: String,
+        joiner_name: String,
     },
     Exit,
 }
@@ -136,7 +158,67 @@ pub fn parse_command(line: &str) -> Result<Command, CommandError> {
                 message,
             })
         }
-        other => Err(CommandError(format!("未知命令: {other}"))),
+        _ => match parse_space_commands(head, rest)? {
+            Some(command) => Ok(command),
+            None => Err(CommandError(format!("未知命令: {head}"))),
+        },
+    }
+}
+
+/// D90-P2 SPACE_* 命令解析（与 SYNC_* 同风格：坏载荷记日志丢弃不崩）。
+fn parse_space_commands(head: &str, rest: Option<&str>) -> Result<Option<Command>, CommandError> {
+    match head {
+        "SPACE_STATE" => {
+            let json = rest.ok_or(CommandError("SPACE_STATE 缺 JSON 载荷".into()))?;
+            let book: SpaceBookState = serde_json::from_str(json)
+                .map_err(|e| CommandError(format!("SPACE_STATE JSON 解析失败: {e}")))?;
+            book.validate()
+                .map_err(|e| CommandError(format!("SPACE_STATE 册不合法: {e}")))?;
+            Ok(Some(Command::SpaceState(book)))
+        }
+        "SPACE_SYNC" => {
+            let rest = rest.ok_or(CommandError("SPACE_SYNC 缺载荷".into()))?;
+            let (peer_id, addr_text) = rest
+                .split_once('\t')
+                .ok_or(CommandError("SPACE_SYNC 缺地址段".into()))?;
+            if !is_device_id(peer_id) {
+                return Err(CommandError(format!(
+                    "SPACE_SYNC 设备标识不合法: {peer_id}"
+                )));
+            }
+            let addrs: Vec<String> = addr_text
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            Ok(Some(Command::SpaceSync {
+                peer_id: peer_id.to_string(),
+                addrs,
+            }))
+        }
+        "SPACE_JOIN" => {
+            let rest = rest.ok_or(CommandError("SPACE_JOIN 缺载荷".into()))?;
+            let (owner_id, rest) = rest
+                .split_once('\t')
+                .ok_or(CommandError("SPACE_JOIN 缺码段".into()))?;
+            if !is_device_id(owner_id) {
+                return Err(CommandError(format!(
+                    "SPACE_JOIN 空间主标识不合法: {owner_id}"
+                )));
+            }
+            let (code, joiner_name) = rest
+                .split_once('\t')
+                .ok_or(CommandError("SPACE_JOIN 缺加入者名段".into()))?;
+            if joiner_name.trim().is_empty() {
+                return Err(CommandError("SPACE_JOIN 加入者名为空".into()));
+            }
+            Ok(Some(Command::SpaceJoin {
+                owner_id: owner_id.to_string(),
+                code: code.to_string(),
+                joiner_name: joiner_name.to_string(),
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -194,6 +276,11 @@ pub mod out {
             if ok { "ok" } else { "failed" }
         )
     }
+
+    /// D90-P2：空间主侧受理了新成员（UI 落盘 spaces.json + ops 并重推 SPACE_STATE）。
+    pub fn space_admitted(space_id: &str, peer_id: &str) -> String {
+        format!("SPACE_ADMITTED\t{space_id}\t{peer_id}")
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +296,7 @@ mod tests {
             sender_name: "WS".into(),
             receiver_id: "a".repeat(52),
             receiver_addrs: vec!["192.168.1.8:40000".into()],
+            space_id: None,
             items: vec![SendItem {
                 asset_uuid: Uuid::new_v4(),
                 file_name: "a.png".into(),

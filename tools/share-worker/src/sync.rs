@@ -19,7 +19,10 @@ use std::time::Duration;
 
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
-use share::{SyncBookState, SyncMessage};
+use share::{
+    admit_join, parse_space_invite_code, SpaceAssetMeta, SpaceBookState, SpaceJoinError,
+    SpaceMessage, SpaceMeta, SpaceOp, SpaceSummaryEntry, SyncBookState, SyncMessage,
+};
 
 use crate::engine::{
     write_final_line, EngineError, CONNECT_TIMEOUT, FLUSH_GRACE, MANIFEST_LINE_MAX,
@@ -28,6 +31,13 @@ use crate::lines::LineReader;
 
 /// PULL 应答等待上限：应答只含元数据清单，局域网量级里 15s 封顶足够。
 const SYNC_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// UI 推送的「我共享给谁什么」整册（M1-b）：worker 只读，应答 PULL 的
 /// 唯一数据源。整册替换语义 = UI 每次共享态变化后重发全量，不存在
@@ -66,17 +76,107 @@ impl SyncBook {
 /// 入站同步报文（main.rs 映射为 stdout 行）。
 #[derive(Debug, Clone)]
 pub enum SyncInbound {
-    /// 非应答类报文（Delta/Snapshot）：交 UI 处置。
+    /// 非应答类报文（Delta/Snapshot/空间 Ops/JoinOk）：交 UI 处置。
     Message {
         peer_id: String,
         message: SyncMessage,
     },
+    /// D90-P2：空间主侧受理了新成员（worker 册副本已入册；UI 必须落盘
+    /// spaces.json + 追加 Roster op 并重推 SPACE_STATE——否则下次整册
+    /// 替换会把该变更抹掉）。
+    SpaceAdmitted {
+        space_id: uuid::Uuid,
+        peer_id: String,
+    },
+    /// D90-P2：收到字节索取（同步通道不传字节——main 侧组装推送通道投递）。
+    SpaceFetch {
+        peer_id: String,
+        space_id: uuid::Uuid,
+        items: Vec<SpaceAssetMeta>,
+    },
 }
 
-/// 处理一条同步通道入站连接（_pull 请求在引擎内应答，不上抛）。
+/// D90-P2 空间服务册：UI 经 SPACE_STATE 整册替换，worker 只读应答；
+/// 唯一的写路径是 Join 受理（名册 + Roster op 入册副本，变更经
+/// [`SyncInbound::SpaceAdmitted`] 交 UI 落盘后重推回来对齐）。
+#[derive(Default)]
+pub struct SpaceBook {
+    state: Mutex<SpaceBookState>,
+}
+
+/// Join 受理的应答材料（JoinOk 组装 + admitted 事件）。
+pub struct AdmittedSpace {
+    pub space_id: uuid::Uuid,
+    /// false = 幂等重入（名册无变更，不重发事件给 UI）。
+    pub admitted: bool,
+    pub meta: SpaceMeta,
+    pub ops: Vec<SpaceOp>,
+}
+
+impl SpaceBook {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn replace(&self, state: SpaceBookState) {
+        *self.state.lock().unwrap() = state;
+    }
+
+    /// 抗熵发起方的 Summary（本地全部空间的 op 键全集）。
+    pub fn summary(&self) -> SpaceMessage {
+        let state = self.state.lock().unwrap();
+        let entries = state
+            .spaces
+            .iter()
+            .map(|(id, entry)| SpaceSummaryEntry {
+                space_id: *id,
+                keys: entry.ops.iter().map(share::OpKey::of).collect(),
+            })
+            .collect();
+        SpaceMessage::Summary { entries }
+    }
+
+    pub fn diff_against(&self, entries: &[SpaceSummaryEntry]) -> Vec<SpaceOp> {
+        self.state.lock().unwrap().diff_against(entries)
+    }
+
+    /// Fetch 的本地落位查询（hash → 绝对路径；拷贝返回避免锁跨 await）。
+    pub fn serve_path(&self, space_id: uuid::Uuid, content_hash: &[u8]) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .serve_path(space_id, content_hash)
+            .map(str::to_string)
+    }
+
+    /// Join 受理（空间主侧）：验码入册副本 + 返回 JoinOk 材料。
+    pub fn admit(
+        &self,
+        code: &str,
+        joiner_id: &str,
+        joiner_name: &str,
+    ) -> Result<AdmittedSpace, SpaceJoinError> {
+        let parsed = parse_space_invite_code(code).map_err(SpaceJoinError::BadCode)?;
+        let mut state = self.state.lock().unwrap();
+        let Some(entry) = state.spaces.get_mut(&parsed.space_id) else {
+            // 不泄漏册里有没有这个空间。
+            return Err(SpaceJoinError::NoSuchSpace);
+        };
+        let admitted = admit_join(entry, code, joiner_id, joiner_name, unix_now())?;
+        Ok(AdmittedSpace {
+            space_id: parsed.space_id,
+            admitted,
+            meta: entry.meta.clone(),
+            ops: entry.ops.clone(),
+        })
+    }
+}
+
+/// 处理一条同步通道入站连接（Pull/Summary/Join 在引擎内应答，不上抛）。
 pub async fn handle_sync_connection(
     conn: Connection,
     book: &SyncBook,
+    spaces: &SpaceBook,
     mut on_event: impl FnMut(SyncInbound) + Send,
 ) -> Result<(), EngineError> {
     let peer_id = conn.remote_id().to_z32();
@@ -103,6 +203,62 @@ pub async fn handle_sync_connection(
             write_final_line(&mut send, &json).await;
             Ok(())
         }
+        // D90-P2 空间协议：Summary/Join 同步应答；Fetch 不占同步通道字节。
+        SyncMessage::Space { message } => match message {
+            SpaceMessage::Summary { entries } => {
+                let reply = SyncMessage::Space {
+                    message: SpaceMessage::Ops {
+                        ops: spaces.diff_against(&entries),
+                    },
+                };
+                let json = serde_json::to_string(&reply)
+                    .map_err(|e| EngineError::Protocol(format!("空间应答序列化失败: {e}")))?;
+                write_final_line(&mut send, &json).await;
+                Ok(())
+            }
+            SpaceMessage::Join { code, joiner_name } => {
+                let reply = match spaces.admit(&code, &peer_id, &joiner_name) {
+                    Ok(admitted) => {
+                        if admitted.admitted {
+                            on_event(SyncInbound::SpaceAdmitted {
+                                space_id: admitted.space_id,
+                                peer_id,
+                            });
+                        }
+                        SyncMessage::Space {
+                            message: SpaceMessage::JoinOk {
+                                meta: admitted.meta,
+                                ops: admitted.ops,
+                            },
+                        }
+                    }
+                    Err(error) => SyncMessage::Space {
+                        message: SpaceMessage::JoinErr {
+                            reason: error.to_string(),
+                        },
+                    },
+                };
+                let json = serde_json::to_string(&reply)
+                    .map_err(|e| EngineError::Protocol(format!("加入应答序列化失败: {e}")))?;
+                write_final_line(&mut send, &json).await;
+                Ok(())
+            }
+            SpaceMessage::Fetch { space_id, items } => {
+                on_event(SyncInbound::SpaceFetch {
+                    peer_id: peer_id.clone(),
+                    space_id,
+                    items,
+                });
+                Ok(())
+            }
+            other => {
+                on_event(SyncInbound::Message {
+                    peer_id,
+                    message: SyncMessage::Space { message: other },
+                });
+                Ok(())
+            }
+        },
         other => {
             on_event(SyncInbound::Message {
                 peer_id,
@@ -113,8 +269,8 @@ pub async fn handle_sync_connection(
     }
 }
 
-/// 发出一条同步报文。Pull 会等应答（`Ok(Some(reply))`）；Delta/Snapshot
-/// 即发即收（`Ok(None)`）——推送丢失不重试，由对端上线补拉自愈。
+/// 发出一条同步报文。Pull/Join/Summary 等应答（`Ok(Some(reply))`）；
+/// 其余即发即收（`Ok(None)`）——推送丢失不重试，由对端上线补拉自愈。
 pub async fn send_sync_message(
     endpoint: &Endpoint,
     target: EndpointAddr,
@@ -123,7 +279,13 @@ pub async fn send_sync_message(
     message
         .validate()
         .map_err(|e| EngineError::Protocol(format!("同步报文自检失败: {e}")))?;
-    let wants_reply = matches!(message, SyncMessage::Pull { .. });
+    let wants_reply = matches!(
+        message,
+        SyncMessage::Pull { .. }
+            | SyncMessage::Space {
+                message: SpaceMessage::Join { .. } | SpaceMessage::Summary { .. }
+            }
+    );
     let conn = tokio::time::timeout(
         CONNECT_TIMEOUT,
         endpoint.connect(target, share::ALPN_SYNC.as_bytes()),

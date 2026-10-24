@@ -22,6 +22,11 @@ pub struct TransferManifest {
     pub batch_id: Uuid,
     /// 发送方设备显示名（mDNS 宣告名），只用于确认弹窗与记录面。
     pub sender_name: String,
+    /// D90-P2 空间字节投递标记：Some = 空间同步的应答投递（接收侧免首连
+    /// 确认，入空间 = 同意接收）；None = 人工推送（双确认不变）。
+    /// serde default：旧版本对端发的清单没有该字段，按人工推送兜底。
+    #[serde(default)]
+    pub space_id: Option<Uuid>,
     pub items: Vec<ManifestItem>,
 }
 
@@ -148,8 +153,35 @@ mod tests {
         TransferManifest {
             batch_id: Uuid::new_v4(),
             sender_name: "测试机".to_string(),
+            space_id: None,
             items,
         }
+    }
+
+    #[test]
+    fn space_manifest_defaults_absent_field_for_old_peers() {
+        // 旧版本清单 JSON（无 space_id 字段）→ 解析为 None（人工推送兜底）。
+        let legacy = serde_json::json!({
+            "batch_id": Uuid::new_v4().to_string(),
+            "sender_name": "旧版机".to_string(),
+            "items": [{
+                "asset_uuid": Uuid::new_v4().to_string(),
+                "file_name": "a.png",
+                "kind": "Image",
+                "size_bytes": 4,
+                "sha256_hex": "a".repeat(64),
+                "category_hint": null,
+            }],
+        });
+        let parsed: TransferManifest = serde_json::from_str(&legacy.to_string()).unwrap();
+        assert_eq!(parsed.space_id, None);
+        parsed.validate().unwrap();
+
+        let mut space_kind = manifest(vec![item("b.png", SHA)]);
+        space_kind.space_id = Some(Uuid::new_v4());
+        let back: TransferManifest =
+            serde_json::from_str(&serde_json::to_string(&space_kind).unwrap()).unwrap();
+        assert_eq!(back.space_id, space_kind.space_id);
     }
 
     #[test]

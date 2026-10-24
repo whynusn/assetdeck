@@ -25,8 +25,10 @@ use std::sync::Arc;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use mdns_sd::ServiceDaemon;
+use share::{SendItem, SpaceMessage, SyncMessage};
 use share_worker::sync::SyncInbound;
 use share_worker::{engine, mdns, proto, sync};
+use uuid::Uuid;
 
 use engine::{BatchOutcome, Decision, DecisionHub, IncomingEvent, ReceiveState, SendEvent};
 
@@ -179,21 +181,33 @@ async fn main() {
     run(
         endpoint,
         DecisionHub::new(),
-        sync::SyncBook::new(),
+        SyncBooks {
+            book: sync::SyncBook::new(),
+            spaces: sync::SpaceBook::new(),
+        },
         staging_root,
         mdns_state,
         id_z32,
+        name,
     )
     .await;
+}
+
+/// 同步通道的两本服务册（M1 Pull 应答册 + D90 空间册），生命周期与 run 相同。
+#[derive(Clone)]
+struct SyncBooks {
+    book: Arc<sync::SyncBook>,
+    spaces: Arc<sync::SpaceBook>,
 }
 
 async fn run(
     endpoint: Endpoint,
     hub: Arc<DecisionHub>,
-    book: Arc<sync::SyncBook>,
+    books: SyncBooks,
     staging_root: PathBuf,
     mdns_state: Option<(ServiceDaemon, Option<mdns::Announcer>)>,
     self_id: String,
+    self_name: String,
 ) {
     // stdin 命令通道：阻塞读线程 → mpsc；EOF = Exit（父进程死亡即自退，
     // D80 守卫①的 M0 形态——worker 不可能脱离主进程独活）。
@@ -276,7 +290,7 @@ async fn run(
                         }
                     }
                     Some(proto::Command::SyncState(state)) => {
-                        book.replace(state);
+                        books.book.replace(state);
                     }
                     Some(proto::Command::SyncSend {
                         peer_id,
@@ -289,23 +303,42 @@ async fn run(
                         };
                         let endpoint = endpoint.clone();
                         tokio::spawn(async move {
-                            match sync::send_sync_message(&endpoint, target, message).await {
-                                Ok(None) => emit(proto::out::sync_sent(&peer_id, true, "")),
-                                Ok(Some(reply)) => {
-                                    match serde_json::to_string(&reply) {
-                                        Ok(json) => {
-                                            emit(proto::out::sync_recv(&peer_id, &json))
-                                        }
-                                        Err(error) => {
-                                            logging::error!("同步应答序列化失败: {error}")
-                                        }
-                                    }
-                                    emit(proto::out::sync_sent(&peer_id, true, ""));
-                                }
-                                Err(error) => {
-                                    emit(proto::out::sync_sent(&peer_id, false, &error.to_string()))
-                                }
-                            }
+                            report_sync_send(endpoint, target, message, peer_id).await;
+                        });
+                    }
+                    Some(proto::Command::SpaceState(book)) => {
+                        books.spaces.replace(book);
+                    }
+                    Some(proto::Command::SpaceSync { peer_id, addrs }) => {
+                        let Some(target) = target_addr(&peer_id, &addrs) else {
+                            emit(proto::out::sync_sent(&peer_id, false, "目标设备地址不合法"));
+                            continue;
+                        };
+                        let message = SyncMessage::Space {
+                            message: books.spaces.summary(),
+                        };
+                        let peer_for_log = peer_id.clone();
+                        let endpoint = endpoint.clone();
+                        tokio::spawn(async move {
+                            report_sync_send(endpoint, target, message, peer_for_log).await;
+                        });
+                    }
+                    Some(proto::Command::SpaceJoin {
+                        owner_id,
+                        code,
+                        joiner_name,
+                    }) => {
+                        let Some(target) = target_addr(&owner_id, &[]) else {
+                            emit(proto::out::sync_sent(&owner_id, false, "空间主标识不合法"));
+                            continue;
+                        };
+                        let message = SyncMessage::Space {
+                            message: SpaceMessage::Join { code, joiner_name },
+                        };
+                        let owner_for_log = owner_id.clone();
+                        let endpoint = endpoint.clone();
+                        tokio::spawn(async move {
+                            report_sync_send(endpoint, target, message, owner_for_log).await;
                         });
                     }
                 }
@@ -314,7 +347,10 @@ async fn run(
                 let Some(incoming) = incoming else { break };
                 let hub = hub.clone();
                 let staging = staging_root.clone();
-                let book = book.clone();
+                let book = books.book.clone();
+                let spaces = books.spaces.clone();
+                let endpoint_for_fetch = endpoint.clone();
+                let fetch_sender = self_name.clone();
                 tokio::spawn(async move {
                     let conn = match incoming.await {
                         Ok(conn) => conn,
@@ -347,11 +383,67 @@ async fn run(
                             }
                         }
                     } else if conn.alpn() == share::ALPN_SYNC.as_bytes() {
-                        let result = sync::handle_sync_connection(conn, &book, |event| {
-                            let SyncInbound::Message { peer_id, message } = event;
-                            match serde_json::to_string(&message) {
-                                Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
-                                Err(error) => logging::error!("同步报文序列化失败: {error}"),
+                        let result = sync::handle_sync_connection(conn, &book, &spaces, |event| {
+                            match event {
+                                SyncInbound::Message { peer_id, message } => {
+                                    match serde_json::to_string(&message) {
+                                        Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
+                                        Err(error) => {
+                                            logging::error!("同步报文序列化失败: {error}")
+                                        }
+                                    }
+                                }
+                                SyncInbound::SpaceAdmitted { space_id, peer_id } => {
+                                    emit(proto::out::space_admitted(
+                                        &space_id.to_string(),
+                                        &peer_id,
+                                    ));
+                                }
+                                SyncInbound::SpaceFetch {
+                                    peer_id,
+                                    space_id,
+                                    items,
+                                } => {
+                                    // 持有者投递：本地有的才发（部分持有 = 部分投递，
+                                    // 剩余向其他成员索取是索取方的职责）。
+                                    let mut send_items = Vec::with_capacity(items.len());
+                                    for item in items {
+                                        if let Some(path) =
+                                            spaces.serve_path(space_id, &item.content_hash)
+                                        {
+                                            send_items.push(SendItem {
+                                                asset_uuid: item.uuid,
+                                                file_name: item.file_name.clone(),
+                                                kind: item.kind.into(),
+                                                size_bytes: item.size_bytes,
+                                                category_hint: None,
+                                                path: std::path::PathBuf::from(path),
+                                            });
+                                        }
+                                    }
+                                    if send_items.is_empty() {
+                                        logging::info!(
+                                            "空间 {space_id} 的索取本地无可服务字节，忽略"
+                                        );
+                                        return;
+                                    }
+                                    let Some(target) = target_addr(&peer_id, &[]) else {
+                                        logging::warn!("索取方标识不合法: {peer_id}");
+                                        return;
+                                    };
+                                    let request = share::SendRequest {
+                                        batch_id: Uuid::new_v4(),
+                                        sender_name: fetch_sender.clone(),
+                                        receiver_id: peer_id,
+                                        receiver_addrs: Vec::new(),
+                                        space_id: Some(space_id),
+                                        items: send_items,
+                                    };
+                                    let fetch_endpoint = endpoint_for_fetch.clone();
+                                    tokio::spawn(async move {
+                                        run_send(fetch_endpoint, target, request).await;
+                                    });
+                                }
                             }
                         })
                         .await;
@@ -370,6 +462,27 @@ async fn run(
         announcer.unregister();
     }
     endpoint.close().await;
+}
+
+/// 同步报文外发收尾：应答（Pull/Join/Summary 的 Ops/JoinOk/JoinErr）经
+/// SYNC_RECV 上抛 UI，结局恒报 SYNC_SENT（丢失由对端补拉自愈，仅知情）。
+async fn report_sync_send(
+    endpoint: Endpoint,
+    target: EndpointAddr,
+    message: SyncMessage,
+    peer_id: String,
+) {
+    match sync::send_sync_message(&endpoint, target, message).await {
+        Ok(None) => emit(proto::out::sync_sent(&peer_id, true, "")),
+        Ok(Some(reply)) => {
+            match serde_json::to_string(&reply) {
+                Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
+                Err(error) => logging::error!("同步应答序列化失败: {error}"),
+            }
+            emit(proto::out::sync_sent(&peer_id, true, ""));
+        }
+        Err(error) => emit(proto::out::sync_sent(&peer_id, false, &error.to_string())),
+    }
 }
 
 /// 发送任务：事件 → stdout 行；终态 → done 行。

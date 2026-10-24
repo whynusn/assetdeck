@@ -356,6 +356,7 @@ impl ShareVm {
             sender_name: self_name,
             receiver_id: device.id.clone(),
             receiver_addrs: device.addrs.clone(),
+            space_id: None,
             items: items.clone(),
         };
         let line = match serde_json::to_string(&request) {
@@ -897,6 +898,9 @@ impl ShareVm {
                         removed,
                     } => self.apply_delta(peer_id, from_rev, to_rev, added, removed),
                     SyncMessage::JoinInvite { .. } | SyncMessage::Roster { .. } => Vec::new(),
+                    // D90-P2：空间协议报文不经域模型信任门（空间名册自持信任）。
+                    // 消费面在 app-ui spaces 模块（批 3 接线），VM 层暂不上抛。
+                    SyncMessage::Space { .. } => Vec::new(),
                 }
             }
         }
@@ -1199,6 +1203,7 @@ mod tests {
         TransferManifest {
             batch_id: batch,
             sender_name: sender.into(),
+            space_id: None,
             items: (0..items)
                 .map(|_| ManifestItem {
                     asset_uuid: Uuid::new_v4(),

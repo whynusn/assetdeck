@@ -46,6 +46,9 @@ pub struct SendRequest {
     pub receiver_id: String,
     /// 接收方直连地址（mDNS TXT 携带，SocketAddr 文本）。
     pub receiver_addrs: Vec<String>,
+    /// D90-P2：Some = 空间字节投递（Fetch 的应答推送），随清单透传。
+    #[serde(default)]
+    pub space_id: Option<Uuid>,
     pub items: Vec<SendItem>,
 }
 
@@ -192,6 +195,7 @@ mod tests {
             sender_name: "WORKSTATION".to_string(),
             receiver_id: peer_id(),
             receiver_addrs: vec!["192.168.1.8:48920".to_string()],
+            space_id: None,
             items: vec![item("photo.png")],
         }
     }
