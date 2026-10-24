@@ -35,7 +35,7 @@ use ui_viewmodels::{AssetId, AssetKind, RealAssetResolver, ShareVm};
 
 use crate::cards::{ResolverCardProvider, TileCardData, TileCardDataProvider};
 use crate::ui_enums;
-use crate::{AppWindow, TileData, TextSegment};
+use crate::{AppWindow, TextSegment, TileData};
 
 /// 文本卡全宽行的渲染参数（D88 两轮复盘定稿）：与 slint 侧令牌对齐——内边距
 /// = Spacing.md（8px，左右各一），字号 = Typography.body（12px）。fit_search_snippet
@@ -376,8 +376,8 @@ fn build_rows(
                 let segments = match (kind, vm.search_snippet(id)) {
                     (AssetKind::Text, Some(marked)) => {
                         let inner = (r.w - 2.0 * TILE_TEXT_PAD).max(0.0);
-                        let budget = inner - TILE_TEXT_INLINE_CHROME
-                            - ui_viewmodels::name_zone_px(r.w);
+                        let budget =
+                            inner - TILE_TEXT_INLINE_CHROME - ui_viewmodels::name_zone_px(r.w);
                         ui_viewmodels::fit_search_snippet(
                             marked,
                             budget.max(0.0),

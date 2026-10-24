@@ -65,12 +65,23 @@ fn full_width_rows_break_columns_without_overlap() {
     let (r0, r1, r2) = (vm.rect_of(0), vm.rect_of(1), vm.rect_of(2));
     // 文本行横贯容器，起点在前排图片底边之下，行后图片接在行下且回到首列。
     assert_eq!(r1.w, 984.0);
-    assert!((r1.y - (r0.y + r0.h + 12.0)).abs() < 1e-3, "全宽行起始 = 前排底边");
-    assert!((r2.y - (r1.y + r1.h + 12.0)).abs() < 1e-3, "行后瓦片接在行下");
+    assert!(
+        (r1.y - (r0.y + r0.h + 12.0)).abs() < 1e-3,
+        "全宽行起始 = 前排底边"
+    );
+    assert!(
+        (r2.y - (r1.y + r1.h + 12.0)).abs() < 1e-3,
+        "行后瓦片接在行下"
+    );
     assert_eq!(r2.x, 0.0);
     // 行后两张瓦片无重叠（r2 已回首列，再排一张落第二列）。
     let mut vm2 = LibraryGridVm::new(
-        index_with_kinds(&[AssetKind::Image, AssetKind::Text, AssetKind::Image, AssetKind::Image]),
+        index_with_kinds(&[
+            AssetKind::Image,
+            AssetKind::Text,
+            AssetKind::Image,
+            AssetKind::Image,
+        ]),
         Sorter { keys: vec![] },
         16,
     );

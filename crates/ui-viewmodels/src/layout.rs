@@ -57,7 +57,10 @@ pub fn masonry_layout_mixed(
     for (i, item) in items.iter().enumerate() {
         match *item {
             LayoutItem::FullRow => {
-                let y = col_bottoms.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let y = col_bottoms
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 rects.push(Rect {
                     x: 0.0,
                     y,
@@ -167,7 +170,11 @@ mod tests {
 
     #[test]
     fn consecutive_full_rows_tighten_to_list_block_gap() {
-        let items = [LayoutItem::FullRow, LayoutItem::FullRow, LayoutItem::Tile(1.0)];
+        let items = [
+            LayoutItem::FullRow,
+            LayoutItem::FullRow,
+            LayoutItem::Tile(1.0),
+        ];
         let rects = masonry_layout_mixed(800.0, 4, 12.0, &items, 28.0);
         // 块内紧排（列表块行距），块与图片网格交界回到 masonry gap
         assert_eq!(rects[1].y, rects[0].y + 28.0 + FULL_ROW_GAP);

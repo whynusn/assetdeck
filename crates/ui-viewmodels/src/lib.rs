@@ -24,7 +24,9 @@ pub use catalog_loader::{
 };
 pub use category_rows::CategoryRows;
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent, TEXT_TILE_HEIGHT};
-pub use layout::{column_width, masonry_layout, masonry_layout_mixed, LayoutItem, FULL_ROW_GAP, Rect};
+pub use layout::{
+    column_width, masonry_layout, masonry_layout_mixed, LayoutItem, Rect, FULL_ROW_GAP,
+};
 pub use search::{
     fit_search_snippet, fts_query_eligible, name_zone_px, split_search_snippet, FtsNameSource,
     HybridSearchProvider, SearchError, SearchProvider, SearchScope, SNIPPET_QUERY_LIMIT,

@@ -164,7 +164,9 @@ fn fts_content_search_hits_body_and_snippets() {
     assert!(s
         .set_text_content("u-body", "本季度预算削减百分之十二，渠道费同步下调")
         .unwrap());
-    assert!(s.set_text_content("u-name", "与本季度无关的正文内容").unwrap());
+    assert!(s
+        .set_text_content("u-name", "与本季度无关的正文内容")
+        .unwrap());
 
     let hits = s.search("季度预算", 10).unwrap();
     assert_eq!(hits.len(), 2, "文件名命中与正文命中都进结果白名单");
@@ -205,7 +207,10 @@ fn fts_upsert_rename_preserves_content() {
     s.upsert_asset(&renamed).unwrap();
 
     assert_eq!(s.search("检索关键词", 10).unwrap().len(), 1);
-    assert!(s.search("旧名", 10).unwrap().is_empty(), "旧名索引随改名消失");
+    assert!(
+        s.search("旧名", 10).unwrap().is_empty(),
+        "旧名索引随改名消失"
+    );
     let snippets = s.content_snippets("检索关键词", 10).unwrap();
     assert_eq!(snippets.len(), 1, "改名后正文片段必须保留");
     assert_eq!(snippets[0].0, "u-r");
@@ -218,12 +223,16 @@ fn meta_flag_roundtrip() {
     assert_eq!(s.get_meta_flag("fts_content_backfilled").unwrap(), None);
     s.set_meta_flag("fts_content_backfilled", "1").unwrap();
     assert_eq!(
-        s.get_meta_flag("fts_content_backfilled").unwrap().as_deref(),
+        s.get_meta_flag("fts_content_backfilled")
+            .unwrap()
+            .as_deref(),
         Some("1")
     );
     s.set_meta_flag("fts_content_backfilled", "2").unwrap();
     assert_eq!(
-        s.get_meta_flag("fts_content_backfilled").unwrap().as_deref(),
+        s.get_meta_flag("fts_content_backfilled")
+            .unwrap()
+            .as_deref(),
         Some("2")
     );
 }
@@ -283,7 +292,9 @@ fn v8_database_migrates_to_v9_rebuilding_fts() {
     assert_eq!(hits.len(), 1, "迁移重建不得丢名字索引");
 
     // 正文回写 → 触发器同步 → 片段即刻可检索。
-    assert!(s.set_text_content("legacy-1", "迁移前的存量正文含季度预算字样").unwrap());
+    assert!(s
+        .set_text_content("legacy-1", "迁移前的存量正文含季度预算字样")
+        .unwrap());
     let snippets = s.content_snippets("季度预算", 10).unwrap();
     assert_eq!(snippets.len(), 1);
     assert_eq!(snippets[0].0, "legacy-1");

@@ -427,7 +427,10 @@ mod tests {
         // 与行内名字长短无关（对齐扫描的前提）。
         assert_eq!(name_zone_px(2000.0), TEXT_NAME_ZONE_MAX);
         assert_eq!(name_zone_px(400.0), TEXT_NAME_ZONE_MIN);
-        assert_eq!(name_zone_px(1000.0), 1000.0 * super::TEXT_NAME_ZONE_FRACTION);
+        assert_eq!(
+            name_zone_px(1000.0),
+            1000.0 * super::TEXT_NAME_ZONE_FRACTION
+        );
         assert_eq!(name_zone_px(1000.0), name_zone_px(1000.0));
     }
 }

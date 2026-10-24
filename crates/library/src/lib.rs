@@ -683,9 +683,9 @@ impl Library {
         // 字节已就位；元数据进写队列攒批提交（D7「无半成品」不变式保持：
         // Done 由提交确认后才置位，完成票的元数据必然已落库）。
         // D88：FTS 正文 = 归一化文本的前 64KB（索引上限即展示片段同源）。
-        let text_content = normalized_text
-            .as_deref()
-            .map(|bytes| cap_fts_content(&String::from_utf8_lossy(bytes), FTS_CONTENT_CAP_BYTES).to_string());
+        let text_content = normalized_text.as_deref().map(|bytes| {
+            cap_fts_content(&String::from_utf8_lossy(bytes), FTS_CONTENT_CAP_BYTES).to_string()
+        });
         self.queue_db_op(DbOp::Upsert {
             ticket: id,
             meta,
