@@ -5,9 +5,21 @@
   "baseBranch": "main",
   "contractVersion": 1,
   "createdAt": "2026-10-23T23:42:27+08:00",
-  "updatedAt": "2026-10-23T23:10:17.762Z",
-  "runCount": 8,
+  "updatedAt": "2026-10-24T00:58:44.512Z",
+  "runCount": 9,
   "lastRuns": [
+    {
+      "runId": "run-20261024-080014",
+      "runNumber": 9,
+      "componentId": "M1-C1",
+      "moduleId": "M1",
+      "status": "done",
+      "summary": "窗口最小尺寸落到平台层：主窗口就绪后经 winit min_inner_size 锁定契约 §3 的 960×600，WM_GETMINMAXINFO 按 DPI 折算（150% DPI 真机 MINTRACK 1462×956 = 960×600 客户区 + 非客户区），修掉可拖到 800×500/640×400 导致顶栏省略与分类列表裁切的问题；三态截图与修复前逐字节一致。",
+      "gates": "slint-check=pass;cargo-check=pass;ui-hygiene=pass;deps-guard=pass;capture-check=pass;runtime-min-track=pass",
+      "shots": "target/ux-audit/shots/M1-C1/after",
+      "baseCommit": "b3d0582",
+      "finishedAt": "2026-10-24T00:58:44.507Z"
+    },
     {
       "runId": "run-20261024-070013",
       "runNumber": 8,
@@ -334,7 +346,7 @@
           "dependsOn": [
             "M0-C4"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/appwindow.slint"
           ],
@@ -350,9 +362,9 @@
             "shell-narrow"
           ],
           "focus": "960×600 下三栏不重叠/不裁切；侧栏与内容区自适应；最小尺寸约束；缩放时无跳变。",
-          "lastRun": null,
-          "auditedAtCommit": null,
-          "notes": ""
+          "lastRun": "run-20261024-080014",
+          "auditedAtCommit": "b3d0582",
+          "notes": "[run-20261024-080014] 窗口最小尺寸落到平台层：主窗口就绪后经 winit min_inner_size 锁定契约 §3 的 960×600，WM_GETMINMAXINFO 按 DPI 折算（150% DPI 真机 MINTRACK 1462×956 = 960×600 客户区 + 非客户区），修掉可拖到 800×500/640×400 导致顶栏省略与分类列表裁切的问题；三态截图与修复前逐字节一致。"
         },
         {
           "id": "M1-C2",
@@ -2255,6 +2267,20 @@
       "closedRun": 8,
       "fix": "on_setting_toggled 的热字段回填补上 ui.set_animations_enabled(s.ui_animations)；切换开关后当前会话立即生效，无需重启。",
       "guard": "animations_enabled 与 single_click/send_after_paste/gpu_rendering 同列热字段回填；Motion.enabled 经 changed 联动归零（无静态截图可验证，按代码路径核对）。"
+    },
+    {
+      "id": "F-044",
+      "componentId": "M1-C1",
+      "severity": "P1",
+      "rootCause": "platform",
+      "title": "主窗口无最小尺寸约束，可拖到契约下限以下",
+      "detail": "契约 §3 要求最小 960×600；appwindow.slint 只声明 preferred 尺寸，Slint 根布局的 min-width/min-height 不会转成窗口级约束（真机探针 MINTRACK 0x0）。窗口可拖到 800×500：搜索占位与目标提示整段省略；640×400 时分类列表裁到约 2.5 行。根因在平台装配层：winit 窗口创建后未设置 min_inner_size，WM_GETMINMAXINFO 返回 0×0。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:175；真机 MINTRACK 0x0；800×500 截图 target/ux-audit/tmp/before-800x500.png；640×400 截图 target/ux-audit/tmp/before-640x400.png",
+      "status": "fixed",
+      "createdRun": 9,
+      "closedRun": 9,
+      "fix": "壳层在主窗口就绪后经 Slint 的 WinitWindowAccessor 取 winit 句柄，set_min_inner_size(960×600 逻辑像素)；winit 在 WM_GETMINMAXINFO 中按窗口 DPI 折算，Win32 最小跟踪尺寸随 DPI 正确缩放。真机 150% DPI 实测 MINTRACK 1462×956（=960×600 客户区 + 22×56 非客户区），3 秒后仍保持；视觉快照与修复前逐字节一致（约束是窗口级，不改变渲染）。",
+      "guard": "ui_hygiene 新增 window_min_size_is_wired_to_winit：锁定 960×600 常量与 set_min_inner_size 安装点，删除任一环即失败"
     }
   ]
 }

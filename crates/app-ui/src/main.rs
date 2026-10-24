@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use platform::{HttpFileDownloader, HttpTextFetcher, UrlOpener};
+use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{Model, ModelRc, Timer, TimerMode, VecModel};
 use ui_viewmodels::classify::{
     self, ClassifyTarget, EntryKind, GroupMode, ImportEntry, SourceGroup,
@@ -98,6 +99,11 @@ const DEMO_COUNT: u32 = 500;
 const CONTAINER_WIDTH: f32 = 964.0;
 const COLUMNS: u32 = 6;
 const GAP: f32 = 12.0;
+/// 契约 §3：最小窗口 960×600（默认 1000×700 见 appwindow.slint 的 preferred）。
+/// 经 winit 的 min_inner_size 落到 WM_GETMINMAXINFO，由系统按当前 DPI 折算物理
+/// 像素——低于此尺寸三栏互相挤压、分类列表裁切。
+const WINDOW_MIN_WIDTH: f64 = 960.0;
+const WINDOW_MIN_HEIGHT: f64 = 600.0;
 /// 目标列宽：容器宽变化时按此推列数，保证瓦片不会被拉成横条或压成细缝。
 const TARGET_COLUMN_WIDTH: f32 = 150.0;
 const MIN_COLUMNS: u32 = 2;
@@ -1869,10 +1875,11 @@ impl platform::FileDropSink for SlintFileDropSink {
     }
 }
 
-/// 主窗口就绪（WinEvent 钩子回调，事件驱动，无轮询）后的挂载项：D49 拖拽
-/// 导入注册 + 恢复重绘守卫（唤出黑屏兜底，机制详见 platform::win32::paint_guard
-/// 模块注释：守卫钩 WM_PAINT 全窗失效，应用层翻转 repaint-nudge 标脏整窗，
-/// 强制软件渲染器部分重绘管线画一整帧）。任一失败只告警，不阻断主流程。
+/// 主窗口就绪（WinEvent 钩子回调，事件驱动，无轮询）后的挂载项：契约最小
+/// 尺寸 + D49 拖拽导入注册 + 恢复重绘守卫（唤出黑屏兜底，机制详见
+/// platform::win32::paint_guard 模块注释：守卫钩 WM_PAINT 全窗失效，应用层
+/// 翻转 repaint-nudge 标脏整窗，强制软件渲染器部分重绘管线画一整帧）。任一
+/// 失败只告警，不阻断主流程。
 fn mount_when_window_ready(
     hwnd: isize,
     sink: std::sync::Arc<SlintFileDropSink>,
@@ -1881,6 +1888,27 @@ fn mount_when_window_ready(
     match platform::win32::dragdrop::register_file_drop(hwnd, sink) {
         Ok(()) => logging::info!("拖拽导入已注册（hwnd={hwnd:#x}）"),
         Err(error) => logging::warn!("拖拽导入注册失败：{error}（可继续用导入入口）"),
+    }
+    // 契约 §3 最小尺寸：Slint 根布局的 min-width/min-height 不会转成窗口级
+    // 约束（实测 MINTRACK 0×0），必须经 winit 句柄设置 min_inner_size，winit
+    // 在 WM_GETMINMAXINFO 里按窗口 DPI 折算，拖拽到此下限即停。
+    match ui.upgrade() {
+        Some(ui) => {
+            let applied = ui
+                .window()
+                .with_winit_window(|window| {
+                    window.set_min_inner_size(Some(winit::dpi::Size::Logical(
+                        winit::dpi::LogicalSize::new(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT),
+                    )));
+                })
+                .is_some();
+            if applied {
+                logging::info!("窗口最小尺寸已锁定 {WINDOW_MIN_WIDTH}×{WINDOW_MIN_HEIGHT}");
+            } else {
+                logging::warn!("窗口最小尺寸设置失败：winit 窗口不可用（尺寸约束缺失）");
+            }
+        }
+        None => logging::warn!("窗口最小尺寸设置失败：UI 已释放"),
     }
     let paint_ui = ui;
     match platform::win32::paint_guard::install(

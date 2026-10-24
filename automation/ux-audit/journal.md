@@ -86,3 +86,12 @@
 - 截图：target/ux-audit/shots/M0-C7/after/settings-default.png;target/ux-audit/shots/M0-C7/after/classify.png;target/ux-audit/shots/M0-C7/after/shell-grid.png
 - 基线：e613cfe
 
+## run-20261024-080014 · M1-C1 · done
+
+- 组件：窗口最小尺寸与三栏布局
+- 结论：窗口最小尺寸落到平台层：主窗口就绪后经 winit min_inner_size 锁定契约 §3 的 960×600，WM_GETMINMAXINFO 按 DPI 折算（150% DPI 真机 MINTRACK 1462×956 = 960×600 客户区 + 非客户区），修掉可拖到 800×500/640×400 导致顶栏省略与分类列表裁切的问题；三态截图与修复前逐字节一致。
+- Findings：F-044(fixed) 主窗口无最小尺寸约束，可拖到契约下限以下
+- 门禁：slint-check=pass;cargo-check=pass;ui-hygiene=pass;deps-guard=pass;capture-check=pass;runtime-min-track=pass
+- 截图：target/ux-audit/shots/M1-C1/after
+- 基线：b3d0582
+

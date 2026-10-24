@@ -302,3 +302,21 @@ fn baseline_scale_cannot_be_silently_widened() {
         "基线自相矛盾：off_scale 不可能大于字面量总数"
     );
 }
+
+/// 契约 §3：最小窗口 960×600。Slint 布局的 min-width/min-height 不会传到窗口
+/// 层（真机 WM_GETMINMAXINFO 实测仍为 0×0），必须由壳层经 winit 的
+/// min_inner_size 落到系统；删掉任一环，窗口就能缩到三栏挤压的尺寸。
+#[test]
+fn window_min_size_is_wired_to_winit() {
+    let main_rs = fs::read_to_string(repo_root().join("crates/app-ui/src/main.rs"))
+        .expect("读取 app-ui/src/main.rs 失败");
+    assert!(
+        main_rs.contains("const WINDOW_MIN_WIDTH: f64 = 960.0;")
+            && main_rs.contains("const WINDOW_MIN_HEIGHT: f64 = 600.0;"),
+        "契约 §3 的窗口最小尺寸（960×600）常量缺失或被改动"
+    );
+    assert!(
+        main_rs.contains("set_min_inner_size"),
+        "最小窗口尺寸未写入 winit：WM_GETMINMAXINFO 会退回 0×0"
+    );
+}
