@@ -15,6 +15,7 @@ use domain::AssetKind;
 use sha2::{Digest, Sha256};
 use store::Store;
 
+pub mod consistency;
 pub mod rules;
 pub mod trash;
 
@@ -613,7 +614,7 @@ impl Library {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let meta = store::AssetMeta {
+        let mut meta = store::AssetMeta {
             uuid: uuid.clone(),
             file_name,
             rel_path: rel_path.clone(),
@@ -634,6 +635,10 @@ impl Library {
             // 导入阶段不解码媒体，像素尺寸留给派生工序（derive-thumbs）回写。
             width: None,
             height: None,
+            // D91 对账基线：拷贝完成后再 stat 正本回填（拷贝不保源 mtime，
+            // 以库内文件为准）；missing 对新导入恒 false。
+            mtime: None,
+            missing: false,
         };
 
         // 票号先行：写线程的提交确认要挂到这个票上（meta_ready）。
@@ -686,6 +691,13 @@ impl Library {
         let text_content = normalized_text.as_deref().map(|bytes| {
             cap_fts_content(&String::from_utf8_lossy(bytes), FTS_CONTENT_CAP_BYTES).to_string()
         });
+        // D91：对账基线 mtime 以库内正本为准（拷贝不保源 mtime）。stat 失败
+        // 留 NULL = 下次对账首扫回填，语义无害。
+        meta.mtime = fs::metadata(&dest)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
         self.queue_db_op(DbOp::Upsert {
             ticket: id,
             meta,
@@ -849,21 +861,11 @@ impl Library {
     }
 }
 
-/// 按文件**内容**嗅探格式解码图片。
-///
-/// 不能用 `image::open`：它按扩展名选解码器（「The image's format is
-/// determined from the path's file extension」），PNG 内容挂 .jpg 名时会被
-/// 塞进 JPEG 解码器，报出「Format error decoding Jpeg: Illegal start bytes:
-/// 89504e47…」这类费解错误（实测用户素材触发）。内容嗅探对伪装扩展名免疫。
-fn decode_for_phash(path: &Path) -> image::ImageResult<image::DynamicImage> {
-    image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()
-}
-
 /// 非图片素材的 SHA-256 内容摘要：流式读取，峰值驻留一个 chunk（D3 纪律：
 /// 数 GB 视频也不整读进内存）。仅在 size 预过滤命中后才付出这次整读。
-fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
+/// pub：重索引工序（tools/reindex）对被外部修改的素材重算摘要时复用同一
+/// 实现——哈希口径分叉会让等值去重语义漂移。
+pub fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)?;
@@ -880,7 +882,8 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 /// 再哈希；低信息图（放大后仍近纯色，如 1×1 纯色图标）返回 None——
 /// 不产出不可信 hash（D65 低信息守卫，历史缺陷：此类图 hash 由取整
 /// 噪声决定、与内容无关，曾互判重复静默丢素材）。
-fn phash_of(img: &image::DynamicImage) -> Option<Vec<u8>> {
+/// pub：重索引工序复用同一实现，保证与导入侧哈希逐位一致（D91）。
+pub fn phash_of(img: &image::DynamicImage) -> Option<Vec<u8>> {
     let gray = img.to_luma8();
     let gray = if gray.width() < PHASH_MIN_EDGE || gray.height() < PHASH_MIN_EDGE {
         image::imageops::resize(
@@ -893,6 +896,14 @@ fn phash_of(img: &image::DynamicImage) -> Option<Vec<u8>> {
         gray
     };
     phash::reliable_phash(&gray).map(|h| h.to_be_bytes().to_vec())
+}
+
+/// 全分辨率解码（内容嗅探版）。pub：重索引工序重算 pHash 走同一解码入口
+/// （扩展名骗人的素材与导入侧得到同样的宽容）。
+pub fn decode_for_phash(path: &Path) -> image::ImageResult<image::DynamicImage> {
+    image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()
 }
 
 /// 元数据写线程（D37）：从队列批量取 DbOp；连续 Upsert 合并为一次事务
@@ -1024,7 +1035,8 @@ const TEXT_IMPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// FTS 正文索引上限（D88）：归一化 UTF-8 的前 64KB。trigram 索引约为文本的
 /// 1.5~2 倍，64KB 帽把单文件索引代价钉在 ~150KB 量级（约 2 万汉字，覆盖一切
 /// 正常笔记场景）；展示片段与索引同源，超帽部分搜不到是有意的诚实边界。
-const FTS_CONTENT_CAP_BYTES: usize = 64 * 1024;
+/// pub：重索引工序（tools/reindex）重写被外部修改的正文时沿用同一把帽。
+pub const FTS_CONTENT_CAP_BYTES: usize = 64 * 1024;
 /// 存量库 FTS 正文回填的一次性旗标（store_meta，D88）。
 const FTS_BACKFILL_FLAG: &str = "fts_content_backfilled_v9";
 /// 回填分块：单块待写驻留 ≤ 256 × 64KB = 16MB，遵守 D3/D4 内存纪律。
@@ -1082,7 +1094,9 @@ fn cap_fts_content(s: &str, max: usize) -> &str {
 
 /// 读文本文件头部并归一化（D88 回填用）：最多多读 8 字节盖住 BOM，按字符
 /// 边界截到 [`FTS_CONTENT_CAP_BYTES`]。读失败返回 None（调用方单文件跳过）。
-fn read_fts_content(path: &Path) -> Option<String> {
+/// pub：重索引工序（tools/reindex）对被外部修改的文本素材重写正文走同一
+/// 入口——归一化与截断口径分叉会让 FTS 行与卡片预览漂移（D91）。
+pub fn read_fts_content(path: &Path) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let mut raw = Vec::with_capacity(FTS_CONTENT_CAP_BYTES + 8);
     (&mut file)

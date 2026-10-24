@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-pub const SUPPORTED_SCHEMA_VERSION: i32 = 9;
+pub const SUPPORTED_SCHEMA_VERSION: i32 = 10;
 /// 多进程写并发时的等待窗（见 Store::init 注释）。
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -135,6 +135,13 @@ pub struct AssetMeta {
     pub width: Option<u32>,
     /// 媒体像素高（None = 尚未探测）。
     pub height: Option<u32>,
+    /// 正本文件最后修改时间（unix 秒，截断到秒）。None = 尚未基线（存量行，
+    /// 启动对账首扫回填）。对账以此与文件系统 mtime/size 比对判定外部修改
+    /// （D91）；导入/重索引完成时写入，其余路径不得改。
+    pub mtime: Option<i64>,
+    /// 正本文件缺失（外部删除/库盘漂移）。只由对账工序写：文件重新出现时
+    /// 对账清除，应用内软删/恢复不触本字段（回收站语义在 `deleted`）。
+    pub missing: bool,
 }
 
 impl AssetMeta {
@@ -145,6 +152,18 @@ impl AssetMeta {
             _ => None,
         }
     }
+}
+
+/// 重索引写回行（D91）：一个被外部修改的素材重算完的派生字段全集。
+/// `phash`/`content_hash` 的 None 语义与导入一致——图片只有 pHash（content_hash
+/// 恒 None），非图片只有内容摘要（phash 恒 None）。
+#[derive(Debug, Clone)]
+pub struct ReindexedFields {
+    pub uuid: String,
+    pub size_bytes: i64,
+    pub mtime: i64,
+    pub phash: Option<Vec<u8>>,
+    pub content_hash: Option<Vec<u8>>,
 }
 
 pub struct SearchHit {
@@ -294,6 +313,16 @@ INSERT INTO assets_fts(rowid, uuid, name, content)
 SELECT rowid, uuid, file_name, COALESCE(text_content, '') FROM assets;
 ";
 
+/// v10：内容一致性对账（D91）。分裂存储（DB 索引 + 文件系统正本）的健康度
+/// 取决于两边对不上时能否自愈：`mtime` 是对账判据（与文件系统 mtime/size
+/// 比对，判定「正本被外部修改」），`missing` 是「正本被外部删除」的持久
+/// 状态。两者都只由对账/重索引工序（tools/reindex）与导入写入——浏览/搜索/
+/// 回收站路径零感知。存量行 mtime 为 NULL，对账首扫只回填基线、不判脏。
+const MIGRATION_V10: &str = "
+ALTER TABLE assets ADD COLUMN mtime INTEGER;
+ALTER TABLE assets ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+";
+
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
@@ -424,6 +453,11 @@ impl Store {
                 }
             }
         }
+        if found < 10 {
+            // v10（D91）：内容一致性对账列。纯增列，旧行取缺省（mtime NULL /
+            // missing 0），语义即「尚未基线、未标记缺失」，无需回填。
+            conn.execute_batch(MIGRATION_V10)?;
+        }
         if found < SUPPORTED_SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SUPPORTED_SCHEMA_VERSION)?;
         }
@@ -502,7 +536,7 @@ impl Store {
     pub fn get_asset(&self, uuid: &str) -> Result<Option<AssetMeta>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+            "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id, a.mtime, a.missing
              FROM assets a
              LEFT JOIN categories c ON c.id = a.category_id
              WHERE a.uuid = ?1",
@@ -525,6 +559,8 @@ impl Store {
             width: row.get(9)?,
             height: row.get(10)?,
             category_id: row.get(11)?,
+            mtime: row.get(12)?,
+            missing: row.get::<_, i64>(13)? != 0,
         };
         drop(rows);
         drop(stmt);
@@ -714,6 +750,149 @@ impl Store {
     pub fn deleted_uuids(&self) -> Result<Vec<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare("SELECT uuid FROM assets WHERE deleted = 1 ORDER BY uuid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 批量标缺失（D91 对账）：正本文件在外部被删/库盘漂移的行置 `missing = 1`。
+    /// 单事务；不存在的 uuid 静默跳过（对账与删除并发的窗口期，语义无害）。
+    /// 只允许对账/重索引工序调用——浏览/回收站路径不得触碰本字段。
+    pub fn mark_missing(&self, uuids: &[&str]) -> Result<usize> {
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let mut n = 0;
+            for uuid in uuids {
+                n += conn.execute(
+                    "UPDATE assets SET missing = 1 WHERE uuid = ?1 AND deleted = 0",
+                    params![uuid],
+                )?;
+            }
+            Ok(n)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// 批量清缺失标记（D91 对账）：标记过的文件重新出现时调用。
+    pub fn clear_missing(&self, uuids: &[&str]) -> Result<usize> {
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let mut n = 0;
+            for uuid in uuids {
+                n += conn.execute(
+                    "UPDATE assets SET missing = 0 WHERE uuid = ?1",
+                    params![uuid],
+                )?;
+            }
+            Ok(n)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// 批量回填 mtime 基线（D91 对账首扫）：存量行 mtime 为 NULL，首扫只记录
+    /// 文件系统现状、不判脏。此后对账才以「mtime/size 变了没有」判定外部修改。
+    pub fn backfill_mtimes(&self, rows: &[(String, i64)]) -> Result<usize> {
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let mut n = 0;
+            for (uuid, mtime) in rows {
+                n += conn.execute(
+                    "UPDATE assets SET mtime = ?2 WHERE uuid = ?1 AND mtime IS NULL",
+                    params![uuid, mtime],
+                )?;
+            }
+            Ok(n)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// 重索引写回批次（D91）：一行 = 一个被外部修改后重算完的素材。
+    /// 单事务整批提交；派生字段（size/mtime/phash/content_hash）一次写齐，
+    /// 同时清 missing（文件在重索引时必然存在）。行不存在静默跳过。
+    pub fn set_reindexed_batch(&self, rows: &[ReindexedFields]) -> Result<usize> {
+        let conn = self.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<usize> {
+            let mut n = 0;
+            for row in rows {
+                n += conn.execute(
+                    "UPDATE assets SET size_bytes = ?2, mtime = ?3, phash = ?4,
+                            content_hash = ?5, missing = 0 WHERE uuid = ?1",
+                    params![
+                        row.uuid,
+                        row.size_bytes,
+                        row.mtime,
+                        row.phash,
+                        row.content_hash
+                    ],
+                )?;
+            }
+            Ok(n)
+        })();
+        match outcome {
+            Ok(n) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// 当前缺缺失标记的活行 uuid 集（D91）。回收站行不参与（正本在 trash/
+    /// 是软删的预期布局，不是「缺失」）。
+    pub fn missing_uuids(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT uuid FROM assets WHERE missing = 1 AND deleted = 0")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 全库 uuid 集（含回收站行，D91 孤儿判定基线）：`objects/` 下没有行引用
+    /// 的目录才是孤儿——回收站行的正本在 trash/，其 uuid 也必须算「被引用」，
+    /// 否则软删素材的对象目录残留会被误收。
+    pub fn all_uuids(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT uuid FROM assets")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
@@ -1070,9 +1249,9 @@ impl Store {
     where
         F: FnMut(AssetMeta),
     {
-        const SQL_ALL: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+        const SQL_ALL: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id, a.mtime, a.missing
              FROM assets a LEFT JOIN categories c ON c.id = a.category_id ORDER BY a.uuid";
-        const SQL_ACTIVE: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id
+        const SQL_ACTIVE: &str = "SELECT a.uuid, a.file_name, a.rel_path, c.name, a.size_bytes, a.created_at, a.imported_at, a.phash, a.content_hash, a.width, a.height, a.category_id, a.mtime, a.missing
              FROM assets a LEFT JOIN categories c ON c.id = a.category_id WHERE a.deleted = 0 ORDER BY a.uuid";
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(if only_active { SQL_ACTIVE } else { SQL_ALL })?;
@@ -1094,6 +1273,8 @@ impl Store {
                 width: row.get(9)?,
                 height: row.get(10)?,
                 category_id: row.get(11)?,
+                mtime: row.get(12)?,
+                missing: row.get::<_, i64>(13)? != 0,
             };
             let tag_rows = tag_stmt.query_map(params![meta.uuid], |row| row.get::<_, String>(0))?;
             for tag in tag_rows {
@@ -1166,8 +1347,8 @@ fn write_asset_cached(
         },
     };
     let n = conn.prepare_cached(
-        "INSERT INTO assets (uuid, file_name, rel_path, category_id, size_bytes, created_at, imported_at, phash, content_hash, width, height)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "INSERT INTO assets (uuid, file_name, rel_path, category_id, size_bytes, created_at, imported_at, phash, content_hash, width, height, mtime, missing)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(uuid) DO UPDATE SET
            file_name = excluded.file_name,
            rel_path = excluded.rel_path,
@@ -1178,7 +1359,9 @@ fn write_asset_cached(
            phash = excluded.phash,
            content_hash = excluded.content_hash,
            width = excluded.width,
-           height = excluded.height",
+           height = excluded.height,
+           mtime = excluded.mtime,
+           missing = excluded.missing",
     )?
     .execute(params![
         meta.uuid,
@@ -1191,7 +1374,9 @@ fn write_asset_cached(
         meta.phash,
         meta.content_hash,
         meta.width,
-        meta.height
+        meta.height,
+        meta.mtime,
+        meta.missing as i64
     ])?;
     debug_assert_eq!(n, 1);
     conn.prepare_cached("DELETE FROM tags WHERE asset_uuid = ?1")?

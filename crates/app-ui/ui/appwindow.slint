@@ -84,6 +84,11 @@ export struct TileData {
     share-badge: int,
     // D80-M1「共享中」角标：素材在任一共享域中（可获得性广播，不涉及传输）。
     shared: bool,
+    // D91 一致性状态：正本被外部删除（missing，红点）或被外部修改待重索引
+    // （stale，黄点）。宿主从 reindex 子进程的 MARK/FIXED 行现查线程局部集
+    // 合（与 shared 同一现查纪律），重索引完成后消失。
+    missing: bool,
+    stale: bool,
 }
 
 export struct SettingRowData {
@@ -1653,6 +1658,21 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+
+                                // D91 一致性角标（文本行卡）：右缘竖居中小点。
+                                // 内容宽的 elide 兜底留有 Spacing.md 余量，点坐进
+                                // 右缘不遮命中文本；缺失红 / 已修改黄，与图片瓦片
+                                // 同一语义对。
+                                if tile.missing || tile.stale: Rectangle {
+                                    x: parent.width - self.width - Spacing.xs;
+                                    y: (parent.height - self.height) / 2;
+                                    width: 6px;
+                                    height: 6px;
+                                    border-radius: self.width / 2;
+                                    border-width: 1px;
+                                    border-color: Theme.badge-ring;
+                                    background: tile.missing ? Theme.danger : Theme.warn;
+                                }
                             }
 
                             // 其他（归档/未知）：中央图标占位，仍可点选上框（Files 兜底）。
@@ -1779,6 +1799,19 @@ export component AppWindow inherits Window {
                                 border-width: 2px;
                                 border-color: Theme.badge-ring;
                                 background: Theme.shared;
+                            }
+
+                            // D91 一致性角标：正本缺失（红）/被外部修改待重索引（黄）。
+                            // 缺失优先——文件都不在了，「已修改」无从谈起。
+                            if tile.missing || tile.stale: Rectangle {
+                                x: parent.width - self.width - 9px;
+                                y: 60px;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: self.width / 2;
+                                border-width: 2px;
+                                border-color: Theme.badge-ring;
+                                background: tile.missing ? Theme.danger : Theme.warn;
                             }
 
                             tile-touch := TouchArea {

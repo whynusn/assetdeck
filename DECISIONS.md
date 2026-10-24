@@ -1217,6 +1217,17 @@ if (click_count % 2) == 1 {
 
 **分期**：P1 单机半场（空间库实例化 + SpaceRegistry + 侧边栏/浏览/添加/移除/另存 + 身份持久化，不联网可验收）；P2 网格半场（op 协议上 sync ALPN + 抗熵 + 按 hash 拉字节 + 到达通知）；P3 管理面收口（空间弹窗全功能 + 大小闸 + 迁移 shim）；P4 真机批次（与既有 M1 真机批次合并：成员↔成员补齐、全员离线恢复、大空间首拉）。
 
+### D91 内容一致性对账：启动审计 + 重索引子工序 + 缺失/外改角标（2026-10-24）
+
+**背景**：分裂存储（DB 索引 + `objects/` 正本）对正本的外部编辑/删除/移动毫无感知（Q4 复盘：零同步机制），用户会撞上「缩略图/检索结果与真实文件不符」的 split-brain。本决策定盘 M1（启动对账闭环）；M2（运行时 ReadDirectoryChangesW 实时监视）另批。
+
+- **判定口径唯一出处** `library::consistency::classify(meta, fs_mtime, fs_size)`：DB mtime（unix 秒截断）≠ FS 或 size ≠ FS → Stale；mtime IS NULL → NeedsBaseline（存量行首扫只回填基线，不判脏不风暴）。诚实边界：同秒内等大小修改不可见（秒截断的物理极限，接受）。
+- **缺失是持续旗标不是清除**：`missing` 列只由对账工序写；每次启动重检出（现状全量上报），文件回归 → recovered + 清旗标，同轮照常按 classify 判脏（恢复与修改互不冲突）。UI 角标 missing（红）> stale（黄），missing 优先——文件都不在了「已修改」无从谈起。
+- **单写者纪律延伸**：对账全部写库动作（mark_missing/clear_missing/backfill_mtimes/set_reindexed_batch）只发生在 `tools/reindex` 离线子进程；app-ui 不开 meta.db（deps_guard 白名单不变），宿主只消费 stdout 行协议（`MARK\t<state>\t<uuid>` / `FIXED\t<uuid>` / `PROGRESS` / `done: reindexed=…`）。
+- **宿主侧呈现**：行协议 → UI 线程局部角标集（同 SHARE_CONTROL 现查纪律）→ 200ms 合并 grid.sync；`reindexed>0` 才整库重载（复用 on_thumbnails_generated 收尾路径）；只标记缺失/回填基线不重载（内容没变，重载是浪费）。
+- **重索引语义**：文本走 set_text_content（FTS 触发器同步）+ SHA-256；图片 pHash 用**全分辨率解码**重算（与导入侧同一 `library::phash_of`，worker 缩略图像素不能喂哈希），content_hash 保持 None（图片走 pHash 感知去重，两套摘要语义互不侵犯）；非图片重算 SHA-256。缩略图/paste.png 经 worker 池重派生（有界批、BackgroundIdle）。导入侧同步修正：拷贝完成后 stat 库内正本回填 mtime（拷贝不保源 mtime）。
+- **孤儿清扫**：`objects/` 子目录无任何行引用（`all_uuids` 含回收站行——软删正本归 trash 对账管辖）且目录年龄 ≥ 600s（在途导入保护）→ 整目录回收。
+- **范围**：只对默认库根对账；空间库根（D90）另有同步机制，不在此批。工具缺失 = 对账缺席诚实降级（warn 日志，不打扰用户）。
 
 
 

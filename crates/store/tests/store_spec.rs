@@ -18,6 +18,8 @@ fn meta(uuid: &str, name: &str) -> AssetMeta {
         content_hash: None,
         width: None,
         height: None,
+        mtime: Some(1_700_000_002),
+        missing: false,
     }
 }
 
