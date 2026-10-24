@@ -5,7 +5,7 @@
 //! 只需同步这里 + appwindow.slint 的 UiEnums。
 
 use ui_viewmodels::selection::MenuAction;
-use ui_viewmodels::{AssetKind, TargetBarMode, TargetNoticeTone};
+use ui_viewmodels::{AssetKind, TargetBarMode, TargetHealth, TargetNoticeTone};
 
 /// 目标条模式 → UiEnums.target-mode-*（与 slint 常量严格对应）。
 pub fn target_bar_mode(mode: TargetBarMode) -> i32 {
@@ -23,6 +23,22 @@ pub fn notice_tone(tone: TargetNoticeTone) -> i32 {
         TargetNoticeTone::Success => 0,
         TargetNoticeTone::Warning => 1,
         TargetNoticeTone::Error => 2,
+    }
+}
+
+/// 目标健康度 → UiEnums.target-health-*（颜色由视图按 Theme.ok/warn/danger 取，
+/// Rust 侧不再持有第二套色板）。
+pub const TARGET_HEALTH_GREEN: i32 = 0;
+pub const TARGET_HEALTH_YELLOW: i32 = 1;
+pub const TARGET_HEALTH_RED: i32 = 2;
+pub const TARGET_HEALTH_UNKNOWN: i32 = 3;
+
+pub fn target_health(health: TargetHealth) -> i32 {
+    match health {
+        TargetHealth::Green => TARGET_HEALTH_GREEN,
+        TargetHealth::Yellow => TARGET_HEALTH_YELLOW,
+        TargetHealth::Red => TARGET_HEALTH_RED,
+        TargetHealth::Unknown => TARGET_HEALTH_UNKNOWN,
     }
 }
 
@@ -117,6 +133,10 @@ mod tests {
         assert_eq!(notice_tone(TargetNoticeTone::Success), 0);
         assert_eq!(notice_tone(TargetNoticeTone::Warning), 1);
         assert_eq!(notice_tone(TargetNoticeTone::Error), 2);
+        assert_eq!(target_health(TargetHealth::Green), 0);
+        assert_eq!(target_health(TargetHealth::Yellow), 1);
+        assert_eq!(target_health(TargetHealth::Red), 2);
+        assert_eq!(target_health(TargetHealth::Unknown), 3);
         assert_eq!(card_kind(AssetKind::Image), 0);
         assert_eq!(card_kind(AssetKind::Video), 1);
         assert_eq!(card_kind(AssetKind::Text), 2);

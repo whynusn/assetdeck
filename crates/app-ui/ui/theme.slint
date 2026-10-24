@@ -1,3 +1,5 @@
+import { LineEdit } from "std-widgets.slint";
+
 // 设计令牌：颜色/圆角集中一处，避免各处硬编码色值漂移。
 //
 // 取值刻意贴合内置 fluent 暗色（背景 #1C1C1C、次级面 #2C2C2C、强调 #60CDFF、
@@ -21,10 +23,10 @@ export global Theme {
     in-out property <color> line: #383838;
     in-out property <color> line-strong: #4a4a4a;
 
-    // 文本三级：主/次/弱
+    // 文本三级：主/次/弱。text-3 必须对 bg-raised 达 4.5:1（契约 §5）。
     in-out property <color> text: #f4f4f4;
     in-out property <color> text-2: #c9c9c9;
-    in-out property <color> text-3: #8a8a8a;
+    in-out property <color> text-3: #a6a6a6;
 
     // 语义色：强调=fluent 暗色强调蓝，其上文字用黑（同 fluent accent-foreground）
     in-out property <color> accent: #60cdff;
@@ -32,28 +34,105 @@ export global Theme {
     in-out property <color> accent-press: #4bb2e0;
     in-out property <color> accent-ink: #06131a;
     in-out property <color> accent-soft: #1f3a47;
-    in-out property <color> danger: #e0666f;
-    in-out property <color> danger-soft: #3a2427;
-    in-out property <color> danger-press: #472a2e;
+    in-out property <color> danger: #e4747d;
+    in-out property <color> danger-soft: #352124;
+    in-out property <color> danger-press: #2a1c1f;
+    // 危险填充态（danger-press）上的文字/图标：浅色主题的填充红需要反白。
+    in-out property <color> danger-ink: #ffffff;
     in-out property <color> warn: #e3b457;
     in-out property <color> warn-soft: #3a3320;
+    in-out property <color> ok: #5ac18e;
     in-out property <color> ok-soft: #1f3a30;
+    in-out property <color> shared: #c77ae0;
+    in-out property <color> shared-soft: #3a2740;
+    // 控件轨道描边（开关关闭态）：必须在浮层底上可辨（契约 §5 UI 边界 ≥3:1）。
+    in-out property <color> control-track-border: #8a8a8a;
 
     // 浮层：比抬起面再亮一档，并配描边拉开与内容的层次
     in-out property <color> bg-overlay: #2c2c2c;
     in-out property <color> scrim: #00000066;
 
-    // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值
-    in-out property <color> label-bar-bg: #00000080;
+    // 瓦片角标（名称条 / 徽标）：从 appwindow.slint 收拢到这里，消除散落硬编码色值。
+    in-out property <color> label-bar-bg: #00000099;
     in-out property <color> label-bar-bg-hover: #000000cc;
     in-out property <color> label-bar-text: #ffffff;
     in-out property <color> badge-bg: #00000099;
     in-out property <color> badge-text: #ffffff;
-    in-out property <color> card-icon: #00000066;
+    // 状态点的对比描边：压在任意缩略图上都要可辨，明暗两套同值。
+    in-out property <color> badge-ring: #ffffffcc;
+    // 文本/文件卡的占位色罩：把底色调向当前主题，保证卡面正文可读。
+    in-out property <color> tile-veil: #000000a6;
+    in-out property <color> card-icon: #a6a6a6;
 
     // 几何
     in-out property <length> radius: 4px;
     in-out property <length> radius-lg: 8px;
+}
+
+// 间距阶梯：4px 基准网格（2px 为半档）。语义内边距按「栏 / 面板 / 弹窗 /
+// 菜单」分档；界面不再写 14px 之类阶梯外值（契约 §1.3）。
+export global Spacing {
+    out property <length> xxs: 2px;
+    out property <length> xs: 4px;
+    out property <length> sm: 6px;
+    out property <length> md: 8px;
+    out property <length> lg: 10px;
+    out property <length> xl: 12px;
+    out property <length> xxl: 16px;
+    out property <length> xxxl: 20px;
+    out property <length> huge: 24px;
+
+    out property <length> bar-pad: 12px;
+    out property <length> panel-pad: 12px;
+    out property <length> dialog-pad: 16px;
+    out property <length> menu-pad: 6px;
+}
+
+// 控件尺寸：高度/图标按钮/开关/行高统一取这里，避免同一 30px 抄几十处。
+export global Metrics {
+    out property <length> row-compact: 28px;
+    out property <length> control: 30px;
+    out property <length> control-primary: 32px;
+    out property <length> icon-button: 30px;
+    out property <length> menu-row: 46px;
+    out property <length> bar: 48px;
+    out property <length> toggle-width: 40px;
+    out property <length> toggle-height: 22px;
+    out property <length> hit-min: 28px;
+    out property <length> lock-area: 30px;
+}
+
+// 字体阶梯：界面只消费这里的字号/字重，禁止内联 font-size 字面量（契约 §1.2）。
+// display 只给主读数；title 给面板/弹窗标题；body 给行与正文；label 给按钮/
+// 说明/状态；caption 只留给计数、文件类型等次要元数据。
+export global Typography {
+    out property <length> display: 16px;
+    out property <length> title: 14px;
+    out property <length> body: 12px;
+    out property <length> label: 11px;
+    out property <length> caption: 10px;
+
+    out property <int> regular: 400;
+    out property <int> medium: 500;
+    out property <int> semibold: 600;
+}
+
+// 动效节奏：时长只从这里取，状态类统一 ease-out；关闭「界面动画」时全部归零
+//（契约 §1.4）。原语在 theme.slint 内读不到 appwindow 的属性，由壳层把开关
+// 同步到 Motion.enabled，因此任何 animate 都必须消费这个令牌。
+export global Motion {
+    in-out property <bool> enabled: true;
+    out property <duration> fast: 100ms;   // hover 微反馈
+    out property <duration> state: 120ms;  // 按压 / 选中 / 开关
+    out property <duration> enter: 150ms;  // 浮层入场 / 瓦片淡入
+}
+
+// 弹窗/面板标题：14px/600。所有标题共用一处，避免 13px 过渡档回流。
+export component TitleLabel inherits Text {
+    color: Theme.text;
+    font-size: Typography.title;
+    font-weight: Typography.semibold;
+    vertical-alignment: center;
 }
 
 // 图标：统一 24 单位视图盒的描边图形（lucide 风格几何），只吃 commands + 尺寸。
@@ -69,6 +148,44 @@ export component Icon inherits Path {
     viewbox-height: 24;
     width: 16px;
     height: 16px;
+}
+
+// 键盘焦点环：只随键盘聚焦出现（指针点击不显示），1px accent。按钮/开关
+// 外扩 3px，与选中态（贴边 accent 描边）在几何上可区分；行类用 outset: 0
+// 内嵌，避免与相邻菜单行粘连（契约 §2.1 focus）。
+export component FocusRing inherits Rectangle {
+    in property <bool> active: false;
+    in property <length> target-width: 0px;
+    in property <length> target-height: 0px;
+    in property <length> outset: 3px;
+    in property <length> ring-radius: Theme.radius + 2px;
+
+    visible: root.active;
+    x: -root.outset;
+    y: -root.outset;
+    width: root.target-width + 2 * root.outset;
+    height: root.target-height + 2 * root.outset;
+    background: transparent;
+    border-width: 1px;
+    border-color: Theme.accent;
+    border-radius: root.ring-radius;
+}
+
+// 弹窗输入框：挂载即接管焦点（契约 §2.2「弹窗打开后焦点进入弹窗」）。
+// 重命名类单输入弹窗用 select-on-open 全选原名，直接输入即覆盖；
+// auto-focus=false 供同一弹窗的第二个字段使用（上框点位 y 表达式）。
+export component DialogInput inherits LineEdit {
+    in property <bool> auto-focus: true;
+    in property <bool> select-on-open: false;
+
+    init => {
+        if (root.auto-focus) {
+            root.focus();
+            if (root.select-on-open) {
+                root.select-all();
+            }
+        }
+    }
 }
 
 // 图标字形表：集中放 path commands，调用点只引名字，避免同一图形多处抄写。
@@ -117,8 +234,11 @@ export component IconButton inherits Rectangle {
     in property <length> icon-size: 16px;
     callback clicked();
 
-    width: 30px;
-    height: 30px;
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
+
+    width: Metrics.icon-button;
+    height: Metrics.icon-button;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
@@ -126,18 +246,21 @@ export component IconButton inherits Rectangle {
         : touch.has-hover ? Theme.line-strong
         : Theme.line;
     background: !root.enabled ? transparent
-        : touch.pressed ? Theme.bg-raised-press
-        : root.active ? Theme.accent-soft
-        : touch.has-hover ? Theme.bg-raised-hover
-        : Theme.bg-raised;
+        : root.active
+            ? (touch.pressed ? Theme.accent-press : Theme.accent-soft)
+            : touch.pressed ? Theme.bg-raised-press
+            : touch.has-hover ? Theme.bg-raised-hover
+            : Theme.bg-raised;
 
-    animate background, border-color { duration: 120ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     Icon {
         width: root.icon-size;
         height: root.icon-size;
         commands: root.glyph;
-        tint: !root.enabled ? Theme.text-3 : root.active ? Theme.accent : Theme.text-2;
+        tint: !root.enabled ? Theme.text-3
+            : root.active ? (touch.pressed ? Theme.accent-ink : Theme.accent)
+            : Theme.text-2;
     }
 
     touch := TouchArea {
@@ -146,6 +269,26 @@ export component IconButton inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    // 键盘可达（契约 §2.2）：Tab 聚焦、Enter/Space 激活；焦点环只随键盘出现。
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
     }
 
     Tooltip {
@@ -162,36 +305,43 @@ export component DangerButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    height: 30px;
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
+
+    height: Metrics.control;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
-        : root.armed || touch.has-hover ? Theme.danger : Theme.line;
+        : root.armed || touch.has-hover || touch.pressed ? Theme.danger : Theme.line;
     background: !root.enabled ? transparent
-        : root.armed
-            ? (touch.pressed ? Theme.danger-press : Theme.danger-soft)
-            : (touch.pressed ? Theme.danger-press : touch.has-hover ? Theme.danger-soft : transparent);
+        : touch.pressed ? Theme.danger-press
+        : root.armed || touch.has-hover ? Theme.danger-soft
+        : transparent;
 
-    animate background, border-color { duration: 120ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     HorizontalLayout {
         alignment: center;
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 6px;
+        padding-left: Spacing.lg;
+        padding-right: Spacing.lg;
+        spacing: Spacing.sm;
 
         Icon {
             y: (parent.height - self.height) / 2;
             commands: Glyph.trash;
-            tint: root.enabled ? Theme.danger : Theme.text-3;
+            tint: !root.enabled ? Theme.text-3
+                : touch.pressed ? Theme.danger-ink
+                : Theme.danger;
             width: 14px;
             height: 14px;
         }
 
         Text {
             text: root.text;
-            color: root.enabled ? Theme.danger : Theme.text-3;
-            font-size: 12px;
+            color: !root.enabled ? Theme.text-3
+                : touch.pressed ? Theme.danger-ink
+                : Theme.danger;
+            font-size: Typography.body;
             vertical-alignment: center;
         }
     }
@@ -203,13 +353,32 @@ export component DangerButton inherits Rectangle {
             root.clicked();
         }
     }
+
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+    }
 }
 
-// 分区小标题：给侧栏/面板分组，字号压到 10px 并调淡，不与内容抢注意力。
+// 分区小标题：结构标题用 label 档并调淡，不与内容抢注意力；caption 留给元数据。
 export component SectionLabel inherits Text {
     color: Theme.text-3;
-    font-size: 10px;
-    font-weight: 600;
+    font-size: Typography.label;
+    font-weight: Typography.semibold;
     vertical-alignment: center;
 }
 
@@ -221,14 +390,17 @@ export component FlatButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    height: 28px;
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
+
+    height: Metrics.row-compact;
     border-radius: Theme.radius;
     background: !root.enabled ? Theme.bg-raised : touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
-    animate background { duration: 120ms; }
+    animate background { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     HorizontalLayout {
         alignment: center;
-        spacing: 5px;
+        spacing: Spacing.sm;
 
         if root.glyph != "": Icon {
             y: (parent.height - self.height) / 2;
@@ -241,7 +413,8 @@ export component FlatButton inherits Rectangle {
         Text {
             text: root.text;
             color: root.enabled ? Theme.text-2 : Theme.text-3;
-            font-size: 11px;
+            font-size: Typography.label;
+            font-weight: Typography.medium;
             vertical-alignment: center;
         }
     }
@@ -252,6 +425,25 @@ export component FlatButton inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
     }
 
     if root.tip != "": Tooltip {
@@ -270,30 +462,32 @@ export component Toggle inherits Rectangle {
     in property <bool> enabled: true;
     callback toggled();
 
-    width: 40px;
-    height: 22px;
-    border-radius: 11px;
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
+
+    width: Metrics.toggle-width;
+    height: Metrics.toggle-height;
+    border-radius: self.height / 2;
     border-width: 1px;
     border-color: !root.enabled ? Theme.line
         : root.checked ? Theme.accent
-        : touch.has-hover ? Theme.line-strong
-        : Theme.line;
+        : Theme.control-track-border;
     background: !root.enabled ? Theme.bg-raised
         : root.checked
             ? (touch.pressed ? Theme.accent-press : Theme.accent)
-            : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised);
+            : (touch.pressed ? Theme.bg-raised-press : touch.has-hover ? Theme.bg-raised : Theme.bg-input);
 
-    animate background, border-color { duration: 140ms; }
+    animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
 
     knob := Rectangle {
         width: 14px;
         height: 14px;
-        border-radius: 7px;
+        border-radius: self.height / 2;
         y: (parent.height - self.height) / 2;
-        x: root.checked ? parent.width - self.width - 4px : 4px;
+        x: root.checked ? parent.width - self.width - Spacing.xs : Spacing.xs;
         background: !root.enabled ? Theme.text-3 : root.checked ? Theme.accent-ink : Theme.text-2;
 
-        animate x, background { duration: 140ms; easing: ease-out; }
+        animate x, background { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
     }
 
     touch := TouchArea {
@@ -303,6 +497,27 @@ export component Toggle inherits Rectangle {
             root.toggled();
         }
     }
+
+    // Space 切换开关（契约 §2.2）；Enter 也接受，和按钮语义一致。
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+        ring-radius: (root.height + 6px) / 2;
+    }
 }
 
 // 菜单行：弹层里的单条动作（图标 + 标题 + 次要说明）。无边框、悬停铺淡底——
@@ -311,25 +526,33 @@ export component MenuItem inherits Rectangle {
     in property <string> glyph;
     in property <string> text;
     in property <string> detail: "";
+    in property <bool> danger: false;
     callback clicked();
 
-    height: 46px;
-    border-radius: Theme.radius;
-    background: touch.pressed ? Theme.bg-raised-press
-        : touch.has-hover ? Theme.bg-raised-hover
-        : transparent;
+    private property <bool> focus-visible: false;
+    forward-focus: focus-scope;
 
-    animate background { duration: 100ms; }
+    height: Metrics.menu-row;
+    border-radius: Theme.radius;
+    background: touch.pressed
+        ? (root.danger ? Theme.danger-press : Theme.bg-raised-press)
+        : touch.has-hover
+            ? (root.danger ? Theme.danger-soft : Theme.bg-raised-hover)
+            : transparent;
+
+    animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 9px;
+        padding-left: Spacing.lg;
+        padding-right: Spacing.lg;
+        spacing: Spacing.md;
 
         Icon {
             y: (parent.height - self.height) / 2;
             commands: root.glyph;
-            tint: touch.has-hover ? Theme.accent : Theme.text-2;
+            tint: root.danger
+                ? (touch.pressed ? Theme.danger-ink : Theme.danger)
+                : touch.has-hover ? Theme.accent : Theme.text-2;
             width: 15px;
             height: 15px;
         }
@@ -337,19 +560,24 @@ export component MenuItem inherits Rectangle {
         VerticalLayout {
             horizontal-stretch: 1;
             alignment: center;
-            spacing: 1px;
+            spacing: Spacing.xxs;
 
             Text {
                 text: root.text;
-                color: Theme.text;
-                font-size: 12px;
+                color: root.danger
+                    ? (touch.pressed ? Theme.danger-ink : Theme.danger)
+                    : Theme.text;
+                font-size: Typography.body;
                 overflow: elide;
             }
 
             if root.detail != "": Text {
                 text: root.detail;
-                color: Theme.text-3;
-                font-size: 10px;
+                // 浅色按压面比常态更深，副行随按压升到 text-2，避免按下反而更难读。
+                color: touch.pressed
+                    ? (root.danger ? Theme.danger-ink : Theme.text-2)
+                    : Theme.text-3;
+                font-size: Typography.label;
                 overflow: elide;
             }
         }
@@ -360,6 +588,27 @@ export component MenuItem inherits Rectangle {
         clicked => {
             root.clicked();
         }
+    }
+
+    // 方向键导航属菜单容器职责（M4-C4）；基线先保证 Tab 可达 + Enter/Space 触发。
+    focus-scope := FocusScope {
+        focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
+        focus_lost(reason) => { root.focus-visible = false; }
+        key_pressed(event) => {
+            if (event.text == Key.Return || event.text == Key.Space) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    FocusRing {
+        active: root.focus-visible && focus-scope.has-focus;
+        target-width: root.width;
+        target-height: root.height;
+        outset: 0px;
+        ring-radius: Theme.radius;
     }
 }
 
@@ -372,23 +621,23 @@ export component SettingRow inherits HorizontalLayout {
     in property <bool> enabled: true;
     callback toggled();
 
-    spacing: 12px;
+    spacing: Spacing.xl;
 
     VerticalLayout {
         horizontal-stretch: 1;
-        spacing: 3px;
+        spacing: Spacing.xxs;
         alignment: center;
 
         Text {
             text: root.title;
             color: root.enabled ? Theme.text : Theme.text-3;
-            font-size: 12px;
+            font-size: Typography.body;
         }
 
         Text {
             text: root.detail;
             color: Theme.text-3;
-            font-size: 10px;
+            font-size: Typography.label;
             wrap: word-wrap;
         }
     }

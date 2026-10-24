@@ -1,0 +1,2286 @@
+{
+  "schemaVersion": 1,
+  "project": "assetdeck",
+  "branch": "ux-audit",
+  "baseBranch": "main",
+  "contractVersion": 1,
+  "createdAt": "2026-10-23T23:42:27+08:00",
+  "updatedAt": "2026-10-24T00:58:44.512Z",
+  "runCount": 9,
+  "lastRuns": [
+    {
+      "runId": "run-20261024-080014",
+      "runNumber": 9,
+      "componentId": "M1-C1",
+      "moduleId": "M1",
+      "status": "done",
+      "summary": "窗口最小尺寸落到平台层：主窗口就绪后经 winit min_inner_size 锁定契约 §3 的 960×600，WM_GETMINMAXINFO 按 DPI 折算（150% DPI 真机 MINTRACK 1462×956 = 960×600 客户区 + 非客户区），修掉可拖到 800×500/640×400 导致顶栏省略与分类列表裁切的问题；三态截图与修复前逐字节一致。",
+      "gates": "slint-check=pass;cargo-check=pass;ui-hygiene=pass;deps-guard=pass;capture-check=pass;runtime-min-track=pass",
+      "shots": "target/ux-audit/shots/M1-C1/after",
+      "baseCommit": "b3d0582",
+      "finishedAt": "2026-10-24T00:58:44.507Z"
+    },
+    {
+      "runId": "run-20261024-070013",
+      "runNumber": 8,
+      "componentId": "M0-C7",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Motion 动效令牌并让全部 22 处 animate 受界面动画开关控制：关闭时悬停/按压/开关/浮层/瓦片淡入一律 0ms，状态过渡统一 ease-out；补齐开关热更新与设置文案。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(3 组 before/after；动效关断按代码路径+Motion 守卫核对，静态截图不可见)",
+      "shots": "target/ux-audit/shots/M0-C7/after/settings-default.png;target/ux-audit/shots/M0-C7/after/classify.png;target/ux-audit/shots/M0-C7/after/shell-grid.png",
+      "baseCommit": "e613cfe",
+      "finishedAt": "2026-10-23T23:10:17.759Z"
+    },
+    {
+      "runId": "run-20261024-060013",
+      "runNumber": 7,
+      "componentId": "M0-C6",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "对比度与可读性达标：修正暗色危险色与名称条 alpha、浅色 accent/warn 语义色，提升瓦片文件名与状态说明字号，修复菜单按压副行；新增 3 组对比度测试守护。",
+      "gates": "slint-viewer --check 通过；cargo check -p app-ui -p ui-viewmodels 通过；cargo test -p ui-viewmodels 通过（含新增 3 组对比度测试）；deps_guard 6 项通过；ui_hygiene 2 项通过；capture --check 42 状态通过",
+      "shots": "target/ux-audit/shots/M0-C6/after/{shell-grid,settings-default,theme-light}.png；补充验证 target/ux-audit/shots/_states/after/{rename-error,target-choose,tuning,import-result,classify}.png",
+      "baseCommit": "4b94654",
+      "finishedAt": "2026-10-23T22:11:14.044Z"
+    },
+    {
+      "runId": "run-20261024-050012",
+      "runNumber": 6,
+      "componentId": "M0-C5",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立键盘焦点基线：共享 FocusRing 让按钮/开关/菜单项可 Tab 聚焦并支持 Enter/Space 激活，DialogInput 让弹窗打开即聚焦（单输入弹窗 Enter 确认、重命名全选），modal-open 归零统一归还壳层焦点；焦点陷阱与菜单方向键导航留档 F-029/F-030。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C5/after/*.png",
+      "baseCommit": "ad6f5a0",
+      "finishedAt": "2026-10-23T21:12:58.657Z"
+    },
+    {
+      "runId": "run-20261024-040014",
+      "runNumber": 5,
+      "componentId": "M0-C4",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "补齐共享原语状态矩阵：开关关闭态新增 3:1 轨道描边并与禁用态分层；MenuItem 增加 danger 变体并为两个右键菜单的删除项加分隔线；DangerButton 按压态反白、暗色危险底调深；菜单副行升 label；IconButton 选中按压不再回落灰色。焦点模型留 M0-C5、设置行禁用层级留 M7-C2（P2 留档）。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass;viewmodels-test=pass;capture-check=pass(42 states);visual=pass(4 组 before/after + theme-light/notice-error 复核)",
+      "shots": "target/ux-audit/shots/M0-C4/after/settings-default.png;target/ux-audit/shots/M0-C4/after/shell-grid.png;target/ux-audit/shots/M0-C4/after/selection-bar.png;target/ux-audit/shots/M0-C4/after/context-menu.png;target/ux-audit/shots/_states/after/theme-light.png;target/ux-audit/shots/_states/after/notice-error.png;target/ux-audit/shots/_states/after/import-result.png",
+      "baseCommit": "80a548a",
+      "finishedAt": "2026-10-23T20:11:41.138Z"
+    },
+    {
+      "runId": "run-20261024-030013",
+      "runNumber": 4,
+      "componentId": "M0-C3",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Spacing/Metrics 两套令牌（4px 网格、栏/面板/弹窗/菜单内边距、控件/行高/开关/热区尺寸），结构性间距与高度全部改为消费令牌；清零圆角字面量与阶梯外 spacing，通知关闭/共享行按钮/归类候选热区提到 ≥28px。共享中心与设置面板的纵向溢出仍归 M9-C1/M7-C1。",
+      "gates": "slint-check=pass;cargo-check=pass;ui-hygiene=pass(hex 0/font 0/off 0/radius 0/off 0/spacing 0);deps-guard=pass;capture-check=pass(42 states);visual=pass(8 组 before/after)",
+      "shots": "target/ux-audit/shots/M0-C3/after/shell-grid.png;target/ux-audit/shots/M0-C3/after/settings-default.png;target/ux-audit/shots/_states/after/notice-success.png;target/ux-audit/shots/_states/after/selection-bar.png;target/ux-audit/shots/_states/after/share-ctl.png;target/ux-audit/shots/_states/after/classify.png;target/ux-audit/shots/_states/after/properties.png;target/ux-audit/shots/_states/after/rename.png",
+      "baseCommit": "b79d9e5",
+      "finishedAt": "2026-10-23T19:17:29.162Z"
+    },
+    {
+      "runId": "run-20261024-020025",
+      "runNumber": 3,
+      "componentId": "M0-C2",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "建立 Typography 五档令牌与 TitleLabel/SectionLabel 原语，110 处字号字面量清零；9px/13px 归并、主读数升 display、弹窗与分组标题层级理顺；截断文本 Tooltip 缺口留 M2-C1/M3-C2。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(font 0/off 0/hex 0);capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C2/after/shell-grid.png;target/ux-audit/shots/M0-C2/after/settings-default.png;target/ux-audit/shots/_states/after/tuning.png;target/ux-audit/shots/_states/after/update.png",
+      "baseCommit": "113f18a",
+      "finishedAt": "2026-10-23T18:11:45.469Z"
+    },
+    {
+      "runId": "run-20261024-010014",
+      "runNumber": 2,
+      "componentId": "M0-C1",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "颜色令牌补齐 ok/shared/soft/badge-ring/tile-veil 并打通明暗注入；text-3 达标 4.5:1；目标健康色与共享/成功语义全部收口到 Theme 令牌。",
+      "gates": "slint-check=pass;cargo-check=pass;deps-guard=pass;ui-hygiene=pass(hex 0);viewmodels-test=pass;capture-check=pass;visual=pass",
+      "shots": "target/ux-audit/shots/M0-C1/after/settings-default.png;target/ux-audit/shots/M0-C1/after/shell-grid.png;target/ux-audit/shots/M0-C1/after/theme-light.png",
+      "baseCommit": "f222909",
+      "finishedAt": "2026-10-23T17:25:39.403Z"
+    },
+    {
+      "runId": "run-20261024-003547",
+      "runNumber": 1,
+      "componentId": "M0-C8",
+      "moduleId": "M0",
+      "status": "done",
+      "summary": "初始化自检：begin/complete/journal/lock 与卫生度测试全链路通过",
+      "gates": "ui-hygiene=pass(hex 6/font 110/off16/radius 12/off5);capture-check=pass(42 states);state-validate=pass",
+      "shots": true,
+      "baseCommit": "780dd9a",
+      "finishedAt": "2026-10-23T16:35:50.814Z"
+    }
+  ],
+  "current": null,
+  "modules": [
+    {
+      "id": "M0",
+      "name": "设计基础",
+      "intent": "先建立可复用的 token / 原语 / 焦点与对比度基线，后续所有屏幕只消费，不重复造值。",
+      "components": [
+        {
+          "id": "M0-C1",
+          "name": "颜色 token 与明暗等价",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/ui-viewmodels/src/theme.rs"
+          ],
+          "anchors": [
+            "export global Theme",
+            "ThemeProvider"
+          ],
+          "states": [
+            "settings-default",
+            "shell-grid",
+            "theme-light"
+          ],
+          "focus": "颜色令牌是否覆盖全部语义（含成功/共享）；暗/亮两套是否等价；消费点是否仍有 raw hex；soft 变体是否成对；text-3 的使用边界。",
+          "lastRun": "run-20261024-010014",
+          "auditedAtCommit": "f222909",
+          "notes": "[run-20261024-010014] 颜色令牌补齐 ok/shared/soft/badge-ring/tile-veil 并打通明暗注入；text-3 达标 4.5:1；目标健康色与共享/成功语义全部收口到 Theme 令牌。"
+        },
+        {
+          "id": "M0-C2",
+          "name": "字体阶梯与字号 token",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "font-size:",
+            "Text {",
+            "overflow:"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "字号阶梯是否收敛（display/title/body/label/caption）；10/11/12/13/14 混用；层级可辨性；长文本截断与 Tooltip。",
+          "lastRun": "run-20261024-020025",
+          "auditedAtCommit": "113f18a",
+          "notes": "[run-20261024-020025] 建立 Typography 五档令牌与 TitleLabel/SectionLabel 原语，110 处字号字面量清零；9px/13px 归并、主读数升 display、弹窗与分组标题层级理顺；截断文本 Tooltip 缺口留 M2-C1/M3-C2。"
+        },
+        {
+          "id": "M0-C3",
+          "name": "间距/尺寸/圆角/图标 token",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "padding:",
+            "spacing:",
+            "height:",
+            "width:",
+            "border-radius:",
+            "Icon {"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "间距是否落在 4px 网格；控件高度/图标尺寸/圆角是否成体系；热区 ≥28px；危险按钮隔离。",
+          "lastRun": "run-20261024-030013",
+          "auditedAtCommit": "b79d9e5",
+          "notes": "[run-20261024-030013] 建立 Spacing/Metrics 两套令牌（4px 网格、栏/面板/弹窗/菜单内边距、控件/行高/开关/热区尺寸），结构性间距与高度全部改为消费令牌；清零圆角字面量与阶梯外 spacing，通知关闭/共享行按钮/归类候选热区提到 ≥28px。共享中心与设置面板的纵向溢出仍归 M9-C1/M7-C1。"
+        },
+        {
+          "id": "M0-C4",
+          "name": "共享原语状态矩阵",
+          "priority": 1,
+          "dependsOn": [
+            "M0-C1",
+            "M0-C2",
+            "M0-C3"
+          ],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint"
+          ],
+          "anchors": [
+            "IconButton",
+            "DangerButton",
+            "FlatButton",
+            "Toggle",
+            "MenuItem",
+            "SettingRow",
+            "SectionLabel"
+          ],
+          "states": [
+            "settings-default",
+            "shell-grid",
+            "selection-bar",
+            "context-menu"
+          ],
+          "focus": "每个原语是否具备 disabled/pressed/selected/hover/focus 全状态；状态优先级是否一致；危险按钮 armed；开关受控语义。",
+          "lastRun": "run-20261024-040014",
+          "auditedAtCommit": "80a548a",
+          "notes": "[run-20261024-040014] 补齐共享原语状态矩阵：开关关闭态新增 3:1 轨道描边并与禁用态分层；MenuItem 增加 danger 变体并为两个右键菜单的删除项加分隔线；DangerButton 按压态反白、暗色危险底调深；菜单副行升 label；IconButton 选中按压不再回落灰色。焦点模型留 M0-C5、设置行禁用层级留 M7-C2（P2 留档）。"
+        },
+        {
+          "id": "M0-C5",
+          "name": "焦点可见性与键盘可达基线",
+          "priority": 1,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "has-focus",
+            "focus()",
+            "key_pressed",
+            "capture_key_pressed"
+          ],
+          "states": [
+            "settings-default",
+            "classify",
+            "shell-grid",
+            "scope-menu",
+            "rename"
+          ],
+          "focus": "键盘焦点是否可见且与 hover 可区分；Tab 顺序；Esc 链；关闭后焦点归还；输入框持焦时快捷键让路。",
+          "lastRun": "run-20261024-050012",
+          "auditedAtCommit": "ad6f5a0",
+          "notes": "[run-20261024-050012] 建立键盘焦点基线：共享 FocusRing 让按钮/开关/菜单项可 Tab 聚焦并支持 Enter/Space 激活，DialogInput 让弹窗打开即聚焦（单输入弹窗 Enter 确认、重命名全选），modal-open 归零统一归还壳层焦点；焦点陷阱与菜单方向键导航留档 F-029/F-030。"
+        },
+        {
+          "id": "M0-C6",
+          "name": "对比度与可读性",
+          "priority": 1,
+          "dependsOn": [
+            "M0-C1",
+            "M0-C2"
+          ],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/theme.slint"
+          ],
+          "anchors": [
+            "text-3",
+            "caption",
+            "bg-raised"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default",
+            "theme-light"
+          ],
+          "focus": "text-3 在 bg-raised/浮层上的对比度；10px 正文；非颜色状态线索；浅色主题等价。",
+          "lastRun": "run-20261024-060013",
+          "auditedAtCommit": "4b94654",
+          "notes": "[run-20261024-060013] 对比度与可读性达标：修正暗色危险色与名称条 alpha、浅色 accent/warn 语义色，提升瓦片文件名与状态说明字号，修复菜单按压副行；新增 3 组对比度测试守护。"
+        },
+        {
+          "id": "M0-C7",
+          "name": "动效节奏与 animations-enabled",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "animate",
+            "animations-enabled"
+          ],
+          "states": [
+            "settings-default",
+            "classify",
+            "shell-grid"
+          ],
+          "focus": "动效时长 100–160ms；关闭动画时全部归零；无定时器轮询；不阻塞输入。",
+          "lastRun": "run-20261024-070013",
+          "auditedAtCommit": "e613cfe",
+          "notes": "[run-20261024-070013] 建立 Motion 动效令牌并让全部 22 处 animate 受界面动画开关控制：关闭时悬停/按压/开关/浮层/瓦片淡入一律 0ms，状态过渡统一 ease-out；补齐开关热更新与设置文案。"
+        },
+        {
+          "id": "M0-C8",
+          "name": "UI 卫生 ratchet 护栏",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "done",
+          "source": [
+            "crates/app-ui/tests/ui_hygiene.rs",
+            "automation/ux-audit/hygiene-baseline.json"
+          ],
+          "anchors": [
+            "ui_hygiene_ratchet"
+          ],
+          "states": [],
+          "focus": "硬编码色值/字号/圆角计数只降不升；基线随修复同步下调。",
+          "lastRun": "run-20261024-003547",
+          "auditedAtCommit": "780dd9a",
+          "notes": "初始化建立；基线见 hygiene-baseline.json。\n[run-20261024-003547] 初始化自检：begin/complete/journal/lock 与卫生度测试全链路通过"
+        }
+      ]
+    },
+    {
+      "id": "M1",
+      "name": "主窗骨架与顶栏",
+      "intent": "主窗是最高频工作面：信息层级、压缩顺序、目标胶囊与反馈决定产品第一印象。",
+      "components": [
+        {
+          "id": "M1-C1",
+          "name": "窗口最小尺寸与三栏布局",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "done",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "preferred-width",
+            "VerticalLayout",
+            "sidebar-width",
+            "horizontal-stretch"
+          ],
+          "states": [
+            "shell-empty",
+            "shell-grid",
+            "shell-narrow"
+          ],
+          "focus": "960×600 下三栏不重叠/不裁切；侧栏与内容区自适应；最小尺寸约束；缩放时无跳变。",
+          "lastRun": "run-20261024-080014",
+          "auditedAtCommit": "b3d0582",
+          "notes": "[run-20261024-080014] 窗口最小尺寸落到平台层：主窗口就绪后经 winit min_inner_size 锁定契约 §3 的 960×600，WM_GETMINMAXINFO 按 DPI 折算（150% DPI 真机 MINTRACK 1462×956 = 960×600 客户区 + 非客户区），修掉可拖到 800×500/640×400 导致顶栏省略与分类列表裁切的问题；三态截图与修复前逐字节一致。"
+        },
+        {
+          "id": "M1-C2",
+          "name": "顶栏左簇与右侧动作组",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "total-text",
+            "select-anchor",
+            "settings-anchor",
+            "face-anchor"
+          ],
+          "states": [
+            "shell-grid",
+            "selection-bar",
+            "shell-empty"
+          ],
+          "focus": "读数层级、按钮一致性、图标 Tooltip、窄窗压缩顺序、多选态高亮。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M1-C3",
+          "name": "检索胶囊与范围菜单",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "search-capsule",
+            "scope-anchor",
+            "scope-menu-open",
+            "search-input"
+          ],
+          "states": [
+            "shell-grid",
+            "scope-menu",
+            "empty-search"
+          ],
+          "focus": "聚焦/悬停描边、范围菜单定位与选项、清空与聚焦、窄窗宽度、搜索无结果衔接。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M1-C4",
+          "name": "目标胶囊五态",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "target-chip",
+            "target-mode",
+            "target-label",
+            "target-health",
+            "target-pinned"
+          ],
+          "states": [
+            "target-ready",
+            "target-needs-confirmation",
+            "target-choose",
+            "target-empty"
+          ],
+          "focus": "五态视觉可辨、健康色语义、锁定态、点击区域、与就绪文案一致；不泄露内部状态名。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M1-C5",
+          "name": "通知条",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "notice-text",
+            "notice-tone",
+            "notice-close"
+          ],
+          "states": [
+            "notice-success",
+            "notice-error",
+            "notice-warning"
+          ],
+          "focus": "三档语义色与图标、长文案换行、自动消隐与手动关闭、不遮挡关键操作。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M1-C6",
+          "name": "进度与忙碌反馈",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "progress-visible",
+            "progress-percent",
+            "progress-text"
+          ],
+          "states": [
+            "progress"
+          ],
+          "focus": "不确定/确定进度、百分比与文案对齐、忙碌期间入口禁用、完成态收尾。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M2",
+      "name": "侧栏与分类",
+      "intent": "分类是库的导航骨架；长名、计数、系统收件箱与拖拽边界必须稳定。",
+      "components": [
+        {
+          "id": "M2-C1",
+          "name": "分类列表与计数",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "cat-list",
+            "cat-touch",
+            "category-counts"
+          ],
+          "states": [
+            "shell-grid",
+            "shell-empty",
+            "empty-category"
+          ],
+          "focus": "长分类名截断/Tooltip、计数对齐、悬停/选中态、空分类、滚动。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M2-C2",
+          "name": "系统收件箱与回收站",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "待分类",
+            "trash-count",
+            "trash-touch"
+          ],
+          "states": [
+            "shell-grid",
+            "trash-bar",
+            "shell-empty"
+          ],
+          "focus": "收件箱固定显示名、不可右键改名（D85）、回收站角标与空态、选中态一致性。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M2-C3",
+          "name": "侧栏拖拽分隔条",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "divider-line",
+            "divider-touch",
+            "sidebar-width"
+          ],
+          "states": [
+            "shell-grid"
+          ],
+          "focus": "光标形态、命中宽度、拖拽跟手、150–420px 夹取、松手持久化、不吞点击。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M2-C4",
+          "name": "导入/导出入口",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "import-anchor",
+            "import-menu-open"
+          ],
+          "states": [
+            "shell-empty",
+            "import-menu"
+          ],
+          "focus": "主次按钮层级、与危险入口隔离（D86）、窄高窗口下不被裁切、导入菜单锚定。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M3",
+      "name": "素材网格",
+      "intent": "素材是主角：瓦片视觉、选中语义、空态与渐进装载决定浏览体验与专业感。",
+      "components": [
+        {
+          "id": "M3-C1",
+          "name": "瀑布流布局、滚动与缩放",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/ui-viewmodels/src/layout.rs",
+            "crates/ui-viewmodels/src/grid_vm.rs"
+          ],
+          "anchors": [
+            "flick",
+            "content-height",
+            "viewport-height",
+            "scroll-changed"
+          ],
+          "states": [
+            "shell-grid",
+            "shell-narrow"
+          ],
+          "focus": "滚动条/边界、resize 重排、底部留白、无重叠/空洞、10 万条虚拟化与绑定开销。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M3-C2",
+          "name": "瓦片四类视觉",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "TileData",
+            "card-kind",
+            "label-bar",
+            "badge",
+            "text-preview"
+          ],
+          "states": [
+            "shell-grid",
+            "tile-kinds"
+          ],
+          "focus": "图片/视频/文本/文件四类可辨；缺图兜底；名称条与徽标对比度；长名截断；边界不裁切。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M3-C3",
+          "name": "瓦片交互态、选中与共享角标",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "tile-touch",
+            "selected",
+            "share-badge",
+            "active-asset-id",
+            "shared"
+          ],
+          "states": [
+            "shell-grid",
+            "selection-bar",
+            "tile-kinds"
+          ],
+          "focus": "选中统一 accent、hover/pressed/active 可辨、勾选角标与描边不打架、共享三态、免激活点击的 hover 语义。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M3-C4",
+          "name": "空态三分支",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "empty-title",
+            "empty-hint"
+          ],
+          "states": [
+            "shell-empty",
+            "empty-search",
+            "empty-category"
+          ],
+          "focus": "库空/检索无结果/分类为空文案与下一步动作；图标与留白；不与加载态混淆。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M3-C5",
+          "name": "缩略图渐进装载与缺图",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/thumbs.rs"
+          ],
+          "anchors": [
+            "thumb",
+            "thumb-fade",
+            "color"
+          ],
+          "states": [
+            "shell-grid"
+          ],
+          "focus": "淡入不重播、缺图占位可辨、兜底色不刺眼、滚动时不闪烁、失败不阻塞布局。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M4",
+      "name": "多选、菜单与操作条",
+      "intent": "批量操作与危险动作的入口必须清晰、可撤销、不误触。",
+      "components": [
+        {
+          "id": "M4-C1",
+          "name": "多选模式与键盘",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4",
+            "M0-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/ui-viewmodels/src/selection.rs"
+          ],
+          "anchors": [
+            "select-mode-active",
+            "key-a-pressed",
+            "tile-modified-click"
+          ],
+          "states": [
+            "selection-bar"
+          ],
+          "focus": "进入/退出路径一致；单击语义；Ctrl+A 先进入多选（D86）；Esc 退出；上框被屏蔽的可见反馈。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M4-C2",
+          "name": "底部多选操作条",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "selection-bar",
+            "selection-count",
+            "selection-text"
+          ],
+          "states": [
+            "selection-bar"
+          ],
+          "focus": "48px 高度内垂直居中、0 选禁用、危险按钮隔离、按钮顺序与文案、窄窗溢出。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M4-C3",
+          "name": "回收站操作条与二段确认",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "selection-bar",
+            "empty-trash-armed",
+            "empty-trash-text"
+          ],
+          "states": [
+            "trash-bar"
+          ],
+          "focus": "恢复/彻底删除/清空回收站文案与危险层级；armed 态可辨；误触保护；空回收站。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M4-C4",
+          "name": "素材与分类右键菜单",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "context-menu-open",
+            "cat-menu-open",
+            "menu-layout",
+            "cat-menu-layout"
+          ],
+          "states": [
+            "context-menu",
+            "cat-menu"
+          ],
+          "focus": "定位夹取不越界、菜单行高与悬停、危险项隔离、系统收件箱不弹菜单、Esc/点外收起。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M4-C5",
+          "name": "弹窗通用规范",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "modal-open",
+            "overlay-dismissed",
+            "scrim",
+            "radius-lg"
+          ],
+          "states": [
+            "rename",
+            "classify",
+            "share-request",
+            "properties"
+          ],
+          "focus": "居中/夹取、最大高度与滚动、scrim、Esc 链、点外策略（D67）、焦点进入/归还。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M5",
+      "name": "素材操作弹窗",
+      "intent": "重命名/属性/移动是高频轻操作，要求就地、低摩擦、错误可行动。",
+      "components": [
+        {
+          "id": "M5-C1",
+          "name": "素材重命名弹窗",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "rename-open",
+            "rename-current",
+            "rename-error"
+          ],
+          "states": [
+            "rename",
+            "rename-error"
+          ],
+          "focus": "初始选中范围、Enter/Esc、错误就地提示、长名、确认按钮层级、空名禁用。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M5-C2",
+          "name": "分类重命名弹窗",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "cat-rename-open",
+            "cat-rename-current",
+            "cat-rename-error"
+          ],
+          "states": [
+            "cat-rename"
+          ],
+          "focus": "与素材重命名共用模式；重名/保留名错误（D84/D85）文案；确认后视图回落（D84）。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M5-C3",
+          "name": "属性弹窗",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "properties-open",
+            "props-name",
+            "props-path"
+          ],
+          "states": [
+            "properties"
+          ],
+          "focus": "字段层级、长路径换行/省略、复制/定位入口、尺寸单位可读、只读观感。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M5-C4",
+          "name": "移动到分类弹窗",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "move-menu-open",
+            "move-error",
+            "move-cats"
+          ],
+          "states": [
+            "move"
+          ],
+          "focus": "分类长列表滚动、待分类兜底项、新建输入、错误提示、确认后反馈。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M6",
+      "name": "导入与归类",
+      "intent": "导入是首次价值时刻；归类弹窗与结果点名必须诚实、低认知负担。",
+      "components": [
+        {
+          "id": "M6-C1",
+          "name": "导入菜单",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "import-menu-open",
+            "import-menu-layout"
+          ],
+          "states": [
+            "import-menu",
+            "import-menu-armed"
+          ],
+          "focus": "菜单项顺序与图标、锚定位置、键盘可达、与主按钮视觉关系。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M6-C2",
+          "name": "归类弹窗（批次级）",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "classify-open",
+            "classify-summary",
+            "classify-matches",
+            "classify-hint"
+          ],
+          "states": [
+            "classify"
+          ],
+          "focus": "单输入框 + 候选 + 预告行；已有/新建/待分类三态清晰；长分类名；Enter/Esc；不做逐张决策。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M6-C3",
+          "name": "导入结果弹窗",
+          "priority": 3,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "import-result-open",
+            "import-result-rows",
+            "result-row"
+          ],
+          "states": [
+            "import-result"
+          ],
+          "focus": "完全相同/相似/失败三类行可辨；点名与原因；长文件名；非模态不挡背景；关闭出口。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M6-C4",
+          "name": "拖拽与粘贴导入反馈",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "paste-import-requested",
+            "progress-visible",
+            "notice-text"
+          ],
+          "states": [
+            "progress",
+            "notice-error",
+            "notice-success",
+            "import-result"
+          ],
+          "focus": "拖入/粘贴的进行中与完成反馈；重复触发保护；失败可行动；提权会话提示。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M6-C5",
+          "name": "导入错误与通知文案",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "notice-text",
+            "import-result-summary"
+          ],
+          "states": [
+            "notice-error",
+            "import-result",
+            "import-menu-armed",
+            "rename-error"
+          ],
+          "focus": "现象+影响+下一步；不出现协议/内部名；长错误换行；同义文案收口。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M7",
+      "name": "设置与更新",
+      "intent": "设置是信任面：分组语义、开关即时性、日志与危险操作必须清楚且安全。",
+      "components": [
+        {
+          "id": "M7-C1",
+          "name": "设置面板结构、滚动与定位",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "settings-open",
+            "settings-shown",
+            "settings-scroll-col",
+            "settings-anchor"
+          ],
+          "states": [
+            "settings-default"
+          ],
+          "focus": "分组标题层级、面板高度夹取、内部滚动、锚定位置、窄窗不越界、关闭出口常驻。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M7-C2",
+          "name": "设置行与开关",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/ui-viewmodels/src/settings.rs"
+          ],
+          "anchors": [
+            "SettingRow",
+            "Toggle",
+            "SettingRowData"
+          ],
+          "states": [
+            "settings-default"
+          ],
+          "focus": "标题/说明层级、说明可读性、开关受控、禁用语义、即时生效反馈、长文案换行。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M7-C3",
+          "name": "上框点位弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "tuning-open",
+            "target-tunings",
+            "tuning-error"
+          ],
+          "states": [
+            "tuning"
+          ],
+          "focus": "目标选择、表达式可编辑性、校验错误、保存/恢复默认、长表达式横向空间。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M7-C4",
+          "name": "日志组",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "logs-export-armed",
+            "open-logs-requested"
+          ],
+          "states": [
+            "settings-logs"
+          ],
+          "focus": "独立分组、两段确认可辨、文案说明仅复制（D82）、按钮层级与反馈。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M7-C5",
+          "name": "危险操作组",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "clear-button-text",
+            "clear-button-armed"
+          ],
+          "states": [
+            "settings-danger"
+          ],
+          "focus": "独立分组、说明文案、二段确认、不可与常规操作相邻、默认焦点安全。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M7-C6",
+          "name": "关于/更新检查与更新弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "app-version",
+            "update-open",
+            "update-progress",
+            "update-apply-error"
+          ],
+          "states": [
+            "settings-about",
+            "update"
+          ],
+          "focus": "版本/状态行、检查中反馈、徽标、更新弹窗四态（初始/下载/启动/失败）、进度与取消。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M8",
+      "name": "目标与上框交互",
+      "intent": "上框是核心链路；视觉反馈必须让用户明确“去哪、能不能、下一步”，但不改变注入语义。",
+      "components": [
+        {
+          "id": "M8-C1",
+          "name": "目标选择弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M1-C4",
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "target-mode",
+            "target-choices",
+            "choices-layout"
+          ],
+          "states": [
+            "target-choose"
+          ],
+          "focus": "行高/健康色/可用性、选中态、重命名入口、空列表、扫描/刷新、长标题截断。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M8-C2",
+          "name": "目标重命名弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "target-rename-open",
+            "target-rename-default",
+            "target-rename-text"
+          ],
+          "states": [
+            "target-rename"
+          ],
+          "focus": "默认名回显、留空恢复默认、Enter/Esc、与素材重命名一致。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M8-C3",
+          "name": "目标提示与就绪态文案",
+          "priority": 4,
+          "dependsOn": [
+            "M1-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "target-mode",
+            "target-label",
+            "notice-text"
+          ],
+          "states": [
+            "target-ready",
+            "target-needs-confirmation",
+            "target-choose",
+            "target-empty"
+          ],
+          "focus": "每档下一步可执行；不出现内部状态名；Unknown/NotReady 的措辞一致；与 chip 颜色一致。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M8-C4",
+          "name": "双击上框与免激活点击反馈",
+          "priority": 4,
+          "dependsOn": [
+            "M3-C3"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/platform/src/win32/activation_guard.rs"
+          ],
+          "anchors": [
+            "tile-hover-changed",
+            "double-clicked",
+            "active-asset-id"
+          ],
+          "states": [
+            "shell-grid",
+            "tile-kinds",
+            "notice-success"
+          ],
+          "focus": "双击进入输入框的视觉反馈止步于上框；免激活点击不误伤右键/拖拽；不改变注入语义。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M9",
+      "name": "共享中心",
+      "intent": "共享是低信任场景：作用域、确认、角标与错误必须明确，不能让人误以为自动同步。",
+      "components": [
+        {
+          "id": "M9-C1",
+          "name": "共享控制面",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/ui-viewmodels/src/share_vm.rs"
+          ],
+          "anchors": [
+            "share-ctl-open",
+            "share-ctl-devices",
+            "share-ctl-domains",
+            "share-ctl-invite-code"
+          ],
+          "states": [
+            "share-ctl"
+          ],
+          "focus": "设备/域/成员三册层级、空态、邀请码可复制/可读、移除危险项、未读角标、长列表滚动。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M9-C2",
+          "name": "共享设备选择弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "share-devices-open",
+            "share-devices",
+            "share-scan-busy"
+          ],
+          "states": [
+            "share-devices"
+          ],
+          "focus": "扫描态/空态、单选高亮、可达地址、确认按钮禁用、关闭出口。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M9-C3",
+          "name": "共享到域弹窗",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "share-domains-open",
+            "share-asset-domains",
+            "share-domains-hint"
+          ],
+          "states": [
+            "share-domains"
+          ],
+          "focus": "逐域勾选语义、个人域/群组域区分、即时生效反馈、空域引导、长名。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M9-C4",
+          "name": "发现面、索取与首连确认",
+          "priority": 4,
+          "dependsOn": [
+            "M4-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "share-face-peers",
+            "share-face-offers",
+            "share-offer-open",
+            "share-request-open"
+          ],
+          "states": [
+            "share-offer",
+            "share-request",
+            "share-ctl"
+          ],
+          "focus": "对端/可得清单、索取审批、首连确认正文、安全提示、双确认出口、不可误关。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M9-C5",
+          "name": "共享角标与在途摘要",
+          "priority": 4,
+          "dependsOn": [
+            "M3-C3"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint"
+          ],
+          "anchors": [
+            "share-badge",
+            "shared",
+            "share-summary-text"
+          ],
+          "states": [
+            "shell-grid",
+            "share-summary",
+            "tile-kinds",
+            "share-ctl"
+          ],
+          "focus": "三态角标可辨、与选中描边不打架、在途摘要不遮挡、多批并发文案、完成态收尾。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "M10",
+      "name": "跨切面与适配",
+      "intent": "主题、术语、DPI、键盘与性能是商业化底线；必须全量核对而不是抽样。",
+      "components": [
+        {
+          "id": "M10-C1",
+          "name": "浅色主题全量核对",
+          "priority": 2,
+          "dependsOn": [
+            "M0-C1",
+            "M0-C6"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/ui-viewmodels/src/theme.rs"
+          ],
+          "anchors": [
+            "ThemeProvider",
+            "Palette.color-scheme",
+            "theme-light"
+          ],
+          "states": [
+            "theme-light",
+            "shell-grid"
+          ],
+          "focus": "所有 token 在浅色下可读；std-widgets Palette 同步；图像/角标不消失；对比度达标。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M10-C2",
+          "name": "术语与文案一致性",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "CONTEXT.md"
+          ],
+          "anchors": [
+            "Text {",
+            "Tooltip"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default",
+            "classify",
+            "import-result"
+          ],
+          "focus": "CONTEXT.md 术语统一；同一概念不多词；错误文案可行动；中文标点与空格；无内部术语。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M10-C3",
+          "name": "窗口缩放、DPI 与多显示器",
+          "priority": 3,
+          "dependsOn": [
+            "M1-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "preferred-width",
+            "preferred-height",
+            "window-scale-factor"
+          ],
+          "states": [
+            "shell-narrow",
+            "shell-grid"
+          ],
+          "focus": "960×600 / 1000×700 / 1440×900；150% DPI；跨屏拖动；弹窗与菜单坐标夹取。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M10-C4",
+          "name": "键盘全链路与焦点归还",
+          "priority": 3,
+          "dependsOn": [
+            "M0-C5"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "capture_key_pressed",
+            "key_pressed",
+            "key-focus-requested",
+            "modal-open"
+          ],
+          "states": [
+            "shell-grid",
+            "classify",
+            "settings-default",
+            "scope-menu",
+            "rename"
+          ],
+          "focus": "Tab/Enter/Space/Esc/Ctrl+A/Ctrl+V；焦点不丢失；弹窗关闭后回到触发点；无键盘陷阱。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "M10-C5",
+          "name": "性能与内存的 UI 侧检查",
+          "priority": 3,
+          "dependsOn": [
+            "M3-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs",
+            "crates/ui-viewmodels/src/grid_vm.rs"
+          ],
+          "anchors": [
+            "for tile",
+            "thumb",
+            "sync_library",
+            "layout"
+          ],
+          "states": [
+            "shell-grid"
+          ],
+          "focus": "10 万条下的绑定/模型重建/滚动分配；视觉改动不新增常驻缓存；RSS 预算不回归。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-001",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "成功/共享/健康语义色仍是硬编码十六进制",
+      "detail": "appwindow.slint 仍有 #5ac18e（已送达/域共享中）、#be4bdb（共享中）、#ffffffcc（选中描边）、#777b80（目标健康灰）；设计契约要求语义色全部走 Theme token，且成功/共享需要 soft 变体。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:192,1557,1559,1573,2898",
+      "status": "fixed",
+      "createdRun": 0,
+      "closedRun": 2,
+      "fix": "6 处 raw hex 全部收口：已送达=Theme.ok、共享中=Theme.shared、状态点描边=Theme.badge-ring、目标健康灰改 int 枚举取 Theme.text-3；main.rs 的 health_color 第二套色板删除",
+      "guard": "ui_hygiene hex_outside_theme 基线下调到 0（只降不升）"
+    },
+    {
+      "id": "F-002",
+      "componentId": "M3-C3",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "选中瓦片用白色描边，与全局 accent 选中语义不一致",
+      "detail": "selected 时 border-color 为 #ffffffcc，而勾选角标使用 accent；同一状态两套颜色，且白色描边在深色图片上不稳定。应统一为 accent，并把白色高亮收口为 token（若无必要则删除）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1557；截图 shell-grid",
+      "status": "open",
+      "createdRun": 0,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-003",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "字号字面量 110 处，未形成字体阶梯",
+      "detail": "font-size 在 appwindow.slint 与 theme.slint 中共 110 处数值字面量，10/11/12/13/14 混用；契约要求 display/title/body/label/caption 五档 token。",
+      "evidence": "crates/app-ui/ui/appwindow.slint；crates/app-ui/ui/theme.slint；hygiene-baseline.json",
+      "status": "fixed",
+      "createdRun": 0,
+      "closedRun": 3,
+      "fix": "theme.slint 新增 Typography 五档字号/三档字重令牌，appwindow/theme 全部 110 处 font-size 字面量改为令牌消费；13px/9px 一并归并",
+      "guard": "ui_hygiene font_size_literals 与 off_scale 基线下调到 0（只降不升）"
+    },
+    {
+      "id": "F-004",
+      "componentId": "M7-C6",
+      "severity": "P1",
+      "rootCause": "layout",
+      "title": "设置面板「关于」区正文被裁切且无法滚动到",
+      "detail": "面板高度取 settings-scroll-col.preferred-height，但「关于」区的版本行/检查更新/状态文案没有计入该首选高（内层 HorizontalLayout 首选取高度塌陷）；ScrollView 的 viewport-height 又按同一错误值设置，导致关于正文整体不可见、也没有滚动余量。1200px 高窗口仍只显示「关于」标题。",
+      "evidence": "target/ux-audit/shots/_states/before/settings-default-tall.png；crates/app-ui/ui/appwindow.slint:1984、2019、2135-2172",
+      "status": "open",
+      "createdRun": 0,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-005",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "语义色板缺 ok/shared/soft/badge-ring，badge/card-icon 未进运行时令牌",
+      "detail": "Theme 只有 ok-soft，缺 ok（成功）、shared/shared-soft（共享中）与 badge-ring；ThemeTokens 也没有 badge-bg/badge-text/card-icon/tile 相关字段，apply_theme 从不写它们，浅色主题无法等价切换。契约 §1.1 要求成功/共享成对 token。",
+      "evidence": "crates/app-ui/ui/theme.slint:40,50-52,192；crates/ui-viewmodels/src/theme.rs:52-60；crates/app-ui/src/main.rs:2018-2020；截图 theme-light.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "Theme 新增 ok/shared/shared-soft/badge-ring/tile-veil；ThemeTokens 与 apply_theme 补齐 badge-bg/badge-text/card-icon/tile-veil 等字段；暗/浅两套与 theme-light 夹具同步",
+      "guard": "ThemeTokens 字段→apply_theme setter 编译期强绑定；theme-light 夹具显式覆盖全部语义 token"
+    },
+    {
+      "id": "F-006",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "text-3 在抬起面上对比度不达标（暗 3.88:1 / 浅 3.19:1）",
+      "detail": "契约 §5 要求 <18px 正文 ≥4.5:1 且 text-3 在 bg-raised 上必须实测达标；当前暗色 #8a8a8a 对 #2f2f2f 仅 3.88:1，浅色 #8a9199 对 #ffffff 仅 3.19:1，10px 说明文字（设置行、菜单副行）不可读。",
+      "evidence": "crates/app-ui/ui/theme.slint:27；crates/ui-viewmodels/src/theme.rs:87,128；截图 settings-default.png / theme-light.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "text-3 调整为暗 #a6a6a6 / 浅 #62696f，对 bg-raised、hover、overlay 均 ≥4.5:1",
+      "guard": "ui-viewmodels theme 单测 text_3_and_semantic_text_meet_contrast_floor（WCAG 相对亮度）"
+    },
+    {
+      "id": "F-007",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "目标健康色在 Rust 复制第二套语义色板，不随主题",
+      "detail": "main.rs health_color 硬编码 #5ac18e/#e0b84f/#e06c75/#777b80，分别喂给 target-health-color 与 TargetChoiceData.health-color；同一语义色散落 Rust 与 slint 两层，浅色主题 + 运行时令牌无法覆盖，且 appwindow.slint 默认值仍是 raw hex。",
+      "evidence": "crates/app-ui/src/main.rs:139-147,182；crates/app-ui/ui/appwindow.slint:93,192,1764；crates/app-ui/ui/appwindow.slint:891",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "目标健康色改为 UiEnums.target-health 整数枚举，chip 与选择行在 .slint 侧映射 Theme.ok/warn/danger/text-3，删除 main.rs health_color",
+      "guard": "ui_enums 映射单测 + ui_hygiene hex=0；fixtures 同步 target-health"
+    },
+    {
+      "id": "F-008",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "文本/文件瓦片正文压在固定占位色上，浅色主题深字压深底",
+      "detail": "文本卡预览与缺图图标直接用 Theme.text-2/Theme.card-icon 叠在 tile.color 上；tile.color 来自固定调色板（深色 #24282d 或饱和色），浅色主题正文变 #444b52 后与深底对比≈1.9:1，几乎不可读；暗色主题在饱和占位色（如 #f76707）上浅字也只有 1.84:1。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1428-1467；crates/app-ui/src/thumbs.rs:60-62；截图 theme-light.png 的文本卡",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "文本/文件卡新增 Theme.tile-veil 随主题翻转的占位色罩，card-icon 收口为令牌并按明暗取值；正文在两套主题下均可读",
+      "guard": "shell-grid / theme-light 截图逐张复核（before 不可读 → after 可读）"
+    },
+    {
+      "id": "F-009",
+      "componentId": "M0-C1",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "选中勾选图标用纯白压在 accent 上（暗色仅 1.80:1）",
+      "detail": "tile selected 的勾选圆底是 Theme.accent，图标 tint 却写死 white；暗色主题 accent 是浅青 #60cdff，白勾对比 1.80:1，图形状态线索不可辨。应吃 accent-ink（暗色 10.46:1）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1530-1545；截图 shell-grid.png 的 dog.jpg 勾选角标",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "勾选图标 tint 改为 Theme.accent-ink（暗色 10.46:1），不再用纯白压 accent",
+      "guard": "视觉复核 shell-grid 勾选角标；颜色全部走 Theme 令牌"
+    },
+    {
+      "id": "F-010",
+      "componentId": "M0-C1",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "成功/共享语义错配：成功图标用 accent，共享域文字用绿色",
+      "detail": "成功通知底是 ok-soft，图标却用 Theme.accent；共享域行「共享中」用 #5ac18e（成功绿），与瓦片共享紫点同语义不同色。契约要求成功=ok、共享=shared，且状态需配对 soft 变体。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1070-1072,2897-2898；截图 shell-grid.png / before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 2,
+      "closedRun": 2,
+      "fix": "成功通知图标改用 Theme.ok；共享域「共享中」改用 Theme.shared，与瓦片共享紫点同语义",
+      "guard": "ui_hygiene hex=0；notice-success / share-domains 截图复核"
+    },
+    {
+      "id": "F-011",
+      "componentId": "M0-C2",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "上框点位表单使用 9px 字号，低于 caption 下限",
+      "detail": "x/y 表达式字段标签与客户区原点说明均为 9px，低于契约 §1.2 的 caption 10px 下限；340px 弹窗里说明文字挤成三行且难读。字号表里根本没有 9px 档，属于阶梯外漂移。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:2239,2252,2265；截图 target/ux-audit/shots/_states/before/tuning.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "x/y 表达式标签改 label 11，原点说明改 caption 10，输入框正文改 body 12",
+      "guard": "字号阶仅 10/11/12/14/16，9px 无令牌可用；hygiene=0"
+    },
+    {
+      "id": "F-012",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "13 处弹窗标题停留在 13px 过渡档",
+      "detail": "重命名/移动/共享/属性/更新等 12 个弹窗标题与空态标题都用 13px，契约要求归并到 title 14px；设置面板标题反而只有 10px，导致「主读数 14 / 弹窗标题 13 / 面板标题 10」的层级倒置。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1672,1844,2221,2456,2670,2767,2823,2879,2971,3308,3368,3427,3514；截图 _states/before/rename.png、update.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "12 个弹窗标题与空态标题统一走 TitleLabel（14/600）；设置面板标题由 SectionLabel 升级为 TitleLabel",
+      "guard": "TitleLabel 原语唯一标题入口；13px 字面量已清零"
+    },
+    {
+      "id": "F-013",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "SectionLabel 用 caption 10px 承载面板与分组结构标题",
+      "detail": "SectionLabel 固定 10px/600，被用于设置面板标题「设置」、分组标题「上框行为/外观/高级」和侧栏「分类/素材库」；契约规定 caption 只服务次要元数据，结构标题应使用 label/title 档，当前面板标题与分组标题同级、且比行标题小 2px。",
+      "evidence": "crates/app-ui/ui/theme.slint:216-221；crates/app-ui/ui/appwindow.slint:2024,2050；截图 settings-default.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "SectionLabel 改 label 11/600，只承载结构小标题；面板标题改用 TitleLabel 14/600",
+      "guard": "共享原语一处修改全屏生效；caption 不再承载结构标题"
+    },
+    {
+      "id": "F-014",
+      "componentId": "M0-C2",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "错误与关键状态文案被压到 caption 10px",
+      "detail": "重命名/分类重命名/移动/上框点位的错误行、更新版本与进度、归类提示、导入结果分类标签、迁移说明、设置项说明均为 10px；错误与决策信息使用 caption 档，既违反「caption 不得承载唯一关键信息」，也让失败原因在 316px 面板里难以扫读。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:2147,2189,2272,2507,3320,3380,3527,3567,3714,3799；截图 update.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "错误/更新状态/归类提示/导入结果分类/迁移说明/设置说明统一提升到 label 11；输入框正文 body 12",
+      "guard": "caption 仅保留计数、文件类型、地址、大小等元数据"
+    },
+    {
+      "id": "F-015",
+      "componentId": "M0-C2",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "主读数沿用 14px，未使用 display 档",
+      "detail": "顶栏总数「12,480 素材」是主读数，契约 §1.2 指定 display 16px/600；当前 14px 与弹窗标题同档，主信息在 48px 顶栏里不够立。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:650-655；截图 shell-grid.png",
+      "status": "fixed",
+      "createdRun": 3,
+      "closedRun": 3,
+      "fix": "顶栏主读数改用 Typography.display（16/600）",
+      "guard": "display 档只用于主读数；字号令牌唯一来源"
+    },
+    {
+      "id": "F-016",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "间距与控件尺寸没有共享令牌，14/9/7/5/3px 阶梯外值散落",
+      "detail": "栏/面板/弹窗内边距分别写死 14/12/6px，同一 14px 出现 23 次；5px（图标文字间距）、7px（chip 间距）、9px（搜索结果图标/菜单图标间距）、3px（设置行、目标行）、1px（双行行距）都不在 4px 网格；30px 控件高度重复 39 次，通知条 34px 与进度条 32px 不成体系。theme.slint 只有颜色/字号/圆角令牌，没有 Spacing/Metrics，后续每个界面只能继续抄数字。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:643,828,882,1064,1099,1131,1772,1775,1839,2537,3020,3649；crates/app-ui/ui/theme.slint:261,358,410；截图 target/ux-audit/shots/M0-C3/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "theme.slint 新增 Spacing（4px 网格 + 栏/面板/弹窗/菜单四档）与 Metrics（控件/图标按钮/菜单行/栏/开关/热区）令牌；appwindow/theme 的结构性 padding/spacing/高度改为消费令牌，14/9/7/5/3/1px 阶梯外值清零，通知条 34→32 与进度条同档",
+      "guard": "ui_hygiene 新增 spacing_off_scale 计数，基线=0；允许阶固定 0/2/4/6/8/10/12/16/20/24 且禁止静默放宽"
+    },
+    {
+      "id": "F-017",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "圆角仍有 12 处字面量与 5 处阶梯外值，圆形/胶囊靠魔法数",
+      "detail": "border-radius 在 appwindow 与 theme 共 12 处字面量，其中 3.5/5/10/11/14 五处不在圆角阶；7px 类型徽标、999px 结果胶囊、14px 摘要条、11px 开关、20px 勾选圆各写一套。契约要求控件 4、面板 8、胶囊=高度/2，圆角应有唯一来源。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:896,1497,1552,1572,1587,2622,3751；crates/app-ui/ui/theme.slint:306,322；automation/ux-audit/hygiene-baseline.json",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "圆角字面量全部移除：勾选圆/状态点/锁区/摘要条/开关/结果徽标改 width|height/2，类型徽标 7→Theme.radius(4)，面板/弹窗统一 radius-lg；12 处字面量与 5 处阶梯外值归零",
+      "guard": "ui_hygiene border_radius_literals=0、off_scale=0；allowed_radii 仍锁 4/7/8/999 且禁止静默放宽"
+    },
+    {
+      "id": "F-018",
+      "componentId": "M0-C3",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "三处可点击热区低于 28px 下限",
+      "detail": "通知条关闭按钮 22×22、共享中心行内按钮高 24px（个人域/移除/邀请码/删除/索取）、归类候选项行高 26px；契约要求热区 ≥28×28。共享中心按钮夹在 30px 行里显得局促，归类候选项点击时容易点空。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1099,3020-3025,3081-3086,3232,3649；截图 target/ux-audit/shots/_states/before/share-ctl.png、_states/before/classify.png",
+      "status": "fixed",
+      "createdRun": 4,
+      "closedRun": 4,
+      "fix": "通知条关闭 22→Metrics.hit-min(28)，共享中心行内按钮 24→Metrics.row-compact(28)，归类候选行 26→28（滚动上限同步 178=6×28+5×2）；三处热区均达 ≥28×28",
+      "guard": "热区高度统一消费 Metrics.hit-min/row-compact，禁止再写字面量；notice-success/share-ctl/classify 截图逐张复核"
+    },
+    {
+      "id": "F-019",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "开关关闭态轨道与浮层同色，关闭与禁用不可分",
+      "detail": "Toggle 关闭态底用 Theme.bg-raised(#2F2F2F) 压在 bg-overlay(#2C2C2C) 上，实测几乎同色（对比≈1.04:1），1px 描边 Theme.line(#383838) 也只有≈1.19:1；设置面板里 6 个关闭开关只剩一颗灰点，被读成状态点而不是开关。禁用态与关闭态仅旋钮 #A6A6A6/#C9C9C9 一档之差（像素采样 settings-default.png:940-953,y=343/172），行是否可操作看不出来。契约 §2.1 状态可辨、§5 UI 边界 ≥3:1。",
+      "evidence": "crates/app-ui/ui/theme.slint:341-358；target/ux-audit/shots/M0-C4/before/settings-default.png；target/ux-audit/tmp/toggle-zoom.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "Toggle 关闭态改为 bg-input 轨道 + 新增 Theme.control-track-border 描边（暗/浅 #8A8A8A，对 bg-overlay ≥3:1）；禁用态保留 line 描边与更暗旋钮，关闭/禁用一眼可分",
+      "guard": "ui-viewmodels 新增 control_outline_and_danger_fills_meet_contrast_floor 对比度单测；ThemeTokens→apply_theme 编译期强绑定；settings-default after 截图复核"
+    },
+    {
+      "id": "F-020",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "右键菜单「删除」与普通项同色同组，危险动作无隔离",
+      "detail": "MenuItem 只有普通行一种形态；素材右键菜单的「删除」文字/图标与「复制/属性」完全相同，分类菜单的「删除」同样无区分，且与常规动作紧邻。契约 §2.3 要求危险项独立分组/分隔线，§2.4 要求破坏性动作不得与常规动作紧邻无隔离。",
+      "evidence": "crates/app-ui/ui/theme.slint:374-428；crates/app-ui/ui/appwindow.slint:2346、2419；target/ux-audit/shots/M0-C4/before/context-menu.png；target/ux-audit/tmp/menu-zoom.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "MenuItem 新增 danger 变体（危险文字/图标、danger-soft 悬停、danger-press 按压+danger-ink）；素材/分类右键菜单「删除」标 danger 并在其上方加分隔线",
+      "guard": "危险语义只在 MenuItem 单点定义；两个菜单 after 截图复核；对比度单测覆盖 danger 对 danger-soft/press"
+    },
+    {
+      "id": "F-021",
+      "componentId": "M0-C4",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "DangerButton 按压态红字压红底，浅色主题对比仅 0.82:1",
+      "detail": "pressed 背景 danger-press 与文字/图标 danger 同色系：浅色主题 #C0343F 压 #A92D37 对比≈0.82:1，按下去文字几乎消失；暗色悬停/armed 的 danger 压 danger-soft 也只有≈4.30:1，低于正文 4.5:1 下限。契约 §2.1 pressed 必须可辨、§5 对比度。",
+      "evidence": "crates/app-ui/ui/theme.slint:228-259；crates/ui-viewmodels/src/theme.rs:104-106、154-156",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "DangerButton pressed 改用 danger-ink 反白文字/图标；暗色 danger-soft/press 调深为 #352124/#2A1C1F，hover/armed 的 danger 文字达 4.5:1 且 pressed 比 hover 更深",
+      "guard": "对比度单测覆盖 danger/bg-bar、danger/danger-soft、danger-ink/danger-press 明暗双套"
+    },
+    {
+      "id": "F-022",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "菜单副行用 caption 10px 承载安全承诺",
+      "detail": "「素材进剪贴板，绝不代发」「进回收站，可恢复」是决定用户敢不敢点的关键信息，却用 10px caption；契约 §1.2 规定 caption 不得承载唯一关键信息，M0-C2 已把同类说明提升到 label 11。",
+      "evidence": "crates/app-ui/ui/theme.slint:413-418；target/ux-audit/shots/M0-C4/before/context-menu.png",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "MenuItem 副行字号由 caption 10 提升为 label 11",
+      "guard": "字号只消费 Typography 令牌；菜单行高 46px 仍容纳双行并留出内边距"
+    },
+    {
+      "id": "F-023",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "图标按钮选中后再按压，底色回落到中性灰",
+      "detail": "IconButton active 时是 accent 描边 + accent-soft 底；pressed 分支优先于 active，按下瞬间底色变 bg-raised-press 灰、描边仍是 accent，选中态被打断。应按 pressed>selected 组合为 accent-press 底 + accent-ink 图标。",
+      "evidence": "crates/app-ui/ui/theme.slint:187-203",
+      "status": "fixed",
+      "createdRun": 5,
+      "closedRun": 5,
+      "fix": "IconButton active+pressed 组合为 accent-press 底 + accent-ink 图标，不再回落到中性灰",
+      "guard": "状态优先级 pressed>selected 写入原语；按压态无头夹具无法触发，按状态矩阵核对（未截图验证）"
+    },
+    {
+      "id": "F-024",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "platform",
+      "title": "自定义原语没有键盘焦点态（全局焦点模型留待 M0-C5）",
+      "detail": "IconButton/FlatButton/Toggle/MenuItem/DangerButton 都只有 TouchArea，不可 Tab 聚焦、无 focus 视觉；std-widgets Button 却可聚焦，导致同一操作条里键盘行为不一致。契约 §2.1/§2.2 要求焦点可见与全键盘可达。全局焦点/键盘模型是 M0-C5 的范围（依赖本组件），本次留档不修。",
+      "evidence": "crates/app-ui/ui/theme.slint:206-212、313-319、363-369；crates/app-ui/ui/appwindow.slint:588",
+      "status": "open",
+      "createdRun": 5,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-025",
+      "componentId": "M0-C4",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "设置行禁用态只变淡标题，说明文字不变",
+      "detail": "SettingRow enabled=false 时标题降到 text-3，但说明文字本来就是 text-3、开关也只是一颗更暗的旋钮，整行看起来仍可操作；禁用项（点击素材不上浮窗口/上框后自动发送）缺少统一降级。设置行语义属 M7-C2，本次先修 Toggle 轨道，行级禁用层级留待 M7-C2。",
+      "evidence": "crates/app-ui/ui/theme.slint:432-468；target/ux-audit/shots/M0-C4/before/settings-default.png",
+      "status": "open",
+      "createdRun": 5,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-026",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "共享原语无键盘焦点：Tab 不可达、Enter/Space 不激活、无焦点视觉",
+      "detail": "IconButton/FlatButton/Toggle/DangerButton/MenuItem 只有 TouchArea，没有 FocusScope：顶栏按钮、设置面板 6 个开关、右键菜单项、底部操作条全部只能鼠标操作；键盘用户无法完成设置、菜单与批量动作。契约 §2.1 要求 focus 可见且与 hover 可区分，§2.2 要求 Tab 顺序与键盘可达，§5 要求可键盘完成主流程。DangerButton/Toggle 的 disabled 语义也未与焦点联动。",
+      "evidence": "crates/app-ui/ui/theme.slint:213-219,273-279,324-330,373-379,439-444；截图 target/ux-audit/shots/M0-C5/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "theme.slint 新增共享 FocusRing，并给 IconButton/DangerButton/FlatButton/Toggle/MenuItem 加 forward-focus 的 FocusScope：focus_gained(reason) 仅在非 pointer-click 时点亮焦点环（与 hover/选中几何可区分），Enter/Space 触发 clicked/toggled，disabled 时 FocusScope 不参与遍历。按钮环外扩 3px、开关用胶囊环、菜单行内嵌 0px。视觉证据见 target/ux-audit/shots/M0-C5/after/focus-btn.png、focus-toggle.png、focus-menu.png。",
+      "guard": "ui_hygiene 保持字面量零基线；新增交互原语必须同时提供 FocusScope+可见焦点态，由 M0-C5 焦点基线截图与 ui_hygiene 回归双重守护。"
+    },
+    {
+      "id": "F-027",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "primitive",
+      "title": "弹窗打开不聚焦输入框，单输入弹窗 Enter 不确认",
+      "detail": "重命名/分类重命名/目标重命名/归类/上框点位的 LineEdit 都没有打开即聚焦，键盘用户在弹窗里打字无效，必须先点一下输入框；rename/cat-rename/target-rename 的 LineEdit 也未接 accepted，Enter 无反应。契约 §2.2 要求弹窗打开后焦点进入弹窗、单输入弹窗 Enter=确认。重命名还应初始全选原名（M5-C1 判据）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1853,2236,3297,3354,3638；截图 target/ux-audit/shots/M0-C5/before/rename.png、classify.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "theme.slint 新增共享 DialogInput（继承 LineEdit）：init 中 focus()，select-on-open 时 select-all()。重命名/分类重命名/目标重命名改用 DialogInput 并接 accepted 确认，重命名类全选原名；归类输入聚焦但不把 Enter 接到导入（保留三按钮显式决策）；上框点位 x 聚焦、y 用 auto-focus:false。视觉证据见 after/focus-dialog.png 与 after/rename.png（原名已全选）、after/classify.png（输入框聚焦）。",
+      "guard": "capture after 的 rename/classify 固定复核「弹窗输入框默认聚焦」；新弹窗输入必须使用 DialogInput，单输入弹窗必须接 accepted。"
+    },
+    {
+      "id": "F-028",
+      "componentId": "M0-C5",
+      "severity": "P1",
+      "rootCause": "platform",
+      "title": "浮层关闭后焦点不归还，全局 Esc/Ctrl+A/Ctrl+V 通道失效",
+      "detail": "key-root 只在启动时由壳层 focus 一次；弹窗打开后焦点进入输入框，弹窗关闭时输入框随条件元素销毁，Slint 清空焦点，之后按键不再送达 key-root——Esc 关不了菜单、Ctrl+A/Ctrl+V 不响应，直到用户再点一次界面。契约 §2.2 要求关闭后焦点归还。修复应在壳层单一位置监听 modal-open 归零，而不是每个关闭分支各补一次 focus。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:588-611；crates/app-ui/src/main.rs:5927；截图 target/ux-audit/shots/M0-C5/before/shell-grid.png",
+      "status": "fixed",
+      "createdRun": 6,
+      "closedRun": 6,
+      "fix": "在壳层单一位置监听 changed modal-open：所有浮层收拢（modal-open 变 false）时调用 key-root.focus()，把焦点归还全局键盘通道；不再逐个关闭分支补 focus。key-root 的 Esc capture 与 Ctrl+A/Ctrl+V bubble 逻辑保持不变。",
+      "guard": "浮层开关统一汇总到 modal-open，关闭路径不得各自散落 focus()；新增浮层必须并入 modal-open 表达式。"
+    },
+    {
+      "id": "F-029",
+      "componentId": "M0-C5",
+      "severity": "P2",
+      "rootCause": "platform",
+      "title": "模态弹窗没有焦点陷阱，Tab 可落到背景控件",
+      "detail": "遮罩只挡鼠标；弹窗打开后 Tab 仍可遍历背景的检索框与（新增焦点后的）顶栏/侧栏控件，焦点会离开弹窗。正确修法是在弹层层级统一维护「可用焦点域」（全局 modal 层 + in-modal 标记），而不是给每个控件加特判。归属 M4-C5（弹窗通用规范）/M10-C4（键盘全链路），本次只建基线并留档。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:564-579,588-611",
+      "status": "open",
+      "createdRun": 6,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-030",
+      "componentId": "M0-C5",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "菜单项只能 Tab 到达，无方向键导航与打开即聚焦",
+      "detail": "MenuItem 获得焦点后 Up/Down 不移动、菜单打开时焦点不进入首项；键盘用户要 Tab 穿过整个文档才能到菜单项。正确修法是菜单容器级焦点索引（同 Slint 内建 Menu 的 current-highlight），涉及范围/导入/素材右键/分类右键四个菜单，归属 M4-C4。本次先让菜单项可聚焦并可用 Enter/Space 触发。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1940-1987,1879-1936；截图 target/ux-audit/shots/M0-C5/before/scope-menu.png",
+      "status": "open",
+      "createdRun": 6,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-031",
+      "componentId": "M0-C6",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "暗色危险色作为错误文字在浮层上仅 4.19:1",
+      "detail": "Theme.danger #e0666f 对 bg-overlay #2c2c2c 仅 4.19:1、对 bg-raised 4.02:1，低于契约 §5 的 4.5:1；重命名/归类/共享/更新/导入结果的错误行全部压在浮层上，暗色下红字发暗难读。",
+      "evidence": "crates/app-ui/ui/theme.slint:37；crates/ui-viewmodels/src/theme.rs:109；target/ux-audit/shots/_states/before/rename-error.png",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "暗色 Theme.danger 提亮为 #e4747d（DarkThemeProvider 同步），错误文字在 bg-overlay 4.72:1、bg-raised 4.52:1、danger-soft 5.09:1。",
+      "guard": "theme::tests::semantic_text_on_soft_and_overlay_meet_contrast_floor 锁定暗/浅 semantic text 对各静态表面与 soft 合成后的对比度下限。"
+    },
+    {
+      "id": "F-032",
+      "componentId": "M0-C6",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "暗色瓦片名称条在亮缩略图上对比不足（4.00:1）",
+      "detail": "label-bar-bg 为 50% 黑（#00000080），白色文件名在纯白/高光缩略图上合成底色约 #808081，对比仅 4.00:1；名称条承载文件名这一主标识，白底商品图/截图上不可读。",
+      "evidence": "crates/app-ui/ui/theme.slint:56；crates/ui-viewmodels/src/theme.rs:121；target/ux-audit/shots/M0-C6/before/shell-grid.png",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "暗色 label-bar-bg 由 50% 黑改为 60% 黑（#00000099，Provider 同步），纯白缩略图恶况下白字提升至 5.74:1。",
+      "guard": "theme::tests::tile_overlay_text_readable_on_bright_and_dark_thumbnails 对 label-bar/hover/badge 与白/黑缩略图做 alpha 合成对比度断言。"
+    },
+    {
+      "id": "F-033",
+      "componentId": "M0-C6",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "浅色 accent/warn 作为语义文字压 soft/浮层不足",
+      "detail": "浅色 accent #0b7ec2 对 accent-soft 3.80:1、对 bg-overlay 4.21:1（归类选中候选、预告行、导入结果「相似」）；warn #9a6b10 对 warn-soft 4.09:1、对 overlay 4.49:1（「完全相同」/「新建分类」）。契约 §1.1 要求语义色与 soft 成对可读、§5 要求 4.5:1；浅色弹窗态无夹具，按令牌实测记录。",
+      "evidence": "crates/ui-viewmodels/src/theme.rs:156,165；automation/ux-audit/states/fixtures.json（theme-light globals）；target/ux-audit/shots/_states/before/classify.png;target/ux-audit/shots/_states/before/import-result.png",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "浅色 accent 改 #0F6CBD（overlay 5.16、accent-soft 4.65）、warn 改 #805A0B（warn-soft 5.42、overlay 5.95）；theme-light 截图夹具同步。",
+      "guard": "同上的 semantic contrast 测试覆盖 accent/warn 在 overlay 与 soft 面；fixtures.json 与 Provider 同值由 capture --check 校验引用完整性。"
+    },
+    {
+      "id": "F-034",
+      "componentId": "M0-C6",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "瓦片文件名用 caption 10px 承载主标识",
+      "detail": "名称条是素材的主标识（用户靠文件名辨认），却消费 Typography.caption（10px）；契约 §1.2 规定 caption 仅限次要元数据、不得承载唯一关键信息，列表主行应为 body 12px。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1534；target/ux-audit/shots/M0-C6/before/shell-grid.png",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "瓦片文件名从 Typography.caption(10px) 提升为 Typography.body(12px)，底栏高度与名称条同步复核无裁切。",
+      "guard": "M0-C6 after shell-grid 视觉复核；字号只允许消费 Typography 档位，ui_hygiene 拦截新字面量。"
+    },
+    {
+      "id": "F-035",
+      "componentId": "M0-C6",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "目标候选状态与上框点位说明压在 caption 10px",
+      "detail": "目标选择行的「在线/需确认/已关闭」是选择依据、上框点位的原点/变量说明是操作指令，均为 10px caption；与 M0-C2 已提升的说明类文案不一致，小字在 340px 弹窗内难读。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1809,2271；target/ux-audit/shots/_states/before/target-choose.png;target/ux-audit/shots/_states/before/tuning.png",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "目标候选行的在线/需确认/已关闭状态与上框点位说明从 caption 10px 提升为 Typography.label(11px)。",
+      "guard": "M0-C6 after target-choose/tuning 视觉复核；状态文字必须用 label 及以上档位，ui_hygiene 字号 ratchet 守护。"
+    },
+    {
+      "id": "F-036",
+      "componentId": "M0-C6",
+      "severity": "P3",
+      "rootCause": "primitive",
+      "title": "MenuItem 副行在浅色按压面上对比降到 4.40:1",
+      "detail": "副行文字固定 text-3；浅色 bg-raised-press #e4e4e9 上仅 4.40:1。按压是瞬态，但菜单项正文不应在按下时反而更难读。按压态无头夹具无法触发，按状态矩阵核对。",
+      "evidence": "crates/app-ui/ui/theme.slint:527-569；theme.rs 令牌对比度实测",
+      "status": "fixed",
+      "createdRun": 7,
+      "closedRun": 7,
+      "fix": "MenuItem 副行在按压态改用 Theme.text-2（选中态仍 danger-ink/text-2），浅色 bg-raised-press 上不再降到 4.40:1。",
+      "guard": "MenuItem 副行颜色分支以 touch.pressed 优先于选中态；M0-C6 settings 复核按压态可读。"
+    },
+    {
+      "id": "F-037",
+      "componentId": "M0-C6",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "共享/传输状态点只靠颜色区分，缺少非颜色线索",
+      "detail": "瓦片右上传递状态点（accent/ok/danger）与共享可用性紫点尺寸形状完全相同，只有颜色差异；契约 §1.1 明确要求共享中/错误/选中至少同时有形状、图标或文字之一。建议在 M9-C5/M3-C3 统一角标语义（完成=对勾、失败=叉、共享=共享图标/形状）。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1576-1600；target/ux-audit/shots/M0-C6/before/shell-grid.png",
+      "status": "open",
+      "createdRun": 7,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-038",
+      "componentId": "M0-C6",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "目标候选不可用行整体 0.6 透明，状态原因低于可读阈值",
+      "detail": "choice.available=false 时整行 opacity 0.6，把「已关闭」等状态文字与 text-3 一起压淡（暗色合成后约 2.5:1）；用户恰恰需要读原因才知道为什么不能选。禁用应降级控件本身而非解释文字，归 M8-C1 统一处理。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:1768；target/ux-audit/shots/_states/before/target-choose.png",
+      "status": "open",
+      "createdRun": 7,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-039",
+      "componentId": "M0-C6",
+      "severity": "P2",
+      "rootCause": "primitive",
+      "title": "目标胶囊就绪态仅用绿点表达，无文字冗余",
+      "detail": "就绪时目标提示整行隐藏，胶囊里只剩健康色点；注释也写明「绿点即就绪」。色弱用户无法从形状/文字确认是否可上框，完整话术只在 Tooltip 中。归 M1-C4/M8-C3 统一目标五态文案。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:906-909,1051-1063；target/ux-audit/shots/_states/before/target-ready.png",
+      "status": "open",
+      "createdRun": 7,
+      "closedRun": null,
+      "fix": "",
+      "guard": ""
+    },
+    {
+      "id": "F-040",
+      "componentId": "M0-C7",
+      "severity": "P1",
+      "rootCause": "token",
+      "title": "界面动画开关只钳住浮层入场，14 处原语与悬停动效仍照播",
+      "detail": "animations-enabled 仅被 8 处浮层/瓦片淡入消费；共享原语的 IconButton/DangerButton/FlatButton/Toggle/MenuItem 以及检索框、顶栏按钮、目标胶囊、通知关闭、分类行、回收站行、分隔条、目标候选行共 14 处 animate 完全不看开关。根因是 theme.slint 没有 Motion 令牌层，原语读不到 appwindow 的属性。关闭动画的用户（含前庭敏感）在每次 hover/press 仍看到过渡，设置形同虚设，违反契约 §1.4。",
+      "evidence": "crates/app-ui/ui/theme.slint:245,311,389,470,480,533；crates/app-ui/ui/appwindow.slint:700,832,886,1112,1197,1256,1376,1775；截图 target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "theme.slint 新增 Motion 全局（enabled/fast/state/enter），22 处 animate 全部改为 Motion.enabled ? 令牌 : 0ms；appwindow 的 init/changed 把 animations-enabled 同步到 Motion.enabled，共享原语与悬停动效在关闭动画时全部归零。",
+      "guard": "ui_hygiene 新增 all_animations_consume_motion_tokens：逐个 animate 块断言引用 Motion.enabled、含 : 0ms 且声明 ease-out。"
+    },
+    {
+      "id": "F-041",
+      "componentId": "M0-C7",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "动效时长散落四档，13 处未声明 easing 走 Slint 默认 linear",
+      "detail": "22 处 animate 的时长字面量为 100/120/140/150ms 四档，没有共享令牌；其中 13 处省略 easing（Slint 默认 linear），状态切换与按压反馈呈匀速，与 9 处 ease-out 的浮层/开关手感不一致。契约 §1.4 只允许 ease-out（入场/状态）与线性（滚动/进度），要求时长可达令牌化。开关 140ms 与同属状态切换的 120ms 也无统一口径。",
+      "evidence": "crates/app-ui/ui/theme.slint:245,311,389,470,533；crates/app-ui/ui/appwindow.slint:700,832,886,1112,1197,1256,1376,1775",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "动效时长收口为 Motion.fast(100)/state(120)/enter(150) 三档；13 处缺失的 easing 统一补 ease-out，开关 140ms 归入 state 档（仍在契约 120–140 内）。",
+      "guard": "同上的 animate 块守卫锁死 ease-out；时长只能引用 Motion 令牌，新增 animate 无法绕过。"
+    },
+    {
+      "id": "F-042",
+      "componentId": "M0-C7",
+      "severity": "P3",
+      "rootCause": "copy",
+      "title": "界面动画说明只承诺弹层，且截图夹具文案与产品文案不一致",
+      "detail": "产品文案是「关闭后弹层立即展开，不播过渡动画。」，只提到弹层；夹具却写「关闭后浮层与瓦片淡入即时完成」——同一设置两句不同承诺，截图证据与真实产品漂移。修复后该开关会统一关闭悬停/按压/开关/浮层/瓦片淡入全部过渡，说明应覆盖全量动效。",
+      "evidence": "crates/ui-viewmodels/src/settings.rs:341；automation/ux-audit/states/fixtures.json:659；target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "产品文案改为「关闭后所有过渡与淡入即时完成」，settings-default 夹具同步为同一句（去掉句号以适配行宽），截图证据与产品一致。",
+      "guard": "capture --check 校验夹具引用完整性；settings-default after 截图复核文案单行不换行。"
+    },
+    {
+      "id": "F-043",
+      "componentId": "M0-C7",
+      "severity": "P1",
+      "rootCause": "viewmodel",
+      "title": "界面动画开关切换后不热更新，必须重启才生效",
+      "detail": "on_setting_toggled 只把 single_click_activate/send_after_paste/gpu_rendering 回填到窗口属性，animations_enabled 只在启动时 set 一次（main.rs:2708）。用户在设置里关掉「界面动画」后，当前会话的浮层入场、瓦片淡入和全部悬停过渡仍按旧值播放，直到重启；设置行也没有「下次启动生效」的提示，属于承诺与行为不一致。",
+      "evidence": "crates/app-ui/src/main.rs:2708,5364-5430（on_setting_toggled 缺少 set_animations_enabled）；截图 target/ux-audit/shots/M0-C7/before/settings-default.png",
+      "status": "fixed",
+      "createdRun": 8,
+      "closedRun": 8,
+      "fix": "on_setting_toggled 的热字段回填补上 ui.set_animations_enabled(s.ui_animations)；切换开关后当前会话立即生效，无需重启。",
+      "guard": "animations_enabled 与 single_click/send_after_paste/gpu_rendering 同列热字段回填；Motion.enabled 经 changed 联动归零（无静态截图可验证，按代码路径核对）。"
+    },
+    {
+      "id": "F-044",
+      "componentId": "M1-C1",
+      "severity": "P1",
+      "rootCause": "platform",
+      "title": "主窗口无最小尺寸约束，可拖到契约下限以下",
+      "detail": "契约 §3 要求最小 960×600；appwindow.slint 只声明 preferred 尺寸，Slint 根布局的 min-width/min-height 不会转成窗口级约束（真机探针 MINTRACK 0x0）。窗口可拖到 800×500：搜索占位与目标提示整段省略；640×400 时分类列表裁到约 2.5 行。根因在平台装配层：winit 窗口创建后未设置 min_inner_size，WM_GETMINMAXINFO 返回 0×0。",
+      "evidence": "crates/app-ui/ui/appwindow.slint:175；真机 MINTRACK 0x0；800×500 截图 target/ux-audit/tmp/before-800x500.png；640×400 截图 target/ux-audit/tmp/before-640x400.png",
+      "status": "fixed",
+      "createdRun": 9,
+      "closedRun": 9,
+      "fix": "壳层在主窗口就绪后经 Slint 的 WinitWindowAccessor 取 winit 句柄，set_min_inner_size(960×600 逻辑像素)；winit 在 WM_GETMINMAXINFO 中按窗口 DPI 折算，Win32 最小跟踪尺寸随 DPI 正确缩放。真机 150% DPI 实测 MINTRACK 1462×956（=960×600 客户区 + 22×56 非客户区），3 秒后仍保持；视觉快照与修复前逐字节一致（约束是窗口级，不改变渲染）。",
+      "guard": "ui_hygiene 新增 window_min_size_is_wired_to_winit：锁定 960×600 常量与 set_min_inner_size 安装点，删除任一环即失败"
+    }
+  ]
+}

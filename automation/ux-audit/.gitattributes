@@ -1,0 +1,2 @@
+# 这些脚本经 Git Bash 执行；CRLF 会让 shebang/命令行带 \r 而报错。
+scripts/*.sh text eol=lf
