@@ -95,3 +95,11 @@
 - 截图：target/ux-audit/shots/M1-C1/after
 - 基线：b3d0582
 
+
+## run-20261024-182003 · M0-C5-fix · done
+
+- 组件：共享原语焦点基线（回归修复）
+- 结论：修复 0.1.8 真机「按钮双击才触发」回归。M0-C5 给 IconButton/FlatButton/DangerButton/MenuItem/Toggle 新增的键盘可达 FocusScope 无几何约束铺满宿主、且声明在 touch 之后（鼠标派发按置顶优先 FrontToBack）；slint 1.17 FocusScope 默认 focus-on-click=true，未持焦时收到按下会抢焦点并返回 EventAccepted——首击被整体吞掉，第二击焦点已就位才放行给 TouchArea。壳层 key-root 当初已显式压掉该默认（focus-on-click: false），五个共享原语漏了。五处补 focus-on-click: false，Tab/Enter/Space 键盘可达不变；ui_hygiene 新增 focus_scopes_never_swallow_first_click 结构守卫防复发。
+- Findings：F-045(fixed) 共享原语置顶 FocusScope 默认点击抢焦吞首击（0.1.7→0.1.8 行为回归，设置/共享/帮助等图标与全部 FlatButton/MenuItem/Toggle/DangerButton 实例命中）
+- 门禁：cargo check -p app-ui 通过；cargo test -p app-ui 通过（守卫测试入库时点工作树含并行会话 WIP 暂不可编译，CI 兜底）；证据链 = slint 1.17.1 internal/core/items/input_items.rs FocusScope::input_event + internal/compiler/builtins.slint 默认值 + internal/core/input.rs FrontToBack 派发序；真机消息直投单点验证（多选/侧栏一击生效）排除消息层丢击
+- 基线：1109e9f

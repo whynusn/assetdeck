@@ -344,3 +344,58 @@ fn window_min_size_is_wired_to_winit() {
         "最小窗口尺寸未写入 winit：WM_GETMINMAXINFO 会退回 0×0"
     );
 }
+
+/// M0-C5 复盘回归守卫（0.1.8 真机「按钮要双击才触发」）：FocusScope 默认
+/// focus-on-click=true，未持焦时收到鼠标按下会抢焦点并返回 EventAccepted——
+/// 这次按下被整体吞掉，TouchArea 收不到，第二击才轮到它。凡无几何约束铺满
+/// 宿主、又声明在 TouchArea 之后的 FocusScope（置顶优先派发）都会把按钮变
+/// 成「双击才触发」。因此每个声明式 FocusScope 块内必须显式
+/// `focus-on-click: false`（Tab/Enter/Space 键盘可达不受影响）。确需点击抢焦
+/// 的新增 scope，先想清楚它是否盖在任何可点元素上方，再进白名单并写明理由。
+#[test]
+fn focus_scopes_never_swallow_first_click() {
+    let mut scopes = 0usize;
+    let mut offenders = Vec::new();
+    for (name, source) in ui_sources() {
+        let code = strip_line_comments(&source);
+        let mut from = 0;
+        while let Some(rel) = code[from..].find("FocusScope") {
+            let pos = from + rel;
+            from = pos + "FocusScope".len();
+            let Some(open_rel) = code[from..].find('{') else {
+                break;
+            };
+            let open = from + open_rel;
+            let mut depth = 0usize;
+            let mut end = None;
+            for (idx, ch) in code[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(open + idx + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            let block = &code[pos..end];
+            from = end;
+            scopes += 1;
+            if !block.contains("focus-on-click: false") {
+                let line = code[..pos].matches('\n').count() + 1;
+                offenders.push(format!("{name}:{line}"));
+            }
+        }
+    }
+    assert!(scopes > 0, "没有扫到任何 FocusScope，守卫失效");
+    assert!(
+        offenders.is_empty(),
+        "FocusScope 缺 focus-on-click: false，会吞掉宿主按钮的首击（详见 \
+         ui_hygiene::focus_scopes_never_swallow_first_click 文档注释）：\n{}",
+        offenders.join("\n")
+    );
+}

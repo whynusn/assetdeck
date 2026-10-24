@@ -272,8 +272,14 @@ export component IconButton inherits Rectangle {
     }
 
     // 键盘可达（契约 §2.2）：Tab 聚焦、Enter/Space 激活；焦点环只随键盘出现。
+    // focus-on-click=false 压掉 FocusScope 默认的「点击抢焦」：本 scope 无几何约束
+    // 默认铺满按钮、且声明在 touch 之后（鼠标派发按置顶优先），不压掉时抢焦会把
+    // 首击按下整个吞掉（slint 1.17 FocusScope::input_event 未持焦时返回
+    // EventAccepted）——所有按钮变成「双击才触发」。Tab 走
+    // focus-on-tab-navigation，Enter/Space 仍由 key_pressed 处理，键盘可达无损。
     focus-scope := FocusScope {
         enabled: root.enabled;
+        focus-on-click: false;
         focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
         focus_lost(reason) => { root.focus-visible = false; }
         key_pressed(event) => {
@@ -354,8 +360,10 @@ export component DangerButton inherits Rectangle {
         }
     }
 
+    // focus-on-click=false：置顶 scope 默认点击抢焦会吞首击（IconButton 内详注）。
     focus-scope := FocusScope {
         enabled: root.enabled;
+        focus-on-click: false;
         focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
         focus_lost(reason) => { root.focus-visible = false; }
         key_pressed(event) => {
@@ -427,8 +435,10 @@ export component FlatButton inherits Rectangle {
         }
     }
 
+    // focus-on-click=false：置顶 scope 默认点击抢焦会吞首击（IconButton 内详注）。
     focus-scope := FocusScope {
         enabled: root.enabled;
+        focus-on-click: false;
         focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
         focus_lost(reason) => { root.focus-visible = false; }
         key_pressed(event) => {
@@ -499,8 +509,10 @@ export component Toggle inherits Rectangle {
     }
 
     // Space 切换开关（契约 §2.2）；Enter 也接受，和按钮语义一致。
+    // focus-on-click=false：置顶 scope 默认点击抢焦会吞首击（IconButton 内详注）。
     focus-scope := FocusScope {
         enabled: root.enabled;
+        focus-on-click: false;
         focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
         focus_lost(reason) => { root.focus-visible = false; }
         key_pressed(event) => {
@@ -591,7 +603,9 @@ export component MenuItem inherits Rectangle {
     }
 
     // 方向键导航属菜单容器职责（M4-C4）；基线先保证 Tab 可达 + Enter/Space 触发。
+    // focus-on-click=false：置顶 scope 默认点击抢焦会吞首击（IconButton 内详注）。
     focus-scope := FocusScope {
+        focus-on-click: false;
         focus_gained(reason) => { root.focus-visible = reason != FocusReason.pointer-click; }
         focus_lost(reason) => { root.focus-visible = false; }
         key_pressed(event) => {
