@@ -872,7 +872,7 @@ if (click_count % 2) == 1 {
 
 **落点**：installer/build.rs、installer/Cargo.toml（注释改口径）、scripts/release.ps1（新）、.gitignore（/.mimosa/ 工具运行态）。
 
-**⚠ 2026-10-25 增补：发版跳验通道 `[skip verify]`**。用户需求：刚全绿后发版，tag 触发的流水线不要重跑全部验证。GitHub 原生 `[skip ci]` 是全有或全无（连 package/release 一起跳），不可用；改为 ci.yml 三个验证 job（lint-and-test/deny/mem-regression）加 `!contains(github.event.head_commit.message, '[skip verify]')` 门，package/release 不看该标记照常跑（被跳过的 needs 依赖按满足计）。标记只来自 release.ps1 的 `-SkipVerify` 开关（升版提交零代码改动场景），标记失效时退化为全量验证——fail-open 在验证侧，安全方向正确。PR/schedule/dispatch 事件 head_commit 为 null 恒不命中。附带 .gitignore 补 /.qoder/（Qoder 会话运行态，同 /.zcode/ 理由——不补会拦 release.ps1 的树干净校验）。
+**⚠ 2026-10-25 增补：发版跳验通道 `[skip verify]`**。用户需求：刚全绿后发版，tag 触发的流水线不要重跑全部验证。GitHub 原生 `[skip ci]` 是全有或全无（连 package/release 一起跳），不可用；改为 ci.yml 三个验证 job（lint-and-test/deny/mem-regression）加 `!contains(github.event.head_commit.message, '[skip verify]')` 门。**首版翻车记录：误以为「needs 依赖被 skip 对下游按满足计」，实测 Actions 会连坐跳过下游**——package/release 的 if 必须补 `!failure() && !cancelled()`（skip≠failure 放行、真失败/取消仍拦），首版 v0.1.9 tag 因此整条流水线 skipped，修后删 tag 重推。标记只来自 release.ps1 的 `-SkipVerify` 开关（升版提交零代码改动场景），标记失效时退化为全量验证——fail-open 在验证侧，安全方向正确。PR/schedule/dispatch 事件 head_commit 为 null 恒不命中。附带 .gitignore 补 /.qoder/（Qoder 会话运行态，同 /.zcode/ 理由——不补会拦 release.ps1 的树干净校验）。
 
 ### D73 更新检查触发补全：运行中间隔档（2026-09-02）
 
