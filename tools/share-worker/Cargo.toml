@@ -14,6 +14,7 @@ sha2 = "0.10"
 # D80 钉子 3：iroh/tokio 只进这一个编译单元；契约类型走 crates/share。
 share = { path = "../../crates/share" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
+url = "2"
 uuid = "1"
 
 [dev-dependencies]

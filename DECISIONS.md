@@ -1305,3 +1305,17 @@ if (click_count % 2) == 1 {
 - **程序级规则而非端口级**：`program=` 锚定 share-worker.exe 完整路径，卸载/换目录由 delete 幂等 + 重装重建兜底；不开放裸端口。
 
 **复验协议**：两机重装 v0.1.12（安装期自动放行）→ 双 app 同开（worker 随 app 存活）→ 同网段。存量老版机器手动放行：`netsh advfirewall firewall add rule name="AssetDeck-Share-UDP-In" dir=in action=allow protocol=udp profile=any program="C:\Users\<用户>\AppData\Local\Programs\素材管理器\share-worker.exe"`。本机 TUN 环境（多播死 + DNS 劫持）下自测预期降级为 pkarr relay 解析路径，双机直连验证以普通网络为准。
+
+### D95 共享发现真根因：pkarr 发布器 relay_only 过滤器在 relay 关闭后恒发空包（2026-10-26，v0.1.12 复验仍失败取证）
+
+**背景**：v0.1.12 双机复验加入团队仍失败。D94 新增的可观测日志直接给出真签名——`同步拨号失败 …: No addressing information available`（**不是** QUIC 超时，是解析结果里一个地址都没有）。顺势把取证推进到发布侧：直接 `GET https://dns.iroh.link/pkarr/<52位id>` 下载双方记录实体解码（[64B 签名][8B 时间戳(us)][DNS 包]）。
+
+**取证（铁证）**：对端 id 与本机 id 的记录**完全对称**——都是 84 字节 = 64 签名 + 8 时间戳 + 12 字节空 DNS 头，AN=0（零资源记录），且时间戳实时（分钟级更新，进程活着、在按时发布）。即：**两台机器都在忠实地把「空地址列表」发布到公共 pkarr relay**。HTTPS 链路（publish/resolve）全程无恙——D94 阶段「解析层大概率活」的判断对了一半，但没料到对端记录里从来没有过任何地址。
+
+**真根因**：`presets::N0DisableRelay`（M1-c 起沿用）的 `PkarrPublisher` 使用 iroh 默认 `AddrFilter::relay_only()`——**只发布 relay 地址**（上游为「不向公共服务器泄露 IP」设的默认）。我们 `RelayMode::Disabled` → 没有 relay 可发 → 过滤后恒为空 → 每 5 分钟发布一个空包。**自 v0.1.9 引入 pkarr 信令起，任何机器从未能通过 pkarr 解析到对端**；此前唯一活着的发现路径是 mDNS（D93 的 resolve_dial_addrs），TUN 环境多播死就全断。历次「加入不了」（v0.1.9→v0.1.12）的单一真根因。**D94 勘误**：「主根因 = 对端入站防火墙」降级为**第二层必要条件**（地址流动后入站 QUIC 仍需放行，防火墙规则保留）；pkarr relay 取证方法（下载实体解码时间戳/RR 计数）入排障工具箱。
+
+**修复**：worker 不再用 `presets::N0DisableRelay`，从 `presets::Minimal`（只定 crypto provider）起步手工装配同一套信令：`PkarrPublisher::builder(N0_DNS_PKARR_RELAY_PROD).addr_filter(AddrFilter::unfiltered())` + `PkarrResolver::n0_dns()` + `DnsAddressLookup::n0_dns()` + `RelayMode::Disabled`。**隐私声明**：unfiltered 把直连 IP（含局域网地址）写进公共 pkarr 记录，查询前提是知道 52 位 id——id 本身就是邀请码的信任凭据（D80-M2 信任模型），泄露面可接受；不发布则纯直连模式无任何第三方信令可用，两难取其生。portmapper 默认 Enabled 不变（网关映射地址照旧进发布列表）。
+
+**验证（本机闭环 E2E）**：修复后 worker 以临时身份起 25 秒 → relay 记录从 **84B/0RR → 299B/4RR**（TXT `addr=10.13.13.2:57249` 等 4 条直连地址，与本机多网卡实况一致）——解析层从此有地址可拿。clippy -D warnings 零警告、26 测试全绿、fmt 干净。
+
+**复验协议（修订）**：**两台机器都必须升 v0.1.13**（发布侧修复在两端各自的 worker 里，只升一台 = 一端有地址、另一端没有，仍连不通）→ 其余同 D94（安装期防火墙放行 + 双 app 同开 + 同网段）。
