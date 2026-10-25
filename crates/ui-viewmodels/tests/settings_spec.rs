@@ -53,6 +53,7 @@ fn save_then_load_roundtrips() {
         send_after_paste: true,
         gpu_rendering: true,
         light_theme: true,
+        theme_id: "peach-cat".into(),
         ui_animations: false,
         sidebar_width: 300.0,
         fast_import_mode: false,
@@ -120,4 +121,28 @@ fn settings_path_prefers_library_root() {
     let root = PathBuf::from("some").join("lib");
     let p = settings_path(Some(&root));
     assert_eq!(p, root.join("settings.toml"));
+}
+
+#[test]
+fn theme_choice_survives_first_import_settings_migration() {
+    let dir = tmp_dir("theme-settings-migration");
+    let legacy = dir.join("program-settings.toml");
+    let destination = dir.join("new-library/settings.toml");
+    let settings = AppSettings {
+        theme_id: "peach-cat".into(),
+        light_theme: true,
+        ..AppSettings::default()
+    };
+    settings.save(&legacy).unwrap();
+    ui_viewmodels::settings::migrate_legacy_settings(&legacy, &destination).unwrap();
+    assert_eq!(AppSettings::load(&destination), settings);
+    assert!(legacy.is_file(), "旧设置保留以支持旧版本");
+    AppSettings::default().save(&destination).unwrap();
+    ui_viewmodels::settings::migrate_legacy_settings(&legacy, &destination).unwrap();
+    assert_eq!(
+        AppSettings::load(&destination),
+        AppSettings::default(),
+        "已有库设置绝不被覆盖"
+    );
+    let _ = fs::remove_dir_all(dir);
 }

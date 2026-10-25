@@ -41,3 +41,20 @@
   `--list` 展示去向、显式点名或组件引用则报错。
 - 验证：`preview --check` = 39 个可采集 + 跳过 3 个废弃；`builtin-dark` 39/39、`builtin-light` 39/39 全绿。
 - 说明：D90 迁移去向的**新状态**（如 `space-ctl-open`）尚未加入夹具；等 T0-C5/T1 需要时按需补真实夹具。
+## run-20261025-132431 · T0-C1 · done
+
+- 组件：主题包 schema 与解析器
+- 结论：完成主题包解析器与完整可用链路，实际支持范围见 themes/README.md
+- Findings：F-001(open) ThemeTokens.id 是 &'static str，外置主题包 id（运行时 String）无法表达
+- 门禁：定向 cargo test 首轮通过；Slint check、preview --check、license-audit 通过；最终 Clippy/新回归测试进行中
+- 截图：target/theme-system/shots/_states/final-review
+- 基线：6682098
+
+## 2026-10-25 · 用户请求的完整主题基座与首个可爱主题
+
+- 范围：严格主题包 schema、校验/目录加载、运行时 token 注入、选择/持久化/重载与回退、PNG 装饰、桃桃猫主题、素材卡语义徽标及文本行对齐。实现范围与暂不支持项见 `themes/README.md`；未将原路线图所有主题标为完成。
+- 修复：ComboBox 双向绑定及 last-applied 索引保证选择失败时正确回退；首次导入后迁移旧程序目录设置，避免主题丢失；背景只按可见视口绘制，窗口缩放使用当前主题间距，去掉随机 Rust 兜底色。
+- 验证：`cargo test -p ui-viewmodels -p app-ui --quiet` = 287 passed / 0 failed；包含启动/切换/重启/重载/坏资源回退、设置迁移和几何恢复。`ui_hygiene`/`deps_guard` 随定向测试通过，基线未放宽。定向 Clippy `--all-targets -- -D warnings` 最终增量复核通过（0 warnings）。
+- 视觉：三主题 × 网格/空库/设置/文本状态/960px 窄窗/导入归类/共享确认，共 21 张真实 Slint 软件渲染截图；关键图逐一目视检查。最新桃桃猫总览/设置/文本窄窗又重新采集确认，路径 `target/theme-system/shots/_states/final-review/`。静态截图未覆盖下拉菜单展开态；运行时测试覆盖选择回调与持久化/回退。
+- 分发：`package.ps1` 随包复制主题并检查主题/PNG/署名/许可证，脚本语法与独立主题复制 SHA256 验证通过。未执行 release 安装包构建。CI 增加 preview 配置检查与素材许可门禁。
+- 素材：在线获取 Microsoft Fluent Emoji Cat face 3D（MIT，256×256，37,653 bytes），原许可证和来源在主题包内。没有新增 crate。

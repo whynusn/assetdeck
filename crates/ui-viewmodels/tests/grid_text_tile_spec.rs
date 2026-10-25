@@ -55,6 +55,33 @@ fn text_tiles_are_full_width_uniform_height_rows() {
 }
 
 #[test]
+fn theme_switch_reflows_rows_and_can_restore_builtin_geometry() {
+    let mut vm = LibraryGridVm::new(
+        index_with_kinds(&[AssetKind::Text, AssetKind::Text, AssetKind::Image]),
+        Sorter { keys: vec![] },
+        16,
+    );
+    vm.set_layout_params(984.0, 6, 12.0);
+    let original = (vm.rect_of(0), vm.rect_of(1), vm.rect_of(2));
+    vm.apply_theme_layout(36.0, 16.0, 1.2, 1.15);
+    assert_eq!(vm.rect_of(0).h, 36.0);
+    assert_eq!(vm.rect_of(1).h, 36.0);
+    assert_eq!(vm.rect_of(0).w, 984.0);
+    assert!(vm.rect_of(1).y >= vm.rect_of(0).h);
+    assert!(vm.rect_of(2).y >= vm.rect_of(1).y + vm.rect_of(1).h + 16.0);
+    vm.apply_theme_layout(TEXT_TILE_HEIGHT, 12.0, 1.0, 1.0);
+    for (actual, expected) in [vm.rect_of(0), vm.rect_of(1), vm.rect_of(2)]
+        .into_iter()
+        .zip([original.0, original.1, original.2])
+    {
+        assert_eq!(
+            (actual.x, actual.y, actual.w, actual.h),
+            (expected.x, expected.y, expected.w, expected.h)
+        );
+    }
+}
+
+#[test]
 fn full_width_rows_break_columns_without_overlap() {
     let mut vm = LibraryGridVm::new(
         index_with_kinds(&[AssetKind::Image, AssetKind::Text, AssetKind::Image]),

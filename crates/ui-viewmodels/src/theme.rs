@@ -6,13 +6,20 @@
 //! （build.rs 钉样式为 fluent 只决定常量表，运行时可翻 scheme）。多主题仅
 //! 定义 Provider 形态，壳层按需装配：
 //! `AppSettings::light_theme` ⇄ [`LightThemeProvider`]/[`DarkThemeProvider`]。
+//!
+//! 外置主题包（D55 / theme-spec §3）：`theme.toml` 经 serde 解析为 [`ThemePack`]，
+//! 本模块只做**纯数据**（无 I/O、无平台调用）；目录扫描与注入分别在 T0-C4 / 壳层。
+//! 未知键、缺键一律报错——半套主题比没有主题更难排查。
+
+use serde::Deserialize;
+use std::fmt;
 
 /// 自绘层语义色板：所有字段为 ARGB（0xAARRGGBB）u32。
 ///
-/// `id` 标识主题名（"dark" | "light"），供调试与日志使用。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `id` 标识主题名（内置 "dark"/"light"，外置包为 `meta.id`），供调试与日志使用。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeTokens {
-    pub id: &'static str,
+    pub id: String,
     /// 窗口底色（最深一级）。
     pub bg_app: u32,
     /// 面板底色。
@@ -87,7 +94,7 @@ pub struct DarkThemeProvider;
 impl ThemeProvider for DarkThemeProvider {
     fn theme(&self) -> ThemeTokens {
         ThemeTokens {
-            id: "dark",
+            id: "dark".into(),
             bg_app: 0xFF1C1C1C,
             bg_panel: 0xFF202020,
             bg_bar: 0xFF252525,
@@ -139,7 +146,7 @@ pub struct LightThemeProvider;
 impl ThemeProvider for LightThemeProvider {
     fn theme(&self) -> ThemeTokens {
         ThemeTokens {
-            id: "light",
+            id: "light".into(),
             bg_app: 0xFFF7F7F8,
             bg_panel: 0xFFFFFFFF,
             bg_bar: 0xFFECECF0,
@@ -178,6 +185,427 @@ impl ThemeProvider for LightThemeProvider {
             badge_ring: 0xCCFFFFFF,
             tile_veil: 0xD9FFFFFF,
             card_icon: 0xFF62696F,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 外置主题包 schema（theme-spec §3）
+// ---------------------------------------------------------------------------
+
+/// 主题包解析错误。`toml::de::Error` 自带行列与键位片段，禁止吞成「主题无效」。
+#[derive(Debug)]
+pub struct ThemePackError(String);
+
+impl ThemePackError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// 人类可读的错误信息（含键名/行列）。
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ThemePackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ThemePackError {}
+
+impl From<toml::de::Error> for ThemePackError {
+    fn from(error: toml::de::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+/// 主题色：ARGB（0xAARRGGBB）。接受 `#rgb` / `#rrggbb` / `#rrggbbaa`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgba(pub u32);
+
+impl Rgba {
+    /// 解析 CSS 风格十六进制色值；非法输入返回带原值的错误。
+    pub fn parse(text: &str) -> Result<Self, ThemePackError> {
+        let body = text
+            .strip_prefix('#')
+            .ok_or_else(|| ThemePackError::new(format!("色值 `{text}` 缺少 # 前缀")))?;
+        if !body.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(ThemePackError::new(format!(
+                "色值 `{text}` 含非十六进制字符"
+            )));
+        }
+        let value = u32::from_str_radix(body, 16)
+            .map_err(|_| ThemePackError::new(format!("色值 `{text}` 不是合法十六进制")))?;
+        match body.len() {
+            3 => {
+                let r = ((value >> 8) & 0xF) * 17;
+                let g = ((value >> 4) & 0xF) * 17;
+                let b = (value & 0xF) * 17;
+                Ok(Self(0xFF00_0000 | (r << 16) | (g << 8) | b))
+            }
+            6 => Ok(Self(0xFF00_0000 | value)),
+            8 => Ok(Self(value.rotate_right(8))),
+            _ => Err(ThemePackError::new(format!(
+                "色值 `{text}` 长度非法：只支持 #rgb/#rrggbb/#rrggbbaa"
+            ))),
+        }
+    }
+
+    /// ARGB 数值（壳层注入 slint 用）。
+    pub const fn argb(self) -> u32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgba {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// 像素长度（TOML 里写作 `"10px"`）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Px(pub f32);
+
+impl Px {
+    /// 解析 `"<数值>px"`。
+    pub fn parse(text: &str) -> Result<Self, ThemePackError> {
+        let number = text
+            .strip_suffix("px")
+            .ok_or_else(|| ThemePackError::new(format!("长度 `{text}` 必须以 px 结尾")))?;
+        let value: f32 = number
+            .trim()
+            .parse()
+            .map_err(|_| ThemePackError::new(format!("长度 `{text}` 不是合法数值")))?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(ThemePackError::new(format!(
+                "长度 `{text}` 必须是非负有限数"
+            )));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for Px {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// 毫秒时长（TOML 里写作 `"120ms"`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Millis(pub u16);
+
+impl Millis {
+    /// 解析 `"<整数>ms"`。
+    pub fn parse(text: &str) -> Result<Self, ThemePackError> {
+        let number = text
+            .strip_suffix("ms")
+            .ok_or_else(|| ThemePackError::new(format!("时长 `{text}` 必须以 ms 结尾")))?;
+        let value: u16 = number
+            .trim()
+            .parse()
+            .map_err(|_| ThemePackError::new(format!("时长 `{text}` 必须是非负整数毫秒")))?;
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for Millis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// 无量纲比值（缩放/透明度/坐标），TOML 里写作 `"1.0"`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ratio(pub f32);
+
+impl Ratio {
+    /// 解析十进制小数。
+    pub fn parse(text: &str) -> Result<Self, ThemePackError> {
+        let value: f32 = text
+            .trim()
+            .parse()
+            .map_err(|_| ThemePackError::new(format!("比值 `{text}` 不是合法数值")))?;
+        if !value.is_finite() {
+            return Err(ThemePackError::new(format!("比值 `{text}` 必须是有限数")));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for Ratio {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// std-widgets 跟随的明暗档（D37：fluent 只有两档，如实声明）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeBase {
+    Dark,
+    Light,
+}
+
+/// 密度只缩放尺寸，不改布局结构（theme-spec §4.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    Compact,
+    Comfortable,
+    Spacious,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineCap {
+    Round,
+    Butt,
+    Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconSet {
+    Line,
+    Filled,
+    Pixel,
+}
+
+/// 契约只允许 ease-out / linear（theme-spec §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Easing {
+    #[serde(rename = "ease-out")]
+    EaseOut,
+    Linear,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeMeta {
+    pub id: String,
+    pub name: String,
+    pub author: Option<String>,
+    pub version: String,
+    pub base: ThemeBase,
+    pub description: Option<String>,
+    /// 主题包本身的许可证（随附包由校验器强制，素材另见 THIRD_PARTY.md）。
+    pub license: Option<String>,
+}
+
+/// 色板：38 个核心令牌全部必填（缺一即解析失败，绝不静默继承内置值）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemePalette {
+    pub bg_app: Rgba,
+    pub bg_panel: Rgba,
+    pub bg_bar: Rgba,
+    pub bg_raised: Rgba,
+    pub bg_raised_hover: Rgba,
+    pub bg_raised_press: Rgba,
+    pub bg_input: Rgba,
+    pub line: Rgba,
+    pub line_strong: Rgba,
+    pub control_track_border: Rgba,
+    pub text: Rgba,
+    pub text_2: Rgba,
+    pub text_3: Rgba,
+    pub accent: Rgba,
+    pub accent_hover: Rgba,
+    pub accent_press: Rgba,
+    pub accent_ink: Rgba,
+    pub accent_soft: Rgba,
+    pub danger: Rgba,
+    pub danger_soft: Rgba,
+    pub danger_press: Rgba,
+    pub danger_ink: Rgba,
+    pub warn: Rgba,
+    pub warn_soft: Rgba,
+    pub ok: Rgba,
+    pub ok_soft: Rgba,
+    pub shared: Rgba,
+    pub shared_soft: Rgba,
+    pub bg_overlay: Rgba,
+    pub scrim: Rgba,
+    pub label_bar_bg: Rgba,
+    pub label_bar_bg_hover: Rgba,
+    pub label_bar_text: Rgba,
+    pub badge_bg: Rgba,
+    pub badge_text: Rgba,
+    pub badge_ring: Rgba,
+    pub tile_veil: Rgba,
+    pub card_icon: Rgba,
+    /// 扩展：交替行/斑马纹底（缺省回退 bg-panel）。
+    pub bg_app_alt: Option<Rgba>,
+    /// 扩展：焦点环（缺省 accent）。
+    pub focus_ring: Option<Rgba>,
+    /// 扩展：选中底（缺省 accent-soft）。
+    pub selection_bg: Option<Rgba>,
+}
+
+/// 几何：全部可选，缺省由壳层用内置基准补齐。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeGeometry {
+    pub radius: Option<Px>,
+    pub radius_lg: Option<Px>,
+    pub border_width: Option<Px>,
+    pub density: Option<Density>,
+    pub control_height: Option<Px>,
+    pub row_height: Option<Px>,
+    pub bar_height: Option<Px>,
+    pub tile_radius: Option<Px>,
+    pub tile_gap: Option<Px>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeTypography {
+    /// 必须是系统已装族（Slint 1.17.1 无运行时字体注册）；留空 = 系统默认。
+    pub font_family: Option<String>,
+    pub font_size_scale: Option<Ratio>,
+    pub display: Option<Px>,
+    pub letter_spacing: Option<Px>,
+    pub line_height: Option<Ratio>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeIcons {
+    pub stroke_weight: Option<Ratio>,
+    pub line_cap: Option<LineCap>,
+    pub size: Option<Px>,
+    pub set: Option<IconSet>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeMotion {
+    /// 界面动画总闸（theme-spec §4.5）；缺省开启。
+    pub enabled: Option<bool>,
+    pub fast: Option<Millis>,
+    pub state: Option<Millis>,
+    pub enter: Option<Millis>,
+    pub easing: Option<Easing>,
+}
+
+/// 贴纸：归一化坐标（0.0–1.0，相对窗口）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeSticker {
+    pub image: String,
+    pub x: Ratio,
+    pub y: Ratio,
+    pub scale: Option<Ratio>,
+    pub opacity: Option<Ratio>,
+}
+
+/// 装饰：路径相对主题包目录；存在性与体积由校验器把关（T0-C2）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeDecoration {
+    pub background: Option<String>,
+    pub background_tint: Option<Rgba>,
+    pub watermark: Option<String>,
+    pub watermark_opacity: Option<Ratio>,
+    pub corner: Option<String>,
+    pub corner_scale: Option<Ratio>,
+    #[serde(default)]
+    pub stickers: Vec<ThemeSticker>,
+}
+
+/// 声音：默认全关；播放能力待评估（不得私引音频依赖）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ThemeSound {
+    #[serde(default)]
+    pub enabled: bool,
+    pub click: Option<String>,
+    pub success: Option<String>,
+}
+
+/// 外置主题包（`themes/<id>/theme.toml`）。所有段均 `deny_unknown_fields`：
+/// 拼错键名当场报错，避免「半套主题」。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemePack {
+    pub meta: ThemeMeta,
+    pub palette: ThemePalette,
+    #[serde(default)]
+    pub geometry: ThemeGeometry,
+    #[serde(default)]
+    pub typography: ThemeTypography,
+    #[serde(default)]
+    pub icons: ThemeIcons,
+    #[serde(default)]
+    pub motion: ThemeMotion,
+    #[serde(default)]
+    pub decoration: ThemeDecoration,
+    #[serde(default)]
+    pub sound: ThemeSound,
+}
+
+impl ThemePack {
+    /// 主题包入口文件名（目录扫描用）。
+    pub const FILE_NAME: &'static str = "theme.toml";
+
+    /// 纯解析：不做 I/O，不校验业务约束（校验器见 T0-C2）。
+    pub fn parse(text: &str) -> Result<Self, ThemePackError> {
+        Ok(toml::from_str(text)?)
+    }
+}
+
+impl ThemePack {
+    pub fn tokens(&self) -> ThemeTokens {
+        ThemeTokens {
+            id: self.meta.id.clone(),
+            bg_app: self.palette.bg_app.argb(),
+            bg_panel: self.palette.bg_panel.argb(),
+            bg_bar: self.palette.bg_bar.argb(),
+            bg_raised: self.palette.bg_raised.argb(),
+            bg_raised_hover: self.palette.bg_raised_hover.argb(),
+            bg_raised_press: self.palette.bg_raised_press.argb(),
+            bg_input: self.palette.bg_input.argb(),
+            line: self.palette.line.argb(),
+            line_strong: self.palette.line_strong.argb(),
+            control_track_border: self.palette.control_track_border.argb(),
+            text: self.palette.text.argb(),
+            text_2: self.palette.text_2.argb(),
+            text_3: self.palette.text_3.argb(),
+            accent: self.palette.accent.argb(),
+            accent_hover: self.palette.accent_hover.argb(),
+            accent_press: self.palette.accent_press.argb(),
+            accent_ink: self.palette.accent_ink.argb(),
+            accent_soft: self.palette.accent_soft.argb(),
+            danger: self.palette.danger.argb(),
+            danger_soft: self.palette.danger_soft.argb(),
+            danger_press: self.palette.danger_press.argb(),
+            danger_ink: self.palette.danger_ink.argb(),
+            warn: self.palette.warn.argb(),
+            warn_soft: self.palette.warn_soft.argb(),
+            ok: self.palette.ok.argb(),
+            ok_soft: self.palette.ok_soft.argb(),
+            shared: self.palette.shared.argb(),
+            shared_soft: self.palette.shared_soft.argb(),
+            bg_overlay: self.palette.bg_overlay.argb(),
+            scrim: self.palette.scrim.argb(),
+            label_bar_bg: self.palette.label_bar_bg.argb(),
+            label_bar_bg_hover: self.palette.label_bar_bg_hover.argb(),
+            label_bar_text: self.palette.label_bar_text.argb(),
+            badge_bg: self.palette.badge_bg.argb(),
+            badge_text: self.palette.badge_text.argb(),
+            badge_ring: self.palette.badge_ring.argb(),
+            tile_veil: self.palette.tile_veil.argb(),
+            card_icon: self.palette.card_icon.argb(),
         }
     }
 }
@@ -358,5 +786,119 @@ mod tests {
                 tokens.id
             );
         }
+    }
+
+    /// 38 个必填色板键的样本块（值不重要，只保证键齐全）。
+    fn palette_block() -> String {
+        const KEYS: &str = "bg-app bg-panel bg-bar bg-raised bg-raised-hover bg-raised-press \
+             bg-input line line-strong control-track-border text text-2 text-3 accent \
+             accent-hover accent-press accent-ink accent-soft danger danger-soft danger-press \
+             danger-ink warn warn-soft ok ok-soft shared shared-soft bg-overlay scrim \
+             label-bar-bg label-bar-bg-hover label-bar-text badge-bg badge-text badge-ring \
+             tile-veil card-icon";
+        KEYS.split_whitespace()
+            .map(|key| format!("{key} = \"#808080\"\n"))
+            .collect()
+    }
+
+    fn minimal_pack_toml() -> String {
+        format!(
+            r#"
+[meta]
+id = "sample"
+name = "样本"
+version = "1.0.0"
+base = "light"
+
+[palette]
+{}
+"#,
+            palette_block()
+        )
+    }
+
+    #[test]
+    fn hex_colors_accept_rgb_rrggbb_and_rrggbbaa() {
+        assert_eq!(Rgba::parse("#fff").unwrap().argb(), 0xFFFF_FFFF);
+        assert_eq!(Rgba::parse("#123456").unwrap().argb(), 0xFF12_3456);
+        assert_eq!(Rgba::parse("#12345678").unwrap().argb(), 0x7812_3456);
+        for bad in ["123456", "#12", "#12345", "#1234567", "#gggggg", "#12 34"] {
+            assert!(Rgba::parse(bad).is_err(), "`{bad}` 应被拒绝");
+        }
+    }
+
+    #[test]
+    fn lengths_durations_and_ratios_require_units() {
+        assert_eq!(Px::parse("10px").unwrap().0, 10.0);
+        assert_eq!(Millis::parse("120ms").unwrap().0, 120);
+        assert_eq!(Ratio::parse("1.45").unwrap().0, 1.45);
+        for bad in ["10", "px", "10em", "-2px"] {
+            assert!(Px::parse(bad).is_err(), "长度 `{bad}` 应被拒绝");
+        }
+        for bad in ["120", "ms", "1.5ms", "-1ms"] {
+            assert!(Millis::parse(bad).is_err(), "时长 `{bad}` 应被拒绝");
+        }
+        for bad in ["nan", "1,5"] {
+            assert!(Ratio::parse(bad).is_err(), "比值 `{bad}` 应被拒绝");
+        }
+    }
+
+    #[test]
+    fn minimal_pack_parses_with_optional_sections_defaulted() {
+        let pack = ThemePack::parse(&minimal_pack_toml()).expect("最小包应可解析");
+        assert_eq!(pack.meta.id, "sample");
+        assert_eq!(pack.meta.base, ThemeBase::Light);
+        assert_eq!(pack.palette.text.argb(), 0xFF80_8080);
+        assert!(pack.geometry.radius.is_none());
+        assert!(pack.decoration.stickers.is_empty());
+        assert!(!pack.sound.enabled);
+        assert!(pack.motion.enabled.is_none());
+    }
+
+    #[test]
+    fn unknown_key_and_section_are_rejected_with_name() {
+        let text = minimal_pack_toml().replace("bg-panel", "bg-pannel");
+        let error = ThemePack::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("bg-pannel"), "错误应点名拼错的键：{error}");
+        let text = format!("{}[pallete]\n", minimal_pack_toml());
+        let error = ThemePack::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("pallete"), "错误应点名未知段：{error}");
+    }
+
+    #[test]
+    fn missing_palette_key_is_rejected_with_key_name() {
+        let text: String = minimal_pack_toml()
+            .lines()
+            .filter(|line| !line.starts_with("text-3"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = ThemePack::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("text-3"), "错误应点名缺失的键：{error}");
+    }
+
+    #[test]
+    fn missing_required_meta_field_is_rejected_with_field_name() {
+        let text = minimal_pack_toml().replace("base = \"light\"\n", "");
+        let error = ThemePack::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("base"), "错误应点名缺失的字段：{error}");
+    }
+
+    #[test]
+    fn invalid_color_value_is_named_in_error() {
+        let text = minimal_pack_toml().replace("card-icon = \"#808080\"", "card-icon = \"808080\"");
+        let error = ThemePack::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("808080"), "错误应含非法色值：{error}");
+    }
+
+    /// 模板漂移护栏：仓库里的 `themes/_template/theme.toml` 必须始终能被解析。
+    #[test]
+    fn shipped_template_parses() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../themes/_template/theme.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("模板文件应存在");
+        let pack = ThemePack::parse(&text).expect("模板应可解析");
+        assert_eq!(pack.meta.id, "_template");
     }
 }

@@ -41,6 +41,11 @@ jobs:
           }
           if ($bad.Count -gt 0) { Write-Error ('以下文件缺少 EOF 换行：' + ($bad -join ', ')); exit 1 }
       - run: cargo fmt --all -- --check
+      - name: 主题配置与素材许可门禁
+        run: |
+          node automation/theme-system/scripts/preview.mjs --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node automation/theme-system/scripts/license-audit.mjs
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 

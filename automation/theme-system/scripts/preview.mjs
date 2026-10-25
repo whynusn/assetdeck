@@ -90,16 +90,128 @@ function resolveThemeGlobals(name) {
   if (args.tokens) {
     const snap = readJson(path.resolve(ROOT, args.tokens));
     // 快照形态：{ "globals": { "Theme.accent": "#..." , ... } } 或直接是键值对象
-    return snap.globals && typeof snap.globals === 'object' ? snap.globals : snap;
+    return snap.globals && typeof snap.globals === 'object' ? { globals: snap.globals, props: snap.props ?? {} } : { globals: snap, props: {} };
   }
+  const packPath = path.join(THEMES_DIR, name, 'theme.toml');
+  if (fs.existsSync(packPath)) return readThemePackPreview(name, packPath);
   const t = declaredThemes[name];
   if (!t) {
-    if (name === 'builtin-dark') return { 'Palette.color-scheme': 'dark' };
-    if (name === 'builtin-light') return { 'Palette.color-scheme': 'light', ...(declaredThemes['light']?.globals || {}) };
+    if (name === 'builtin-dark') return { globals: { 'Palette.color-scheme': 'dark' }, props: {} };
+    if (name === 'builtin-light') return { globals: { 'Palette.color-scheme': 'light', ...(declaredThemes['light']?.globals || {}) }, props: {} };
     const avail = ['builtin-dark', 'builtin-light', ...Object.keys(declaredThemes)].join(', ');
     fail(`未知主题 "${name}"（themes.json 里没有，且未提供 --tokens）。可用：${avail}`);
   }
-  return t.globals || {};
+  return { globals: t.globals || {}, props: {} };
+}
+
+// Preview representation of the validated Rust pack. This parses the simple
+// scalar schema used by shipped packs; runtime validation remains in Rust.
+function readPackScalars(packPath) {
+  const toml = {};
+  let bucket = null;
+  for (const [index, raw] of fs.readFileSync(packPath, 'utf8').split(/\r?\n/).entries()) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line === '[[decoration.stickers]]') {
+      toml.decoration ??= {};
+      toml.decoration.stickers ??= [];
+      bucket = {};
+      toml.decoration.stickers.push(bucket);
+      continue;
+    }
+    const heading = line.match(/^\[([a-z-]+)\]$/);
+    if (heading) { toml[heading[1]] ??= {}; bucket = toml[heading[1]]; continue; }
+    const field = line.match(/^([a-z0-9-]+)\s*=\s*("(?:[^"\\]|\\.)*"|true|false)(?:\s+#.*)?$/);
+    if (field && bucket) bucket[field[1]] = field[2].startsWith('"') ? JSON.parse(field[2]) : field[2] === 'true';
+    else throw new Error(`${path.relative(ROOT, packPath)}:${index + 1} 预览器不支持此 TOML 行：${line}`);
+  }
+  return toml;
+}
+
+function themePackIds() {
+  // ThemeCatalog presents built-ins first, then loadable directories by name.
+  return ['builtin-dark', 'builtin-light',
+    ...fs.readdirSync(THEMES_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('builtin-') && fs.existsSync(path.join(THEMES_DIR, entry.name, 'theme.toml')))
+      .map((entry) => entry.name).sort()];
+}
+
+function themeSelection(name) {
+  const ids = themePackIds();
+  const names = ids.map((id) => readPackScalars(path.join(THEMES_DIR, id, 'theme.toml')).meta?.name ?? id);
+  return { names, index: ids.indexOf(name) };
+}
+
+function readThemePackPreview(name, packPath) {
+  const toml = readPackScalars(packPath);
+  const palette = toml.palette ?? {};
+  const geometry = toml.geometry ?? {};
+  const typography = toml.typography ?? {};
+  const icons = toml.icons ?? {};
+  const motion = toml.motion ?? {};
+  const deco = toml.decoration ?? {};
+  const globals = { 'Palette.color-scheme': toml.meta?.base ?? 'dark' };
+  for (const [key, value] of Object.entries(palette)) {
+    if (!['bg-app-alt', 'focus-ring', 'selection-bg'].includes(key)) globals[`Theme.${key}`] = value;
+  }
+  const px = (s, fallback) => s ? Number(s.slice(0, -2)) : fallback;
+  const ms = (s, fallback) => s ? Number(s.slice(0, -2)) : fallback;
+  const density = geometry.density === 'compact' ? 0.95 : geometry.density === 'spacious' ? 1.15 : 1;
+  const fontScale = typography['font-size-scale'] ? Number(typography['font-size-scale']) : 1;
+  const controlScale = Math.max(density, fontScale);
+  Object.assign(globals, {
+    'Theme.radius': px(geometry.radius, 4),
+    'Theme.radius-lg': px(geometry['radius-lg'], 8),
+    'Theme.tile-radius': px(geometry['tile-radius'], 8),
+    'Theme.border-width': px(geometry['border-width'], 1),
+    'Theme.icon-weight': Number(icons['stroke-weight'] ?? 1.7),
+    'Theme.icon-size': px(icons.size, 16),
+    'Theme.icon-cap': icons['line-cap'] === 'butt' ? 1 : icons['line-cap'] === 'square' ? 2 : 0,
+    'Theme.focus-ring': palette['focus-ring'] ?? palette.accent,
+    'Theme.selection-bg': palette['selection-bg'] ?? palette['accent-soft'],
+    'Typography.scale': fontScale,
+    'Typography.display': px(typography.display, 16 * fontScale),
+    'Typography.family': typography['font-family'] ?? 'Segoe UI',
+    'Typography.tracking': px(typography['letter-spacing'], 0),
+    'Spacing.scale': density,
+    'Metrics.control': Math.max(px(geometry['control-height'], 30 * density), 28 * fontScale),
+    'Metrics.control-primary': 32 * controlScale,
+    'Metrics.row-compact': Math.max(px(geometry['row-height'], 28 * Math.max(density, 1)), 28 * fontScale),
+    'Metrics.bar': px(geometry['bar-height'], 48 * density),
+    'Metrics.icon-button': 30 * controlScale,
+    'Metrics.hit-min': 28 * controlScale,
+    'Metrics.menu-row': 46 * controlScale,
+    'Metrics.toggle-width': 40 * density,
+    'Metrics.toggle-height': 22 * density,
+    'Metrics.lock-area': 30 * density,
+    'Motion.theme-enabled': motion.enabled ?? true,
+    'Motion.fast': ms(motion.fast, 100),
+    'Motion.state': ms(motion.state, 120),
+    'Motion.enter': ms(motion.enter, 150),
+    'Motion.linear': motion.easing === 'linear',
+  });
+  const asset = (relative) => path.join(THEMES_DIR, name, relative).replace(/\\/g, '/');
+  const art = [];
+  if (deco.corner) art.push({ picture: asset(deco.corner), x: 0.85, y: 0.5, scale: Number(deco['corner-scale'] ?? '1.0'), alpha: 1.0 });
+  if (deco.watermark) art.push({ picture: asset(deco.watermark), x: 0.05, y: 0.5, scale: 1.0, alpha: Number(deco['watermark-opacity'] ?? '0.18') });
+  for (const sticker of deco.stickers ?? []) art.push({
+    picture: asset(sticker.image), x: Number(sticker.x), y: Number(sticker.y),
+    scale: Number(sticker.scale ?? '1.0'), alpha: Number(sticker.opacity ?? '1.0'),
+  });
+  const selection = themeSelection(name);
+  const props = {
+    'theme-names': selection.names,
+    'theme-index': selection.index,
+    'theme-description': toml.meta?.description ?? toml.meta?.name ?? name,
+    'theme-art': art,
+    'theme-background-tint': deco['background-tint'] ?? (deco.background ? '#ffffffe6' : '#00000000'),
+    'theme-font-scale': fontScale,
+    'theme-density': density,
+    'theme-row-height': Math.max(px(geometry['row-height'], 28 * Math.max(density, 1)), 28 * fontScale),
+    'theme-tile-gap': px(geometry['tile-gap'], 12 * density),
+  };
+  if (deco.background) props['theme-background'] = asset(deco.background);
+  return { globals, props };
 }
 
 // ---------- 状态解析 ----------
@@ -234,6 +346,50 @@ function structDriftProblems() {
   return problems;
 }
 
+function themePackProblems() {
+  const problems = [];
+  for (const entry of fs.readdirSync(THEMES_DIR, { withFileTypes: true })) {
+    if (entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('builtin-')
+        && !fs.existsSync(path.join(THEMES_DIR, entry.name, 'theme.toml'))) {
+      problems.push(`${entry.name}: 缺少 theme.toml，运行时主题目录会报错`);
+    }
+  }
+  const source = fs.readFileSync(path.join(ROOT, 'crates/ui-viewmodels/src/theme.rs'), 'utf8');
+  const paletteStruct = source.match(/pub struct ThemePalette \{([\s\S]*?)\r?\n\}/)?.[1];
+  if (!paletteStruct) return ['无法从 Rust ThemePalette 读取必填色板键'];
+  const paletteFields = [...paletteStruct.matchAll(/pub\s+([a-z0-9_]+):\s*(Option<)?Rgba/g)]
+    .map((match) => ({ key: match[1].replace(/_/g, '-'), optional: Boolean(match[2]) }));
+  if (paletteFields.length < 38) return [`Rust ThemePalette 只读到 ${paletteFields.length} 个色板键，预览校验不可信`];
+  const known = new Set(paletteFields.map((field) => field.key));
+  for (const id of themePackIds()) {
+    const dir = path.join(THEMES_DIR, id);
+    let pack;
+    try { pack = readPackScalars(path.join(dir, 'theme.toml')); }
+    catch (e) { problems.push(String(e.message)); continue; }
+    const meta = pack.meta ?? {};
+    const palette = pack.palette ?? {};
+    const expectedId = id.startsWith('builtin-') ? id.slice('builtin-'.length) : id;
+    if (meta.id !== expectedId) problems.push(`${id}: meta.id 应为 ${expectedId}`);
+    if (!meta.name || !meta.version || !['light', 'dark'].includes(meta.base)) problems.push(`${id}: meta.name/version/base 缺失或非法`);
+    for (const field of paletteFields) {
+      if (!field.optional && !(field.key in palette)) problems.push(`${id}: 缺少 palette.${field.key}`);
+    }
+    for (const [key, value] of Object.entries(palette)) {
+      if (!known.has(key)) problems.push(`${id}: 未知色板键 palette.${key}`);
+      if (typeof value !== 'string' || !/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(value)) problems.push(`${id}: palette.${key} 色值非法`);
+    }
+    const decoration = pack.decoration ?? {};
+    const assets = [decoration.background, decoration.watermark, decoration.corner,
+      ...(decoration.stickers ?? []).map((sticker) => sticker.image)].filter(Boolean);
+    for (const asset of assets) {
+      if (typeof asset !== 'string' || !/^assets\/[a-zA-Z0-9_./-]+\.png$/.test(asset) || asset.includes('..') || !fs.existsSync(path.join(dir, asset))) {
+        problems.push(`${id}: 装饰资源 ${asset} 缺失或路径非法`);
+      }
+    }
+  }
+  return problems;
+}
+
 if (args.check) {
   const problems = [];
   // 方向一：theme-system 组件引用的状态必须真实存在。
@@ -262,7 +418,7 @@ if (args.check) {
         continue;
       }
       if (!key.startsWith('Theme.')) problems.push(`主题 ${name} 的令牌键 ${key} 必须以 Theme. 开头`);
-      if (!/^#[0-9a-fA-F]{3,8}$/.test(String(value))) problems.push(`主题 ${name} 的 ${key} 色值形态非法: ${value}`);
+      if (!/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(String(value))) problems.push(`主题 ${name} 的 ${key} 色值形态非法: ${value}`);
     }
   }
   // 方向四：主题包目录自检——有 assets 必须有 THIRD_PARTY.md（与 license-audit 同一口径）。
@@ -279,13 +435,16 @@ if (args.check) {
   }
   // 方向五：结构体漂移——夹具元素必须与 .slint 结构体字段严格对齐（缺字段会 panic）。
   problems.push(...structDriftProblems());
+  // 方向六：真实 theme.toml 包必须可预览，Rust 的必填色板键不得缺失。
+  // 对比度等运行时门禁仍由 ui-viewmodels 的 ThemePack::validate() 验证。
+  problems.push(...themePackProblems());
 
   if (problems.length) {
     console.error(problems.map((p) => `  ✗ ${p}`).join('\n'));
     fail(`${problems.length} 个问题`);
   }
   console.log(
-    `preview OK：${activeNames.length} 个可采集状态（跳过 ${deprecatedNames.length} 个已废弃）、${Object.keys(declaredThemes).length} 个声明主题，引用与令牌形态齐全`,
+    `preview OK：${activeNames.length} 个可采集状态（跳过 ${deprecatedNames.length} 个已废弃）、${themePackIds().length} 个真实主题包、${Object.keys(declaredThemes).length} 个兼容声明，夹具与预览色板校验通过（运行时约束由 Rust 校验）`,
   );
   process.exit(0);
 }
@@ -330,8 +489,8 @@ function sourceFileFor(s) {
   return generateSizedWindow(base, s.window.width, s.window.height);
 }
 
-function buildLoadData(s, themeGlobals) {
-  const merged = { ...(fixtures.defaults ?? {}), ...s.props, ...s.globals, ...themeGlobals };
+function buildLoadData(s, themeSnapshot) {
+  const merged = { ...(fixtures.defaults ?? {}), ...s.props, ...themeSnapshot.props, ...s.globals, ...themeSnapshot.globals };
   return deepReplace(merged, { ROOT: ROOT.replace(/\\/g, '/') });
 }
 
@@ -355,8 +514,8 @@ function previewOne(s, themeName, themeGlobals, outDir) {
   }
 
   const res = spawnSync(
-    'slint-viewer',
-    ['--style', STYLE, '--load-data', loadJsonPath, '--screenshot', png, file],
+    process.env.SLINT_VIEWER || 'slint-viewer',
+    ['-I', path.dirname(path.join(ROOT, s.file ?? DEFAULT_FILE)), '--style', STYLE, '--load-data', loadJsonPath, '--screenshot', png, file],
     { cwd: ROOT, encoding: 'utf8', timeout: 180_000, windowsHide: true },
   );
 

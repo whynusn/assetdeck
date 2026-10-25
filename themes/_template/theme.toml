@@ -34,9 +34,9 @@ text-2 = "#5a4a54"
 text-3 = "#6b5a64"
 
 # 强调
-accent = "#c2477f"
-accent-hover = "#ad3c70"
-accent-press = "#96335f"
+accent = "#a33261"
+accent-hover = "#902451"
+accent-press = "#7c1c43"
 accent-ink = "#ffffff"
 accent-soft = "#fbe3ee"
 
@@ -77,7 +77,6 @@ tile-gap = "10px"
 [typography]
 font-family = "Microsoft YaHei UI"   # 必须是系统已装字体
 font-size-scale = "1.0"              # 0.9 – 1.2
-line-height = "1.45"
 letter-spacing = "0px"
 
 [icons]
@@ -94,6 +93,7 @@ enter = "150ms"
 easing = "ease-out"
 
 # [decoration]             # 有素材时取消注释，并在 THIRD_PARTY.md 登记来源
-# background = "assets/bg.avif"
+# 当前版本装饰资源只支持 PNG，单图不超过 512KB、宽高各不超过 1024px。
+# background = "assets/bg.png"
 # background-tint = "#ffffff66"
-# corner = "assets/corner.webp"
+# corner = "assets/corner.png"

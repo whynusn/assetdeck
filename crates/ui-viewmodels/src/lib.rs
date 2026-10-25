@@ -17,6 +17,7 @@ pub mod target_bar_vm;
 // 运行时门面只依赖 platform 的 trait 层，具体平台实现由二进制入口注入，故无平台门。
 pub mod target_runtime;
 pub mod theme;
+pub mod theme_catalog;
 pub mod update_apply;
 pub mod update_check;
 
@@ -72,7 +73,12 @@ pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,
 };
-pub use theme::{DarkThemeProvider, LightThemeProvider, ThemeProvider, ThemeTokens};
+pub use theme::{
+    DarkThemeProvider, Density, Easing, IconSet, LightThemeProvider, LineCap, Millis, Px, Ratio,
+    Rgba, ThemeBase, ThemeDecoration, ThemeGeometry, ThemeIcons, ThemeMeta, ThemeMotion, ThemePack,
+    ThemePackError, ThemePalette, ThemeProvider, ThemeSound, ThemeSticker, ThemeTokens,
+    ThemeTypography,
+};
 pub use update_apply::{
     hash_matches, installer_asset_name, load_download_mirrors, mirror_candidates, mirror_label,
     parse_sha256_sums, pick_asset, rank_by_probe, UpdateApplyVm, DEFAULT_DOWNLOAD_MIRRORS,

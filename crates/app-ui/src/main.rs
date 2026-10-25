@@ -8,6 +8,7 @@ mod notifications;
 mod spaces;
 use notifications::show_notice;
 mod task_runner;
+mod themes;
 mod thumbs;
 mod ui_enums;
 
@@ -2272,6 +2273,7 @@ fn main() {
     }));
 
     let mut library_root = parse_library_root(&std::env::args().skip(1).collect::<Vec<_>>());
+    let explicit_library = library_root.is_some();
     // 便携约定：未显式指定 --library-root 时，用 exe 同目录的 library/meta.db 则自动打开。
     if library_root.is_none() {
         let default = default_library_root();
@@ -2289,6 +2291,14 @@ fn main() {
     // 后端只能在创建 AppWindow 之前选定。
     let settings_path =
         ui_viewmodels::settings_path(library_root.as_deref().map(std::path::Path::new));
+    if !explicit_library {
+        if let Err(error) = ui_viewmodels::settings::migrate_legacy_settings(
+            &ui_viewmodels::settings_path(None),
+            &settings_path,
+        ) {
+            logging::warn!("迁移首次导入前的设置失败: {error}");
+        }
+    }
     let settings = Rc::new(RefCell::new(AppSettings::load(&settings_path)));
     let settings_path = Rc::new(settings_path);
 
@@ -2510,6 +2520,7 @@ fn main() {
         thumb_cache.clone(),
         share_vm.clone(),
     ));
+    themes::install(&app, settings.clone(), settings_path.clone(), grid.clone());
     SHARE_GRID.with(|slot| *slot.borrow_mut() = Some(grid.clone()));
 
     // D90 共享空间装配：作用域切换所需的壳层共享件 + 侧栏行/门控回填。
@@ -4005,8 +4016,11 @@ fn main() {
             let ui = ui.unwrap();
             let width = ui.get_viewport_width();
             if width > 1.0 {
-                vm.borrow_mut()
-                    .set_layout_params(width, columns_for(width), GAP);
+                vm.borrow_mut().set_layout_params(
+                    width,
+                    columns_for(width),
+                    ui.get_theme_tile_gap(),
+                );
             }
             grid.sync();
         });
@@ -4987,17 +5001,6 @@ fn main() {
                 && relaunch_elevated_now()
             {
                 std::process::exit(0); // 与更新移交（D70）同风格：交棒成功立即退出
-            }
-            // 浅色主题：立即实时重铺自绘层令牌（std-widgets 仍 fluent-dark，v1 边界）。
-            if key == "light_theme" {
-                let tokens = if s.light_theme {
-                    LightThemeProvider.theme()
-                } else {
-                    DarkThemeProvider.theme()
-                };
-                apply_theme(&ui, &tokens);
-                // std-widgets 同步翻 scheme，与自绘层保持同明暗（D37）。
-                apply_color_scheme(&ui, s.light_theme);
             }
             // D38 细粒度诊断日志：实时切换等级（默认 Info 与 Debug/Trace）。
             if key == "verbose_diagnostics" {

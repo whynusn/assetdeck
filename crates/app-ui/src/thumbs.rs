@@ -66,11 +66,6 @@ pub(crate) const FILL_INTERVAL_MS: u64 = 16;
 /// 取值 ≥ 单窗上限，容量驱逐永不与窗口驱逐打架（不会把窗内条目挤掉造成抖动）。
 pub(crate) const THUMB_CACHE_CAPACITY: usize = MAX_VISIBLE;
 
-/// 兜底色块调色板（ARGB）：缩略图尚未派 生 / 派生失败时露出，保证瓦片仍可点。
-const PALETTE: [u32; 8] = [
-    0xFF4C6EF5, 0xFFF76707, 0xFF20C997, 0xFFBE4BDB, 0xFF228BE6, 0xFFFFA8A8, 0xFF82C91E, 0xFFFAB005,
-];
-
 /// 有界缩略图 Image 缓存：窗口显式驱逐 + LRU 容量兜底（D43）。
 ///
 /// 每个条目持有 slint::Image 强引用（解码缓冲的生命周期）。负缓存：缩略图文件
@@ -175,6 +170,12 @@ impl GridCtx {
 
         let built = {
             let mut vm = self.vm.borrow_mut();
+            vm.apply_theme_layout(
+                ui.get_theme_row_height(),
+                ui.get_theme_tile_gap(),
+                ui.get_theme_font_scale(),
+                ui.get_theme_density(),
+            );
             let (first, end) = vm.visible_range(scroll_top, viewport_height);
             vm.ensure_window(first, end.saturating_sub(first));
             let mut cache = self.cache.borrow_mut();
@@ -211,7 +212,13 @@ impl GridCtx {
         let scroll_top = -ui.get_content_y();
 
         let built = {
-            let vm = self.vm.borrow_mut();
+            let mut vm = self.vm.borrow_mut();
+            vm.apply_theme_layout(
+                ui.get_theme_row_height(),
+                ui.get_theme_tile_gap(),
+                ui.get_theme_font_scale(),
+                ui.get_theme_density(),
+            );
             let (first, end) = vm.visible_range(scroll_top, viewport_height);
             let mut cache = self.cache.borrow_mut();
             let share_vm = self.share_vm.borrow();
@@ -368,13 +375,15 @@ fn build_rows(
             let segments_model = {
                 let segments = match (kind, vm.search_snippet(id)) {
                     (AssetKind::Text, Some(marked)) => {
-                        let inner = (r.w - 2.0 * TILE_TEXT_PAD).max(0.0);
-                        let budget =
-                            inner - TILE_TEXT_INLINE_CHROME - ui_viewmodels::name_zone_px(r.w);
+                        let inner = (r.w - 2.0 * TILE_TEXT_PAD * vm.theme_density()).max(0.0);
+                        let budget = inner
+                            - TILE_TEXT_INLINE_CHROME
+                            - ui_viewmodels::name_zone_px(r.w)
+                            - 72.0;
                         ui_viewmodels::fit_search_snippet(
                             marked,
                             budget.max(0.0),
-                            TILE_TEXT_FONT_PX,
+                            TILE_TEXT_FONT_PX * vm.text_font_scale(),
                         )
                     }
                     _ => Vec::new(),
@@ -412,7 +421,6 @@ fn build_rows(
                 h: r.h,
                 asset_id: id.0 as i32,
                 label,
-                color: slint::Color::from_argb_encoded(PALETTE[(id.0 % 8) as usize]),
                 thumb,
                 kind: ui_enums::card_kind(kind),
                 preview: card.preview.into(),

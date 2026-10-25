@@ -80,6 +80,9 @@ pub struct LibraryGridVm {
     container_width: f32,
     columns: u32,
     gap: f32,
+    text_height: f32,
+    font_scale: f32,
+    density_scale: f32,
     cache: LruCache<AssetId, Vec<u8>>,
     provider: Box<dyn ThumbnailProvider>,
     events: VecDeque<VmEvent>,
@@ -105,6 +108,9 @@ impl LibraryGridVm {
             container_width: DEFAULT_CONTAINER_WIDTH,
             columns: DEFAULT_COLUMNS,
             gap: DEFAULT_GAP,
+            text_height: TEXT_TILE_HEIGHT,
+            font_scale: 1.0,
+            density_scale: 1.0,
             cache: LruCache::new(capacity),
             provider: Box::new(NullProvider),
             events: VecDeque::new(),
@@ -145,6 +151,28 @@ impl LibraryGridVm {
         self.columns = columns.max(1);
         self.gap = gap;
         self.rebuild_rects();
+    }
+
+    pub fn apply_theme_layout(&mut self, row: f32, gap: f32, font: f32, density: f32) {
+        if (
+            self.text_height,
+            self.gap,
+            self.font_scale,
+            self.density_scale,
+        ) != (row, gap, font, density)
+        {
+            self.text_height = row;
+            self.gap = gap;
+            self.font_scale = font;
+            self.density_scale = density;
+            self.rebuild_rects();
+        }
+    }
+    pub fn text_font_scale(&self) -> f32 {
+        self.font_scale
+    }
+    pub fn theme_density(&self) -> f32 {
+        self.density_scale
     }
 
     /// 过滤变更：位图求值 → SoA 直排 → 重建 id 序列与 Rect 表；缓存整体失效（序列已变）。
@@ -452,7 +480,7 @@ impl LibraryGridVm {
             self.columns,
             self.gap,
             &items,
-            TEXT_TILE_HEIGHT,
+            self.text_height,
         );
         // 内容总高 = 所有列的最低底边。masonry 下最后一项不一定落在最深的列，
         // 取 `rects.last()` 会漏掉尾部差值，滚动到底时最后一行被裁掉。

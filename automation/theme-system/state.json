@@ -6,11 +6,46 @@
   "branch": "theme-system",
   "baseBranch": "main",
   "createdAt": "2026-10-25T00:30:00+08:00",
-  "updatedAt": "2026-10-25T00:30:00+08:00",
-  "runCount": 0,
-  "lastRuns": [],
+  "updatedAt": "2026-10-25T12:51:52.743819+00:00",
+  "runCount": 1,
+  "lastRuns": [
+    {
+      "runId": "run-20261025-132431",
+      "runNumber": 1,
+      "componentId": "T0-C1",
+      "moduleId": "T0",
+      "status": "done",
+      "summary": "完成主题包解析器与完整可用链路，实际支持范围见 themes/README.md",
+      "gates": "定向 cargo test 首轮通过；Slint check、preview --check、license-audit 通过；最终 Clippy/新回归测试进行中",
+      "shots": "target/theme-system/shots/_states/final-review",
+      "baseCommit": "6682098",
+      "finishedAt": "2026-10-25T12:36:02.144Z"
+    }
+  ],
   "current": null,
-  "shippedThemes": [],
+  "shippedThemes": [
+    {
+      "id": "dark",
+      "name": "深色",
+      "version": "1.0.0",
+      "directory": "themes/builtin-dark",
+      "status": "local-implemented"
+    },
+    {
+      "id": "light",
+      "name": "浅色",
+      "version": "1.0.0",
+      "directory": "themes/builtin-light",
+      "status": "local-implemented"
+    },
+    {
+      "id": "peach-cat",
+      "name": "桃桃猫",
+      "version": "1.0.0",
+      "directory": "themes/peach-cat",
+      "status": "local-implemented"
+    }
+  ],
   "modules": [
     {
       "id": "T0",
@@ -22,7 +57,7 @@
           "name": "主题包 schema 与解析器",
           "priority": 1,
           "dependsOn": [],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/ui-viewmodels/src/theme.rs",
             "automation/theme-system/theme-spec.md"
@@ -34,9 +69,9 @@
           ],
           "states": [],
           "focus": "按 theme-spec §3 定义 ThemePack 结构（meta/palette/geometry/typography/icons/motion/decoration/sound）；serde 解析 + 未知键报错；色值解析支持 #rgb/#rrggbb/#rrggbbaa；缺键必须报错而非继承内置值。放在 ui-viewmodels（app-ui 依赖白名单不允许新增 crate）。不改任何现有 UI 行为。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "严格 schema/单位/色值/未知键与 tokens() 已实现并测试。"
         },
         {
           "id": "T0-C2",
@@ -45,7 +80,7 @@
           "dependsOn": [
             "T0-C1"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/ui-viewmodels/src/theme.rs"
           ],
@@ -60,9 +95,9 @@
             "theme-light"
           ],
           "focus": "按 theme-spec §6 实现 validate()：键集合完整性、色值合法性、对比度（复用 theme.rs 已有的 relative_luminance/contrast/composite_over 口径）、几何越界、装饰体积、base 与亮度一致性。错误必须定位到具体键。校验失败整包拒绝。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "有界几何、完整色板、对比度、base 明暗一致性、路径及 PNG 上限校验；不支持选项明确报错。"
         },
         {
           "id": "T0-C3",
@@ -71,7 +106,7 @@
           "dependsOn": [
             "T0-C2"
           ],
-          "status": "pending",
+          "status": "in_progress",
           "source": [
             "crates/ui-viewmodels/src/theme.rs",
             "crates/app-ui/src/main.rs"
@@ -87,9 +122,9 @@
             "theme-light"
           ],
           "focus": "把内置 dark/light 表达为 builtin 主题包（编译期内嵌），并证明视觉输出与改造前逐字节一致（preview 截图 hash 对照）。这是「主题系统没改变既有产品」的唯一证据，也是后续所有主题包的基准。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "暗/亮内嵌 TOML 与原 Provider token 等价性单测通过。本次用户要求重设计素材标识，未声称改造前后全图 hash 相同；已有三主题 21 张新截图回归。"
         },
         {
           "id": "T0-C4",
@@ -98,7 +133,7 @@
           "dependsOn": [
             "T0-C2"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/ui-viewmodels/src/theme.rs",
             "crates/app-ui/src/main.rs",
@@ -113,9 +148,9 @@
             "settings-default"
           ],
           "focus": "从 themes/ 目录扫描主题包（与 settings.toml 同目录约定：有库根用库根，否则 exe 目录）；解析失败的包跳过并在日志留原因，绝不阻断启动；内存：只存解析后的令牌结构，不预载装饰图。不引入新依赖。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "个人/随附/开发目录加载、确定排序、32 包上限、错误反馈与内置回退已实现。"
         },
         {
           "id": "T0-C5",
@@ -124,7 +159,7 @@
           "dependsOn": [
             "T0-C4"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/ui-viewmodels/src/settings.rs",
             "crates/app-ui/ui/appwindow.slint",
@@ -139,9 +174,9 @@
             "settings-default"
           ],
           "focus": "SettingKind 从单一 Toggle 扩展出 Select（或等效）；外观分区加入主题选择；现有 light_theme 开关与主题选择的关系必须明确定义（不产生两套互相打架的入口）；切换即时生效 + 持久化到 settings.toml。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "统一主题选择入口，兼容 light_theme 旧设置；双向选择绑定、last-applied 回退、持久化/重启/重载已覆盖运行时测试。"
         },
         {
           "id": "T0-C6",
@@ -150,7 +185,7 @@
           "dependsOn": [
             "T0-C1"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/theme.slint",
             "crates/ui-viewmodels/src/theme.rs",
@@ -168,9 +203,9 @@
             "settings-default"
           ],
           "focus": "把 radius/radius-lg/font-size/font-family/density 从编译期常量变成可注入令牌：theme.slint 的几何令牌转 in-out，壳层写 Window.default-font-family/default-font-size（已实测可用）。注意 ui_hygiene 的 spacing/radius/font 字面量计数不得升高——令牌定义在 theme.slint 内且名字不变。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "圆角、部分尺寸、字体/字号/字距/密度、图标描边线帽和动画运行时注入；UI hygiene 保持基线。"
         },
         {
           "id": "T0-C7",
@@ -180,7 +215,7 @@
             "T0-C4",
             "T0-C6"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/ui/appwindow.slint",
             "crates/app-ui/src/main.rs",
@@ -197,9 +232,9 @@
             "shell-grid"
           ],
           "focus": "窗口底纹理/水印/任意贴纸的渲染：装饰只进无正文区域或带色罩；图像懒加载（slint::Image::load_from_path，已有用法）+ 尺寸上限 + 随主题切换释放旧图；内存预算不得回归（装饰常驻 ≤ 2 张）。正文可读性用对比度实测复核。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "背景固定素材视口，角饰/水印/贴纸仅在侧栏专用装饰带；最多两张 1024px PNG，准备成功后原子替换 UI。窗口任意覆盖式贴纸不在当前可加载范围，见 README。"
         },
         {
           "id": "T0-C8",
@@ -209,7 +244,7 @@
             "T0-C2",
             "T0-C4"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "crates/app-ui/tests/ui_hygiene.rs",
             "automation/theme-system/scripts/license-audit.mjs",
@@ -221,9 +256,9 @@
           ],
           "states": [],
           "focus": "机械护栏：主题系统不得成为硬编码新入口（ui_hygiene 计数不升）；preview --check 校验主题声明与夹具引用；license-audit 校验 THIRD_PARTY/许可白名单/体积/IP 关键词。把这三者固化成每轮必跑门禁。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "preview --check、素材许可门禁及 UI hygiene 已运行，并将前两项纳入 CI；未扩大卫生度基线。"
         }
       ]
     },
@@ -239,7 +274,7 @@
           "dependsOn": [
             "T0-C4"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "themes/",
             "automation/theme-system/theme-spec.md"
@@ -250,9 +285,9 @@
           ],
           "states": [],
           "focus": "产出一个可复制的主题包骨架（含注释齐全的 theme.toml 模板 + THIRD_PARTY.md 模板 + README 说明如何取素材），让新主题包的制作成本降到「填表 + 放图」。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "已提供可直接通过运行时校验的模板、THIRD_PARTY 模板和安装/制作文档。"
         },
         {
           "id": "T1-C2",
@@ -262,7 +297,7 @@
             "T1-C1",
             "T0-C7"
           ],
-          "status": "pending",
+          "status": "done",
           "source": [
             "themes/",
             "crates/ui-viewmodels/src/theme.rs"
@@ -278,9 +313,9 @@
             "settings-default"
           ],
           "focus": "按用户指定的「粉色可爱猫咪」方向做原创形象主题：低饱和粉白、圆角、角饰贴纸。素材只用 CC0/OFL 等开源资源或自制，命名与形象不得触碰商业 IP（license-audit 会拦）。差异幅度要比内置主题可感知（色板 + 几何 + 装饰 + 字体至少 4 维同时变）。",
-          "lastRun": null,
+          "lastRun": "manual-theme-implementation-20261025",
           "auditedAtCommit": null,
-          "notes": ""
+          "notes": "完成可爱主题桃桃猫；色板/几何/字体/图标/动效/装饰成套配置。猫咪图片为在线获取的 Microsoft Fluent Emoji MIT 素材，并非自绘角色；来源与许可随包保留。"
         },
         {
           "id": "T1-C3",
@@ -384,5 +419,34 @@
       ]
     }
   ],
-  "findings": []
+  "findings": [
+    {
+      "id": "F-001",
+      "componentId": "T0-C1",
+      "severity": "P2",
+      "rootCause": "token",
+      "title": "ThemeTokens.id 是 &'static str，外置主题包 id（运行时 String）无法表达",
+      "detail": "ThemePack.meta.id 解析为 String，但 ThemeTokens.id 原为 &'static str，外置包无法构造令牌；后续注入与日志将退化成「dark/light」两个固定名，回退判定与诊断丢失包身份。",
+      "evidence": "crates/ui-viewmodels/src/theme.rs:22（id: String）；ThemeMeta.id 同为 String",
+      "status": "closed",
+      "createdRun": 1,
+      "closedRun": 1,
+      "fix": "ThemeTokens.id 已改为运行时 String；ThemePack::tokens 保留包身份。",
+      "guard": "theme parser/catalog tests"
+    }
+  ],
+  "implementationValidation": {
+    "date": "2026-10-25",
+    "tests": {
+      "command": "cargo test -p ui-viewmodels -p app-ui --quiet",
+      "passed": 287,
+      "failed": 0
+    },
+    "clippy": "cargo clippy -p ui-viewmodels -p app-ui --all-targets -- -D warnings: passed",
+    "slintCheck": "passed",
+    "previewCheck": "passed",
+    "licenseAudit": "passed",
+    "screenshots": 21,
+    "releasePackageBuilt": false
+  }
 }

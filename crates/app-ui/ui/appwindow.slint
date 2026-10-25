@@ -6,9 +6,9 @@ export { NoticeRow } from "notifications.slint";
 // std-widgets：样式钉在 fluent（常量表层明暗双份），运行时经 Palette.color-scheme
 // 与自绘层同步翻转（D37），两层观感一体。
 import { Button, CheckBox, LineEdit, ProgressIndicator, ScrollView, Palette, ComboBox } from "std-widgets.slint";
-import { Theme, Typography, Spacing, Metrics, Motion, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, SectionLabel, SettingRow, MenuItem, DialogInput } from "theme.slint";
+import { Theme, Typography, Spacing, Metrics, Motion, AssetBadge, TitleLabel, Icon, Glyph, IconButton, DangerButton, FlatButton, PrimaryButton, SectionLabel, SettingRow, MenuItem, DialogInput } from "theme.slint";
 // 把导入的全局再导出一次：Rust 侧经 `ui.global::<Theme>()` 注入运行时主题令牌。
-export { Theme } from "theme.slint";
+export { Theme, Typography, Spacing, Metrics, Motion } from "theme.slint";
 // 显式再导出内置 Palette 全局：std-widgets（fluent 样式）的全部内部颜色都是从
 // `Palette.color-scheme` 实时推导的活绑定，Rust 侧拿到句柄后写 color-scheme
 // 即可在运行时整体翻转明暗——这是「浅色主题切不全」问题的正解（D37）。
@@ -68,8 +68,7 @@ export struct TileData {
     h: length,
     asset-id: int,
     label: string,
-    color: color,
-    // 浏览用缩略图（离线派生的 <=320px PNG）。缺图时为空 image，露出 color 兜底。
+    // 浏览用缩略图（离线派生的 <=320px PNG）。缺图时露出主题表面色。
     thumb: image,
     // D53 淡入标志：true = 有图（缓存命中/新装出），false = 缺图占位。
     // false→true 翻转（fill 补齐）播 150ms 淡入；挂载即 true 不重播（滚动/切页）。
@@ -82,12 +81,12 @@ export struct TileData {
     search-segments: [TextSegment],
     // D47 选中标记：勾选角标 + accent 描边由它驱动。
     selected: bool,
-    // D80 共享角标（UiEnums.share-badge-*）：右上类型徽标下方一枚状态点。
+    // D80 共享角标（UiEnums.share-badge-*）：右侧状态列中的传输图标。
     share-badge: int,
     // D80-M1「共享中」角标：素材在任一共享域中（可获得性广播，不涉及传输）。
     shared: bool,
-    // D91 一致性状态：正本被外部删除（missing，红点）或被外部修改待重索引
-    // （stale，黄点）。宿主从 reindex 子进程的 MARK/FIXED 行现查线程局部集
+    // D91 一致性状态：正本被外部删除（missing）或被外部修改待重索引
+    // （stale）。宿主从 reindex 子进程的 MARK/FIXED 行现查线程局部集
     // 合（与 shared 同一现查纪律），重索引完成后消失。
     missing: bool,
     stale: bool,
@@ -182,7 +181,24 @@ export struct ShareFaceOfferData {
     size: string,
 }
 
+export struct ThemeArt { picture: image, x: float, y: float, scale: float, alpha: float }
 export component AppWindow inherits Window {
+    in property <[string]> theme-names;
+    in-out property <int> theme-index;
+    in property <string> theme-description;
+    in property <string> theme-error;
+    in property <[ThemeArt]> theme-art;
+    in property <image> theme-background;
+    in property <color> theme-background-tint;
+    in property <float> theme-font-scale: 1;
+    in property <float> theme-density: 1;
+    in property <float> theme-row-height: 28;
+    in property <float> theme-tile-gap: 12;
+    default-font-family: Typography.family;
+    default-font-size: Typography.body;
+    callback theme-selected(int);
+    callback themes-reload();
+
     title: "素材管理器";
     // 窗口图标（标题栏/任务栏/Alt-Tab）：路径相对本文件指向仓库根 assets/。
     // Explorer/快捷方式用的 exe 资源图标不在这里，由 build.rs 经 winresource 另嵌。
@@ -684,6 +700,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         color: Theme.text-3;
                         font-size: Typography.body;
+                        letter-spacing: Typography.tracking;
                     }
 
                     Text {
@@ -691,6 +708,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         color: Theme.text-2;
                         font-size: Typography.body;
+                        letter-spacing: Typography.tracking;
                         overflow: elide;
                         max-width: 240px;
                     }
@@ -707,12 +725,12 @@ export component AppWindow inherits Window {
                         max-width: 320px;
                         horizontal-stretch: 1;
                         border-radius: Theme.radius;
-                        border-width: 1px;
+                        border-width: Theme.border-width;
                         border-color: root.scope-menu-open || search-input.has-focus ? Theme.accent
                             : capsule-hover.has-hover ? Theme.line-strong : Theme.line;
                         background: Theme.bg-input;
 
-                        animate border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
+                        animate border-color { duration: Motion.enabled && Motion.theme-enabled ? Motion.state : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                         // 垫底探针：悬停提亮描边；点空白处把焦点交给输入区。
                         // 声明在最前（最底层），不抢范围段/输入区的命中。
@@ -787,6 +805,7 @@ export component AppWindow inherits Window {
                             width: parent.width - self.x - Spacing.md;
                             height: 18px;
                             font-size: Typography.body;
+                            letter-spacing: Typography.tracking;
                             color: Theme.text;
                             selection-background-color: Theme.accent-soft;
                             selection-foreground-color: Theme.text;
@@ -810,6 +829,7 @@ export component AppWindow inherits Window {
                                 : "搜索名称、分类或标签";
                             color: Theme.text-3;
                             font-size: Typography.body;
+                            letter-spacing: Typography.tracking;
                             vertical-alignment: center;
                             overflow: elide;
                         }
@@ -838,13 +858,13 @@ export component AppWindow inherits Window {
                             width: parent.width;
                             height: parent.height;
                             border-radius: Theme.radius;
-                            border-width: 1px;
+                            border-width: Theme.border-width;
                             border-color: root.select-mode-active ? Theme.accent
                                 : select-touch.has-hover ? Theme.line-strong : Theme.line;
                             background: root.select-mode-active ? Theme.accent-soft
                                 : select-touch.pressed ? Theme.bg-raised-press
                                 : select-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
-                            animate background, border-color { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                            animate background, border-color { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                             HorizontalLayout {
                                 padding-left: Spacing.md;
@@ -890,7 +910,7 @@ export component AppWindow inherits Window {
                         height: Metrics.control;
                         width: Math.max(170px, Math.min(300px, target-label.preferred-width + 104px));
                         border-radius: Theme.radius;
-                        border-width: 1px;
+                        border-width: Theme.border-width;
                         border-color: root.target-mode == UiEnums.target-mode-choose ? Theme.accent
                             : chip-touch.has-hover ? Theme.line-strong
                             : Theme.line;
@@ -898,7 +918,7 @@ export component AppWindow inherits Window {
                             : chip-touch.has-hover ? Theme.bg-raised-hover
                             : Theme.bg-raised;
 
-                        animate background, border-color { duration: Motion.enabled ? Motion.state : 0ms; easing: ease-out; }
+                        animate background, border-color { duration: Motion.enabled && Motion.theme-enabled ? Motion.state : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                         HorizontalLayout {
                             padding-left: Spacing.lg;
@@ -929,6 +949,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 color: Theme.text;
                                 font-size: Typography.body;
+                                letter-spacing: Typography.tracking;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -1037,7 +1058,7 @@ export component AppWindow inherits Window {
                             height: 8px;
                             border-radius: self.width / 2;
                             background: Theme.danger;
-                            border-width: 1px;
+                            border-width: Theme.border-width;
                             border-color: Theme.bg-bar;
                         }
                     }
@@ -1118,6 +1139,18 @@ export component AppWindow inherits Window {
                     background: Theme.bg-panel;
 
                     VerticalLayout {
+                if root.theme-art.length > 0: Rectangle {
+                    height: 76px;
+                    horizontal-stretch: 1;
+                    background: Theme.bg-panel;
+                    clip: true;
+                    for art in root.theme-art: Image {
+                        width: 64px * art.scale; height: 64px * art.scale;
+                        x: Math.max(0px, (parent.width - self.width) * art.x);
+                        y: Math.max(0px, (parent.height - self.height) * art.y);
+                        source: art.picture; image-fit: contain; opacity: art.alpha;
+                    }
+                }
                         // D90 作用域头：主库视图 = 「分类」标签；空间视图 = 空间
                         // 身份行（点击返回我的素材，当前空间一眼可辨）。
                         if root.in-space-view: Rectangle {
@@ -1143,6 +1176,7 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     color: Theme.text;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     overflow: elide;
                                 }
                             }
@@ -1175,7 +1209,7 @@ export component AppWindow inherits Window {
                                     background: (i - 1) == root.selected-category ? Theme.accent-soft
                                         : (cat-touch.has-hover ? Theme.bg-raised : transparent);
 
-                                    animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                                    animate background { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                                     // 选中态左侧强调条。
                                     Rectangle {
@@ -1196,6 +1230,7 @@ export component AppWindow inherits Window {
                                             horizontal-stretch: 1;
                                             color: (i - 1) == root.selected-category ? Theme.text : Theme.text-2;
                                             font-size: Typography.body;
+                                            letter-spacing: Typography.tracking;
                                             overflow: elide;
                                         }
 
@@ -1262,7 +1297,7 @@ export component AppWindow inherits Window {
                             height: 36px;
                             background: root.selected-category == -3 ? Theme.accent-soft
                                 : (trash-touch.has-hover ? Theme.bg-raised : transparent);
-                            animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                            animate background { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                             Rectangle {
                                 x: 0;
@@ -1290,6 +1325,7 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     color: root.selected-category == -3 ? Theme.text : Theme.text-2;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                 }
 
                                 Text {
@@ -1326,7 +1362,7 @@ export component AppWindow inherits Window {
                             height: 36px;
                             background: root.in-space-view ? Theme.accent-soft
                                 : (team-touch.has-hover ? Theme.bg-raised : transparent);
-                            animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                            animate background { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                             Rectangle {
                                 x: 0;
@@ -1354,6 +1390,7 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     color: root.in-space-view ? Theme.text : Theme.text-2;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     overflow: elide;
                                 }
 
@@ -1390,6 +1427,7 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                     color: Theme.text-3;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                 }
                             }
 
@@ -1420,11 +1458,11 @@ export component AppWindow inherits Window {
                             import-anchor := Rectangle {
                                 height: Metrics.control;
 
-                                Button {
+                                PrimaryButton {
                                     width: 100%;
                                     height: 100%;
                                     text: "导入素材…";
-                                    primary: true;
+
                                     clicked => {
                                         root.import-menu-toggled();
                                     }
@@ -1457,7 +1495,7 @@ export component AppWindow inherits Window {
                             : divider-touch.has-hover ? Theme.line-strong
                             : Theme.line;
 
-                        animate width, background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                        animate width, background { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
                     }
 
                     divider-touch := TouchArea {
@@ -1498,6 +1536,8 @@ export component AppWindow inherits Window {
                         width: flick.viewport-width;
                         height: flick.viewport-height;
 
+                        Image { y: -flick.viewport-y; width: flick.width; height: flick.height; source: root.theme-background; image-fit: cover; }
+                        Rectangle { y: -flick.viewport-y; width: flick.width; height: flick.height; background: root.theme-background-tint; }
                         // 按类别切卡片表现（ImageCard / TextCard / VideoCard 合体）：
                         // - image/video：缩略图铺满（video 额外画右上角徽标）；
                         // - text：单行正文卡（D88），统一高度由 VM 布局层给定；
@@ -1509,14 +1549,12 @@ export component AppWindow inherits Window {
                             height: tile.h;
                             // 文本卡走主题中性底（随机色块自 D88 退场）；其余类别
                             // 保留 palette 兜底色（缺图时仍可辨识可点）。
-                            background: tile.kind == UiEnums.card-kind-text
-                                ? Theme.bg-raised
-                                : tile.color;
+                            background: Theme.bg-raised;
                             // 文本行降 4px 圆角档：28px 高的行配 8px 圆角显药丸感
                             // （D88 复盘二轮）；图片/视频大卡维持 8px。
                             border-radius: tile.kind == UiEnums.card-kind-text
                                 ? Theme.radius
-                                : Theme.radius-lg;
+                                : Theme.tile-radius;
                             clip: true;
 
                             // 图像/视频：缩略图铺满（视频抽帧也走同一产物）。
@@ -1529,8 +1567,8 @@ export component AppWindow inherits Window {
                                 // 挂载即有图（缓存命中）时初值就是 1，不重播。
                                 opacity: tile.thumb-fade ? 1.0 : 0.0;
                                 animate opacity {
-                                    duration: Motion.enabled ? Motion.enter : 0ms;
-                                    easing: ease-out;
+                                    duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms;
+                                    easing: Motion.linear ? linear : ease-out;
                                 }
                             }
 
@@ -1573,8 +1611,8 @@ export component AppWindow inherits Window {
                                 Icon {
                                     x: Spacing.md;
                                     y: (parent.height - self.height) / 2;
-                                    commands: Glyph.file-text;
-                                    tint: Theme.card-icon;
+                                    commands: tile.selected ? Glyph.check : Glyph.file-text;
+                                    tint: tile.selected ? Theme.accent : Theme.card-icon;
                                     width: 13px;
                                     height: 13px;
                                 }
@@ -1586,6 +1624,7 @@ export component AppWindow inherits Window {
                                     text: tile.label;
                                     color: Theme.text-3;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     font-weight: Typography.medium;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -1602,18 +1641,20 @@ export component AppWindow inherits Window {
 
                                 if tile.search-segments.length == 0: Text {
                                     x: parent.content-x;
-                                    width: parent.width - self.x - Spacing.md;
+                                    width: Math.max(0px, parent.width - self.x - Spacing.md - Theme.status-width);
                                     height: 100%;
                                     text: tile.preview;
                                     color: Theme.text-2;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
 
                                 if tile.search-segments.length > 0: Rectangle {
+                                    clip: true;
                                     x: parent.content-x;
-                                    width: parent.width - self.x - Spacing.md;
+                                    width: Math.max(0px, parent.width - self.x - Spacing.md - Theme.status-width);
                                     height: 100%;
 
                                     HorizontalLayout {
@@ -1622,7 +1663,7 @@ export component AppWindow inherits Window {
 
                                         for seg in tile.search-segments: Rectangle {
                                             preferred-width: seg-text.preferred-width;
-                                            background: seg.hit ? Theme.accent-soft : transparent;
+                                            background: seg.hit ? Theme.selection-bg : transparent;
                                             border-radius: Spacing.xxs;
 
                                             seg-text := Text {
@@ -1631,6 +1672,7 @@ export component AppWindow inherits Window {
                                                 text: seg.text;
                                                 color: Theme.text-2;
                                                 font-size: Typography.body;
+                                                letter-spacing: Typography.tracking;
                                                 overflow: elide;
                                                 vertical-alignment: center;
                                             }
@@ -1638,20 +1680,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                // D91 一致性角标（文本行卡）：右缘竖居中小点。
-                                // 内容宽的 elide 兜底留有 Spacing.md 余量，点坐进
-                                // 右缘不遮命中文本；缺失红 / 已修改黄，与图片瓦片
-                                // 同一语义对。
-                                if tile.missing || tile.stale: Rectangle {
-                                    x: parent.width - self.width - Spacing.xs;
-                                    y: (parent.height - self.height) / 2;
-                                    width: 6px;
-                                    height: 6px;
-                                    border-radius: self.width / 2;
-                                    border-width: 1px;
-                                    border-color: Theme.badge-ring;
-                                    background: tile.missing ? Theme.danger : Theme.warn;
-                                }
+
                             }
 
                             // 其他（归档/未知）：中央图标占位，仍可点选上框（Files 兜底）。
@@ -1676,12 +1705,14 @@ export component AppWindow inherits Window {
                             // 且胶囊宽度没钉死会撑满整卡（本条即那次回归的修复）。
                             // 图形直接按 kind 从 Glyph 表取（字符串名传不进 Path，
                             // kind 与图形本就一一对应，无须经 Rust 再转一道）。
-                            if tile.kind != UiEnums.card-kind-text: Rectangle {
+                            if tile.kind != UiEnums.card-kind-text && !tile.selected: Rectangle {
                                 width: 22px;
                                 height: 22px;
-                                x: parent.width - self.width - 6px;
+                                x: Spacing.sm;
                                 y: 6px;
                                 border-radius: Theme.radius;
+                                border-width: Theme.border-width;
+                                border-color: Theme.badge-ring;
                                 background: Theme.badge-bg;
 
                                 Icon {
@@ -1713,6 +1744,7 @@ export component AppWindow inherits Window {
                                     color: Theme.label-bar-text;
                                     // 文件名是素材主标识，走 body 档；caption 只留给元数据。
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
@@ -1724,7 +1756,7 @@ export component AppWindow inherits Window {
                                 width: 100%;
                                 height: 100%;
                                 background: transparent;
-                                border-radius: Theme.radius-lg;
+                                border-radius: tile.kind == UiEnums.card-kind-text ? Theme.radius : Theme.tile-radius;
                                 border-width: tile.selected || tile.asset-id == root.active-asset-id ? 2px
                                     : tile-touch.has-hover ? 1px
                                     : 0px;
@@ -1734,7 +1766,7 @@ export component AppWindow inherits Window {
                             }
 
                             // 左上勾选角标：选中即现（多选模式与常态 Ctrl 选共用）。
-                            if tile.selected: Rectangle {
+                            if tile.selected && tile.kind != UiEnums.card-kind-text: Rectangle {
                                 x: 6px;
                                 y: 6px;
                                 width: 20px;
@@ -1752,57 +1784,27 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // D80 共享角标：右上类型徽标正下方一枚状态点（在途=accent
-                            // /已送达=绿/失败=红），白描边保证在缩略图上可辨。
-                            if tile.share-badge != UiEnums.share-badge-none: Rectangle {
-                                x: parent.width - self.width - 6px;
-                                y: 32px;
-                                width: 10px;
-                                height: 10px;
-                                border-radius: self.width / 2;
-                                border-width: 2px;
-                                border-color: Theme.badge-ring;
-                                background: tile.share-badge == UiEnums.share-badge-busy ? Theme.accent
-                                    : tile.share-badge == UiEnums.share-badge-done ? Theme.ok
-                                    : Theme.danger;
-                            }
-
-                            // D92「共享中」徽标：share 图标胶囊（shared-soft 底 +
-                            // 1px 共享紫描边），与右上类型徽标同一形态语系——
-                            // 替代旧 8px 紫点（真机反馈：光点丑、与主题不符）。
-                            // 语义 = D80-M1 控制面标记 ∪ D92 空间成员投影。
-                            if tile.shared: Rectangle {
-                                x: parent.width - self.width - 6px;
-                                y: 46px;
-                                width: 20px;
-                                height: 20px;
-                                border-radius: Theme.radius;
-                                background: Theme.shared-soft;
-                                border-width: 1px;
-                                border-color: Theme.shared;
-
-                                Icon {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    commands: Glyph.share;
-                                    tint: Theme.shared;
-                                    width: 12px;
-                                    height: 12px;
+                            status-strip := HorizontalLayout {
+                                x: parent.width - self.width - Spacing.sm;
+                                y: tile.kind == UiEnums.card-kind-text ? (parent.height - self.height) / 2 : Spacing.sm;
+                                width: (tile.missing || tile.stale ? Theme.badge-size + Theme.badge-gap : 0px)
+                                    + (tile.shared ? Theme.badge-size + Theme.badge-gap : 0px)
+                                    + (tile.share-badge != UiEnums.share-badge-none ? Theme.badge-size + Theme.badge-gap : 0px);
+                                height: Theme.badge-size;
+                                spacing: Theme.badge-gap;
+                                if tile.missing || tile.stale: AssetBadge {
+                                    description: tile.missing ? "素材文件缺失，请检查源文件或重新导入" : "素材文件已变化，等待重新同步";
+                                    glyph: tile.missing ? Glyph.alert : Glyph.info;
+                                    ink: tile.missing ? Theme.danger : Theme.warn;
+                                    surface: tile.missing ? Theme.danger-soft : Theme.warn-soft;
                                 }
-                            }
-
-                            // D91 一致性角标：正本缺失（红）/被外部修改待重索引（黄）。
-                            // 缺失优先——文件都不在了，「已修改」无从谈起。
-                            //（共享徽标改 20px 胶囊后从 y60 顺延到 y70。）
-                            if tile.missing || tile.stale: Rectangle {
-                                x: parent.width - self.width - 6px;
-                                y: 70px;
-                                width: 8px;
-                                height: 8px;
-                                border-radius: self.width / 2;
-                                border-width: 2px;
-                                border-color: Theme.badge-ring;
-                                background: tile.missing ? Theme.danger : Theme.warn;
+                                if tile.shared: AssetBadge { description: "已共享的素材"; glyph: Glyph.share; ink: Theme.shared; surface: Theme.shared-soft; }
+                                if tile.share-badge != UiEnums.share-badge-none: AssetBadge {
+                                    description: tile.share-badge == UiEnums.share-badge-failed ? "共享传输失败" : tile.share-badge == UiEnums.share-badge-done ? "共享传输完成" : "共享传输中";
+                                    glyph: tile.share-badge == UiEnums.share-badge-failed ? Glyph.ban : tile.share-badge == UiEnums.share-badge-done ? Glyph.check : Glyph.export;
+                                    ink: tile.share-badge == UiEnums.share-badge-failed ? Theme.danger : tile.share-badge == UiEnums.share-badge-done ? Theme.ok : Theme.accent;
+                                    surface: tile.share-badge == UiEnums.share-badge-failed ? Theme.danger-soft : tile.share-badge == UiEnums.share-badge-done ? Theme.ok-soft : Theme.accent-soft;
+                                }
                             }
 
                             tile-touch := TouchArea {
@@ -1931,14 +1933,14 @@ export component AppWindow inherits Window {
             width: 300px;
             height: choices-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             choices-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -1957,6 +1959,7 @@ export component AppWindow inherits Window {
                             text: "没有检测到运行中的聊天窗口";
                             color: Theme.text-2;
                             font-size: Typography.body;
+                            letter-spacing: Typography.tracking;
                         }
 
                         Text {
@@ -1970,14 +1973,14 @@ export component AppWindow inherits Window {
                 for choice in root.target-choices: Rectangle {
                     height: 48px;
                     border-radius: Theme.radius;
-                    border-width: 1px;
+                    border-width: Theme.border-width;
                     border-color: choice-touch.has-hover && choice.available ? Theme.accent : Theme.line;
                     background: choice-touch.pressed ? Theme.bg-raised-press
                         : choice-touch.has-hover ? Theme.bg-raised-hover
                         : Theme.bg-raised;
                     opacity: choice.available ? 1.0 : 0.6;
 
-                    animate background, border-color { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
+                    animate background, border-color { duration: Motion.enabled && Motion.theme-enabled ? Motion.fast : 0ms; easing: Motion.linear ? linear : ease-out; }
 
                     VerticalLayout {
                         padding-left: 10px;
@@ -2005,6 +2008,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 color: Theme.text;
                                 font-size: Typography.body;
+                                letter-spacing: Typography.tracking;
                                 overflow: elide;
                             }
                         }
@@ -2045,7 +2049,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: target-rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2082,9 +2086,9 @@ export component AppWindow inherits Window {
                             root.target-rename-cancelled();
                         }
                     }
-                    Button {
+                    PrimaryButton {
                         text: "保存";
-                        primary: true;
+
                         clicked => {
                             root.target-rename-confirmed(target-rename-input.text);
                         }
@@ -2106,14 +2110,14 @@ export component AppWindow inherits Window {
             width: 244px;
             height: import-menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             import-menu-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -2164,14 +2168,14 @@ export component AppWindow inherits Window {
             width: 168px;
             height: scope-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             scope-layout := VerticalLayout {
                 padding: Spacing.menu-pad;
@@ -2220,14 +2224,14 @@ export component AppWindow inherits Window {
             height: Math.min(settings-scroll-col.preferred-height + 24px,
                 root.height - panel-top - 12px);
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             VerticalLayout {
                 padding: Spacing.panel-pad;
@@ -2262,6 +2266,15 @@ export component AppWindow inherits Window {
                         // 包裹层必须用 VerticalLayout：裸 Rectangle 不向布局上报
                         // 子内容的首选高度，整列 preferred 塌成 0、面板压缩叠行
                         // （渲染实测）；布局元素才传播子项 layout info。
+                        SectionLabel { text: "主题"; }
+                        theme-picker := ComboBox {
+                            model: root.theme-names;
+                            current-index <=> root.theme-index;
+                            selected(value) => { root.theme-selected(self.current-index); }
+                        }
+                        Text { text: root.theme-description; color: Theme.text-2; font-size: Typography.label; wrap: word-wrap; }
+                        FlatButton { text: "重新读取主题目录"; glyph: Glyph.folder; clicked => { root.themes-reload(); } }
+                        if root.theme-error != "": Text { text: root.theme-error; color: Theme.danger; font-size: Typography.label; wrap: word-wrap; }
                         for setting in root.settings: VerticalLayout {
                             if setting.header: SectionLabel {
                                 height: 16px;
@@ -2462,7 +2475,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: tuning-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2544,9 +2557,9 @@ export component AppWindow inherits Window {
                             root.tuning-cancelled();
                         }
                     }
-                    Button {
+                    PrimaryButton {
                         text: "保存";
-                        primary: true;
+
                         clicked => {
                             root.tuning-save(tuning-x-input.text, tuning-y-input.text);
                         }
@@ -2563,7 +2576,7 @@ export component AppWindow inherits Window {
             width: 220px;
             height: menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2670,7 +2683,7 @@ export component AppWindow inherits Window {
             width: 220px;
             height: cat-menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2730,7 +2743,7 @@ export component AppWindow inherits Window {
             width: 280px;
             height: move-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2765,7 +2778,7 @@ export component AppWindow inherits Window {
                             if i > 0: Rectangle {
                                 height: Metrics.control;
                                 border-radius: Theme.radius;
-                                border-width: 1px;
+                                border-width: Theme.border-width;
                                 border-color: move-cat-touch.has-hover ? Theme.accent : Theme.line;
                                 background: move-cat-touch.has-hover ? Theme.bg-raised-hover : Theme.bg-raised;
 
@@ -2774,6 +2787,7 @@ export component AppWindow inherits Window {
                                     text: name;
                                     color: Theme.text-2;
                                     font-size: Typography.body;
+                                    letter-spacing: Typography.tracking;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
@@ -2802,9 +2816,9 @@ export component AppWindow inherits Window {
                         placeholder-text: "输入新分类名即新建";
                         horizontal-stretch: 1;
                     }
-                    Button {
+                    PrimaryButton {
                         text: "新建并移入";
-                        primary: true;
+
                         clicked => {
                             root.move-to-category(move-name.text);
                         }
@@ -2822,7 +2836,7 @@ export component AppWindow inherits Window {
             width: Math.min(620px, root.width - 32px);
             height: Metrics.bar;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2841,6 +2855,7 @@ export component AppWindow inherits Window {
                     text: root.selection-text;
                     color: Theme.text;
                     font-size: Typography.body;
+                    letter-spacing: Typography.tracking;
                     font-weight: Typography.semibold;
                     vertical-alignment: center;
                     // 兜底：内容超宽时省略而非把按钮挤出条外（D48 实测教训）。
@@ -2920,7 +2935,7 @@ export component AppWindow inherits Window {
             width: Math.min(summary-text.preferred-width + Spacing.huge, text-max + Spacing.huge);
             height: Metrics.row-compact;
             border-radius: self.height / 2;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 12px;
@@ -2945,7 +2960,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: share-picker-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -2987,6 +3002,7 @@ export component AppWindow inherits Window {
                                 text: device.name;
                                 color: Theme.text;
                                 font-size: Typography.body;
+                                letter-spacing: Typography.tracking;
                                 overflow: elide;
                             }
                             Text {
@@ -3021,9 +3037,9 @@ export component AppWindow inherits Window {
                         text: "取消";
                         clicked => { root.share-devices-closed(); }
                     }
-                    Button {
+                    PrimaryButton {
                         height: Metrics.control;
-                        primary: true;
+
                         enabled: root.share-selected-device >= 0;
                         text: "共享";
                         clicked => { root.share-confirm-requested(); }
@@ -3039,7 +3055,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: share-offer-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -3057,6 +3073,7 @@ export component AppWindow inherits Window {
                     text: root.share-offer-text;
                     color: Theme.text-2;
                     font-size: Typography.body;
+                    letter-spacing: Typography.tracking;
                     wrap: word-wrap;
                 }
                 Text {
@@ -3075,9 +3092,9 @@ export component AppWindow inherits Window {
                         text: "拒收";
                         clicked => { root.share-offer-reject(); }
                     }
-                    Button {
+                    PrimaryButton {
                         height: Metrics.control;
-                        primary: true;
+
                         text: "接收";
                         clicked => { root.share-offer-accept(); }
                     }
@@ -3094,7 +3111,7 @@ export component AppWindow inherits Window {
             width: 420px;
             height: space-ctl-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -3140,6 +3157,7 @@ export component AppWindow inherits Window {
                                 text: root.team-name;
                                 color: Theme.text;
                                 font-size: Typography.body;
+                                letter-spacing: Typography.tracking;
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -3186,9 +3204,9 @@ export component AppWindow inherits Window {
                                 root.space-create(text);
                             }
                         }
-                        Button {
+                        PrimaryButton {
                             height: Metrics.control;
-                            primary: true;
+
                             text: "创建";
                             clicked => {
                                 root.space-create(root.space-new-name);
@@ -3280,7 +3298,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -3318,9 +3336,9 @@ export component AppWindow inherits Window {
                             root.rename-canceled();
                         }
                     }
-                    Button {
+                    PrimaryButton {
                         text: "保存";
-                        primary: true;
+
                         clicked => {
                             root.rename-confirmed(rename-input.text);
                         }
@@ -3339,7 +3357,7 @@ export component AppWindow inherits Window {
             width: 340px;
             height: cat-rename-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -3377,9 +3395,9 @@ export component AppWindow inherits Window {
                             root.cat-rename-canceled();
                         }
                     }
-                    Button {
+                    PrimaryButton {
                         text: "保存";
-                        primary: true;
+
                         clicked => {
                             root.cat-rename-confirmed(cat-rename-input.text);
                         }
@@ -3395,7 +3413,7 @@ export component AppWindow inherits Window {
             width: 420px;
             height: props-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
@@ -3468,14 +3486,14 @@ export component AppWindow inherits Window {
             width: 400px;
             height: update-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             update-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
@@ -3571,9 +3589,9 @@ export component AppWindow inherits Window {
                         clicked => { root.update-open-release-page(); }
                     }
 
-                    Button {
+                    PrimaryButton {
                         text: root.update-apply-error != "" ? "重试" : "立即更新";
-                        primary: true;
+
                         clicked => { root.update-install-requested(); }
                     }
                 }
@@ -3606,14 +3624,14 @@ export component AppWindow inherits Window {
             width: 480px;
             height: classify-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             classify-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
@@ -3701,7 +3719,7 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "取消"; clicked => { root.classify-canceled(); } }
                     Button { text: "放入待分类"; clicked => { root.classify-confirmed(UiEnums.classify-confirm-inbox); } }
-                    Button { text: "导入"; primary: true; clicked => { root.classify-confirmed(UiEnums.classify-confirm-resolve); } }
+                    PrimaryButton { text: "导入";  clicked => { root.classify-confirmed(UiEnums.classify-confirm-resolve); } }
                 }
             }
         }
@@ -3718,14 +3736,14 @@ export component AppWindow inherits Window {
             width: 560px;
             height: result-layout.preferred-height;
             border-radius: Theme.radius-lg;
-            border-width: 1px;
+            border-width: Theme.border-width;
             border-color: Theme.line-strong;
             background: Theme.bg-overlay;
             drop-shadow-blur: 16px;
             drop-shadow-offset-y: 4px;
             drop-shadow-color: Theme.scrim;
 
-            animate opacity, y { duration: Motion.enabled ? Motion.enter : 0ms; easing: ease-out; }
+            animate opacity, y { duration: Motion.enabled && Motion.theme-enabled ? Motion.enter : 0ms; easing: Motion.linear ? linear : ease-out; }
 
             result-layout := VerticalLayout {
                 padding: Spacing.dialog-pad;
@@ -3812,9 +3830,9 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
-                    Button {
+                    PrimaryButton {
                         text: "知道了";
-                        primary: true;
+
                         clicked => { root.import-result-closed(); }
                     }
                 }

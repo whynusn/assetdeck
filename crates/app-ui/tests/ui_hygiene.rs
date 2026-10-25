@@ -227,7 +227,8 @@ fn all_animations_consume_motion_tokens() {
             blocks += 1;
             if !block.contains("Motion.enabled")
                 || !block.contains(": 0ms")
-                || !block.contains("easing: ease-out")
+                || !block.contains("Motion.theme-enabled")
+                || !block.contains("easing: Motion.linear ? linear : ease-out")
             {
                 offenders.push(format!(
                     "{name}: {}",
@@ -239,7 +240,7 @@ fn all_animations_consume_motion_tokens() {
     assert!(blocks > 0, "没有扫到任何 animate 块，守卫失效");
     assert!(
         offenders.is_empty(),
-        "animate 必须消费 Motion 令牌、关闭动画时归零并声明 ease-out（契约 §1.4）：\n{}",
+        "animate 必须消费用户/主题 Motion 开关，关闭时归零，并使用主题允许的 linear/ease-out：\n{}",
         offenders.join("\n")
     );
 }

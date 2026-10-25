@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     统一发布打包流水线：一条命令产出便携版 + 安装版两种分发物。
 
@@ -123,6 +123,13 @@ function Step-Portable {
     # 「设置 → 数据迁移」一键搬迁（D61）。sample-library.exe 保留：它是运行时
     # 导入子进程（D11），不是打包工具。
 
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "themes") -Destination $Dist -Recurse -Force
+    foreach ($relative in @("peach-cat/theme.toml", "peach-cat/assets/cat.png", "peach-cat/THIRD_PARTY.md", "peach-cat/LICENSE-Microsoft.txt")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Dist "themes/$relative") -PathType Leaf)) {
+            throw "主题分发文件缺失: themes/$relative"
+        }
+    }
+
     Write-Host "==> [portable] 打 zip"
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     # 分发名一律 ASCII：中文文件名在 GitHub 资产链路被吞（实测「素材管理器-便携版-0.1.0」
@@ -182,6 +189,10 @@ function Step-Installer {
         if ($entries -notcontains "./$name") {
             throw "tar payload 缺少 $name"
         }
+    }
+
+    foreach ($relative in @("themes/peach-cat/theme.toml", "themes/peach-cat/assets/cat.png", "themes/peach-cat/THIRD_PARTY.md", "themes/peach-cat/LICENSE-Microsoft.txt")) {
+        if ($entries -notcontains "./$relative") { throw "tar payload 缺少 $relative" }
     }
 
     Write-Host "==> [installer] 编译 asset-installer（内嵌 payload）"

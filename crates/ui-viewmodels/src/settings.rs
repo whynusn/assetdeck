@@ -54,6 +54,8 @@ pub struct AppSettings {
     /// Palette 的 color-scheme 翻转，两路同时切换，无需重启。
     #[serde(default)]
     pub light_theme: bool,
+    #[serde(default)]
+    pub theme_id: String,
     /// 界面动画：true（默认）= 弹层展开播过渡动画（Slint animate 实现）；
     /// false = 全部时长钳到 0，立即展开。录屏/低性能设备可关。
     #[serde(default = "default_ui_animations")]
@@ -251,6 +253,7 @@ impl Default for AppSettings {
             send_after_paste: false,
             gpu_rendering: default_gpu_rendering(),
             light_theme: false,
+            theme_id: String::new(),
             ui_animations: true,
             sidebar_width: default_sidebar_width(),
             fast_import_mode: default_fast_import(),
@@ -449,7 +452,6 @@ pub static SETTING_SPECS: &[SettingSpec<'static>] = &[
         "共享",
         SettingKind::Toggle,
     ),
-    SettingSpec::new("light_theme", "浅色主题", "外观", SettingKind::Toggle),
     SettingSpec::new("ui_animations", "界面动画", "外观", SettingKind::Toggle),
     SettingSpec::new("gpu_rendering", "GPU 渲染", "高级", SettingKind::Toggle),
     SettingSpec::new(
@@ -504,6 +506,19 @@ pub fn settings_path(library_root: Option<&Path>) -> PathBuf {
     exe_dir.join("settings.toml")
 }
 
+/// First import can move the default settings location from beside the exe to
+/// the new library. Keep the user's existing choices, without replacing an
+/// already configured library or deleting the legacy file.
+pub fn migrate_legacy_settings(legacy: &Path, destination: &Path) -> io::Result<()> {
+    if destination.exists() || !legacy.is_file() {
+        return Ok(());
+    }
+    let body = fs::read_to_string(legacy)?;
+    let settings: AppSettings =
+        toml::from_str(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    settings.sanitized().save(destination)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +530,7 @@ mod tests {
             send_after_paste: false,
             gpu_rendering: true,
             light_theme: false,
+            theme_id: String::new(),
             ui_animations: false,
             sidebar_width: 300.0,
             fast_import_mode: true,

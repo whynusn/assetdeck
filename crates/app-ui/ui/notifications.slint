@@ -27,6 +27,7 @@ export component InlineNotice inherits Rectangle {
             text: root.text;
             color: root.error ? Theme.danger : Theme.text;
             font-size: Typography.body;
+            letter-spacing: Typography.tracking;
             wrap: word-wrap;
         }
         if root.action-label != "": Button {
@@ -46,7 +47,7 @@ export component ToastHost inherits Rectangle {
     callback history-requested();
     background: Theme.bg-overlay;
     border-radius: Theme.radius-lg;
-    border-width: 1px;
+    border-width: Theme.border-width;
     border-color: Theme.line-strong;
     height: body.preferred-height;
     drop-shadow-blur: 12px;
@@ -59,11 +60,13 @@ export component ToastHost inherits Rectangle {
             text: root.tone == NoticeTone.error ? "操作未完成" : root.tone == NoticeTone.warning ? "请留意" : root.tone == NoticeTone.info ? "提示" : "已完成";
             color: root.tone == NoticeTone.error ? Theme.danger : root.tone == NoticeTone.warning ? Theme.warn : root.tone == NoticeTone.info ? Theme.accent : Theme.ok;
             font-size: Typography.label;
+            letter-spacing: Typography.tracking;
         }
         Text {
             text: root.text;
             color: Theme.text;
             font-size: Typography.body;
+            letter-spacing: Typography.tracking;
             wrap: word-wrap;
         }
         HorizontalLayout {
@@ -80,7 +83,7 @@ export component NoticeHistory inherits Rectangle {
     callback closed();
     background: Theme.bg-overlay;
     border-radius: Theme.radius-lg;
-    border-width: 1px;
+    border-width: Theme.border-width;
     border-color: Theme.line-strong;
     TouchArea { }
     VerticalLayout {
