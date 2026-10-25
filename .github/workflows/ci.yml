@@ -8,9 +8,13 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+# 发版跳验通道（D72 2026-10-25 增补）：head 提交信息带「[skip verify]」时三个验证 job
+# 全跳、package/release 照常（被跳过的 needs 依赖按满足计）。仅用于「刚全绿 + 零代码
+# 改动」的升版 tag 提交（release.ps1 -SkipVerify）；标记不生效时退化为全量验证（fail-open
+# 到验证侧），PR/schedule/dispatch 事件 head_commit 为 null，恒不命中。
 jobs:
   lint-and-test:
-    if: github.event_name != 'schedule'
+    if: ${{ github.event_name != 'schedule' && !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: windows-latest
     # 本地开发用 windows-gnu 工具链，CI 用 runner 自带 MSVC——源码级兼容，产物不交叉使用
     steps:
@@ -40,6 +44,7 @@ jobs:
 
   # deny 不再排除 schedule：RustSec 公告库是持续变化的外部输入，每日定时扫描才有价值。
   deny:
+    if: ${{ !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +58,7 @@ jobs:
   # M7 内存回归（DECISIONS.md 行动项 A3）：预算超标即红，趋势产物存 artifact。
   # release 档出正式数字（D10 合同以发布形态为准）。
   mem-regression:
+    if: ${{ !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

@@ -6,6 +6,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$Subject = "",
     [string]$Remote = "origin",
+    # 刚全绿 + 升版提交零代码改动时，给提交信息追加「[skip verify]」跳过 ci.yml
+    # 三个验证 job（package/release 照常，契约见 D72 增补与 ci.yml 头注释）。
+    [switch]$SkipVerify,
     [switch]$DryRun
 )
 $ErrorActionPreference = "Stop"
@@ -49,7 +52,8 @@ if ($DryRun) {
     Write-Host "[DryRun] 将执行："
     Write-Host "  1. 写 Cargo.toml: version = `"$Version`"（UTF-8 无 BOM，LF 原样保留）"
     Write-Host "  2. cargo update --workspace（Cargo.lock 成员版本派生）"
-    Write-Host "  3. git add Cargo.toml Cargo.lock && git commit -m `"chore(release): 升版 v$Version`""
+    $commitMsg = "chore(release): 升版 v$Version——scripts/release.ps1 一键发版" + $(if ($SkipVerify) { " [skip verify]" })
+    Write-Host "  3. git add Cargo.toml Cargo.lock && git commit -m `"$commitMsg`""
     Write-Host "  4. git push $Remote main"
     $tagMsg = if ($Subject) { "v$Version：$Subject" } else { "v$Version" }
     Write-Host "  5. git tag -a v$Version -m `"$tagMsg`""
@@ -67,7 +71,8 @@ cargo update --workspace
 if ($LASTEXITCODE -ne 0) { Fail "cargo update --workspace 失败（exit $LASTEXITCODE）；Cargo.toml 已改动，请 git checkout 恢复后排查" }
 
 git add Cargo.toml Cargo.lock
-git commit -m "chore(release): 升版 v$Version——scripts/release.ps1 一键发版"
+$commitMsg = "chore(release): 升版 v$Version——scripts/release.ps1 一键发版" + $(if ($SkipVerify) { " [skip verify]" })
+git commit -m $commitMsg
 if ($LASTEXITCODE -ne 0) { Fail "git commit 失败（锁文件无变化？）" }
 
 git push $Remote main
