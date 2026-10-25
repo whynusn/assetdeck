@@ -65,7 +65,9 @@
             "selected": true,
             "share-badge": 2,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -82,7 +84,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 492,
@@ -99,7 +103,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 0,
@@ -116,7 +122,9 @@
             "selected": false,
             "share-badge": 3,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -133,7 +141,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 492,
@@ -150,7 +160,9 @@
             "selected": false,
             "share-badge": 1,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 0,
@@ -167,7 +179,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -184,7 +198,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           }
         ],
         "trash-count": 5
@@ -231,7 +247,9 @@
             "selected": true,
             "share-badge": 2,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -248,7 +266,9 @@
             "selected": false,
             "share-badge": 3,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 492,
@@ -265,7 +285,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 0,
@@ -282,7 +304,9 @@
             "selected": false,
             "share-badge": 1,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -299,7 +323,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 492,
@@ -316,7 +342,9 @@
             "selected": false,
             "share-badge": 2,
             "shared": true,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           }
         ]
       }
@@ -344,7 +372,9 @@
             "selected": true,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -361,7 +391,9 @@
             "selected": true,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 492,
@@ -378,7 +410,9 @@
             "selected": true,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 0,
@@ -395,7 +429,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           }
         ]
       }
@@ -421,7 +457,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           },
           {
             "x": 246,
@@ -438,7 +476,9 @@
             "selected": false,
             "share-badge": 0,
             "shared": false,
-            "search-segments": []
+            "search-segments": [],
+            "missing": false,
+            "stale": false
           }
         ]
       }
@@ -913,7 +953,8 @@
             "selected": false
           }
         ]
-      }
+      },
+      "deprecated": "D90 移除「共享到域」弹窗，共享目标是空间：space-add-open + space-add-rows"
     },
     "share-ctl": {
       "extends": "shell-grid",
@@ -1006,14 +1047,16 @@
           }
         ],
         "share-face-hint": "索取后需对端同意，素材才会推送过来"
-      }
+      },
+      "deprecated": "D90 移除共享控制面（域/成员/发现/索取），改由空间模型承载：space-ctl-open / space-add-open / space-rows"
     },
     "share-request": {
       "extends": "shell-grid",
       "props": {
         "share-request-open": true,
         "share-request-text": "Office-PC 想获取你的 3 项素材：dog.jpg、desk.jpg、sky1.png"
-      }
+      },
+      "deprecated": "D90 移除「索取审批」弹窗，改为贴邀请码加入空间：space-ctl-invite"
     },
     "share-offer": {
       "extends": "shell-grid",

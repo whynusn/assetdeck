@@ -113,12 +113,28 @@ function resolveState(name, seen = new Set()) {
     name,
     file: raw.file ?? base.file,
     window: raw.window ?? base.window ?? null,
+    deprecated: raw.deprecated ?? null,
     props: { ...base.props, ...(raw.props ?? {}) },
     globals: { ...base.globals, ...(raw.globals ?? {}) },
   };
 }
 
 const allNames = Object.keys(fixtures.states);
+
+// 已废弃夹具：对应的 UI 面板已被后续决策移除（如 D90 的空间模型取代域/成员/索取）。
+// 这些 fixture 的属性名在新代码里已不存在，渲染只会产出「忽略未知属性」的假截图——
+// 保留它们是为了记录迁移去向，采集时必须跳过（见 journal「D90 旧面板废弃」）。
+function isDeprecated(name) {
+  return Boolean(fixtures.states[name]?.deprecated);
+}
+const activeNames = allNames.filter((n) => !isDeprecated(n));
+const deprecatedNames = allNames.filter(isDeprecated);
+
+function assertNotDeprecated(name) {
+  // 显式点名已废弃夹具 = 调用方的判断错误，必须报错而不是静默跳过。
+  const reason = fixtures.states[name]?.deprecated;
+  if (reason) fail(`fixture ${name} 已废弃，不能采集：${reason}`);
+}
 
 function themeNames() {
   return args.themes.length ? args.themes : ['builtin-dark'];
@@ -128,7 +144,12 @@ if (args.list) {
   console.log('# states');
   for (const n of allNames) {
     const s = resolveState(n);
-    console.log(`  ${n.padEnd(26)}${s.file ? `(${s.file})` : ''}${s.window ? `  ${s.window.width}x${s.window.height}` : ''}`);
+    const mark = s.deprecated ? '  [已废弃-跳过]' : '';
+    console.log(`  ${n.padEnd(26)}${s.file ? `(${s.file})` : ''}${s.window ? `  ${s.window.width}x${s.window.height}` : ''}${mark}`);
+  }
+  if (deprecatedNames.length) {
+    console.log('# deprecated（不参与采集，仅记录迁移去向）');
+    for (const n of deprecatedNames) console.log(`  ${n.padEnd(26)}${fixtures.states[n].deprecated}`);
   }
   console.log('# themes (automation/theme-system/themes.json)');
   console.log(`  ${'builtin-dark'.padEnd(26)}(implicit: slint 默认暗色令牌)`);
@@ -145,6 +166,74 @@ for (const mod of state.modules) {
   for (const c of mod.components) componentStates.set(c.id, c.states ?? []);
 }
 
+// ---------- 结构体漂移检查 ----------
+// slint 解释器在模型元素缺字段时会直接 panic（Value::Void），退出码 0xC0000409，
+// 报错只给字段名不给状态名，排查成本极高（已两次踩到：D87/D88 的 search-segments、
+// D91 的 missing/stale）。这里把「.slint 结构体字段 ⊃ 夹具元素键」做成机械检查，
+// 让漂移在 --check 阶段以可读错误暴露，而不是等到渲染 panic。
+function collectStructs() {
+  const uiDir = path.join(ROOT, 'crates/app-ui/ui');
+  const structs = {}; // structName -> { fields:Set, nested:{field:structName} }
+  const modelProps = {}; // propName -> structName
+  const files = fs.readdirSync(uiDir).filter((f) => f.endsWith('.slint')).sort();
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(uiDir, f), 'utf8');
+    for (const m of src.matchAll(/export struct\s+([A-Za-z0-9_]+)\s*\{([\s\S]*?)\n\}/g)) {
+      const fields = new Set();
+      const nested = {};
+      for (const raw of m[2].split('\n')) {
+        const t = raw.replace(/\/\/.*$/, '').trim();
+        const f2 = t.match(/^([a-z0-9-]+)\s*:\s*(.+?),?;?$/);
+        if (!f2) continue;
+        fields.add(f2[1]);
+        const inner = f2[2].match(/^\[?\s*([A-Za-z0-9_]+)\s*\]?$/);
+        if (inner) nested[f2[1]] = inner[1];
+      }
+      structs[m[1]] = { fields, nested };
+    }
+    for (const m of src.matchAll(/property\s*<\s*\[\s*([A-Za-z0-9_]+)\s*\]\s*>\s*([a-z0-9-]+)/g)) {
+      modelProps[m[2]] = m[1];
+    }
+  }
+  return { structs, modelProps };
+}
+
+function structDriftProblems() {
+  const problems = [];
+  const { structs, modelProps } = collectStructs();
+  const check = (structName, value, where, pathParts = []) => {
+    const s = structs[structName];
+    if (!s) return;
+    for (const [key, v] of Object.entries(value || {})) {
+      const nestedStruct = s.nested[key];
+      if (nestedStruct && structs[nestedStruct]) {
+        if (Array.isArray(v)) v.forEach((el, i) => check(nestedStruct, el, where, [...pathParts, `${key}[${i}]`]));
+        else if (v && typeof v === 'object') check(nestedStruct, v, where, [...pathParts, key]);
+        continue;
+      }
+      if (!s.fields.has(key)) {
+        problems.push(`${where} 的元素含结构体 ${structName} 没有的字段「${[...pathParts, key].join('.')}」（slint 会拒绝或忽略，须对齐）`);
+      }
+    }
+    for (const f of s.fields) {
+      const present = Object.prototype.hasOwnProperty.call(value || {}, f);
+      if (!present) problems.push(`${where} 的元素缺少 ${structName}.${f}（渲染时 panic: Value::Void）`);
+    }
+  };
+  for (const name of activeNames) {
+    const s = resolveState(name);
+    for (const [prop, structName] of Object.entries(modelProps)) {
+      const value = s.props[prop];
+      if (!Array.isArray(value)) continue;
+      value.forEach((el, i) => {
+        if (typeof el === 'string') return; // 允许简写：字符串会由壳层展开
+        check(structName, el, `fixture ${name} 的 ${prop}[${i}]`);
+      });
+    }
+  }
+  return problems;
+}
+
 if (args.check) {
   const problems = [];
   // 方向一：theme-system 组件引用的状态必须真实存在。
@@ -152,10 +241,11 @@ if (args.check) {
   for (const [id, states] of componentStates) {
     for (const name of states) {
       if (!allNames.includes(name)) problems.push(`组件 ${id} 引用了不存在的 fixture ${name}`);
+      else if (isDeprecated(name)) problems.push(`组件 ${id} 引用了已废弃的 fixture ${name}（应改用：${fixtures.states[name].deprecated}）`);
     }
   }
   // 方向二：被引用的状态必须可渲染（文件在、window 尺寸合法）。
-  for (const name of allNames) {
+  for (const name of activeNames) {
     const s = resolveState(name);
     if (s.window && !(s.window.width > 0 && s.window.height > 0)) problems.push(`fixture ${name} 的 window 尺寸非法`);
     if (!s.window) {
@@ -187,11 +277,16 @@ if (args.check) {
       }
     }
   }
+  // 方向五：结构体漂移——夹具元素必须与 .slint 结构体字段严格对齐（缺字段会 panic）。
+  problems.push(...structDriftProblems());
+
   if (problems.length) {
     console.error(problems.map((p) => `  ✗ ${p}`).join('\n'));
     fail(`${problems.length} 个问题`);
   }
-  console.log(`preview OK：${allNames.length} 个可用状态、${Object.keys(declaredThemes).length} 个声明主题，引用与令牌形态齐全`);
+  console.log(
+    `preview OK：${activeNames.length} 个可采集状态（跳过 ${deprecatedNames.length} 个已废弃）、${Object.keys(declaredThemes).length} 个声明主题，引用与令牌形态齐全`,
+  );
   process.exit(0);
 }
 
@@ -279,21 +374,25 @@ const jobs = [];
 const themes = themeNames();
 if (args.all) {
   for (const phase of phaseFor(args.phases)) {
-    jobs.push({ outDir: path.join(SHOTS_DIR, '_all', phase), states: allNames.map((n) => resolveState(n)) });
+    jobs.push({ outDir: path.join(SHOTS_DIR, '_all', phase), states: activeNames.map((n) => resolveState(n)) });
   }
 }
 for (const component of args.components) {
   const declared = componentStates.get(component);
   if (!declared) fail(`未知组件 ${component}`);
-  const picked = args.states.length ? args.states.map((n) => resolveState(n)) : declared.map((n) => resolveState(n));
-  if (picked.length === 0) fail(`组件 ${component} 的 states 为空，且未用 --state 指定`);
-  const missing = args.states.filter((n) => !allNames.includes(n));
+  const names = args.states.length ? args.states : declared;
+  if (names.length === 0) fail(`组件 ${component} 的 states 为空，且未用 --state 指定`);
+  const missing = names.filter((n) => !allNames.includes(n));
   if (missing.length) fail(`未知 fixture: ${missing.join(', ')}`);
+  names.forEach(assertNotDeprecated);
   for (const phase of phaseFor(args.phases)) {
-    jobs.push({ outDir: path.join(SHOTS_DIR, component, phase), states: picked });
+    jobs.push({ outDir: path.join(SHOTS_DIR, component, phase), states: names.map((n) => resolveState(n)) });
   }
 }
 if (!args.all && args.states.length && args.components.length === 0) {
+  const missing = args.states.filter((n) => !allNames.includes(n));
+  if (missing.length) fail(`未知 fixture: ${missing.join(', ')}`);
+  args.states.forEach(assertNotDeprecated);
   for (const phase of phaseFor(args.phases)) {
     jobs.push({ outDir: path.join(SHOTS_DIR, '_states', phase), states: args.states.map((n) => resolveState(n)) });
   }

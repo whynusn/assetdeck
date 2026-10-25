@@ -24,3 +24,20 @@
 - 验证：`preview --check` 通过（42 状态）；暗/亮两套实际渲染成功，像素取样与声明令牌逐值吻合：
   暗 `bg-bar #252525` / `bg-app #1c1c1c`，浅 `bg-bar #ececf0` / `bg-app #f7f7f8`。
 - 说明：本修复落在 theme-system 分支；main 与 ux-audit 分支仍带此缺陷，合并后一并生效。
+
+## 初始化 · D91 漂移与 D90 废弃面板（阻塞性）
+
+- 现象（漂移）：merge main（D91 内容一致性对账）后，含 tiles 的状态改报 `unsupported Value::Void | Value::Void`。
+- 根因：D91 给 `TileData` 新增 `missing` / `stale` 两个 bool；夹具 40 个 tile 字段未跟上。
+  解释器对缺字段只在渲染期 panic，报错不含状态名，定位成本极高（这是第二次同类事故）。
+- 修复：40 处补 `"missing": false, "stale": false`；并在 `preview.mjs` 增加**方向五：结构体漂移检查**——
+  解析 `crates/app-ui/ui/*.slint` 的 `export struct` 字段与 `property <[Struct]>` 映射，逐元素做双向比对
+  （缺字段 → 报 `Value::Void` 风险；多字段 → 报未知字段）。今后漂移在 `--check` 阶段以可读错误暴露。
+- 现象（废弃）：`share-domains` / `share-ctl` / `share-request` 全量采集失败，报
+  `Warning: ignoring unknown property: share-ctl-devices`。
+- 根因：D90 用空间模型取代了域/成员/发现/索取控制面，旧面板属性在现代码里已不存在。
+- 处置：**不伪造属性映射**（那会产出看似正常的假截图）。改为在 fixture 上标 `deprecated` 并写明迁移目标
+  （`space-ctl-open` / `space-add-open` / `space-rows` / `space-ctl-invite`）；工具侧 `--all` 自动跳过、
+  `--list` 展示去向、显式点名或组件引用则报错。
+- 验证：`preview --check` = 39 个可采集 + 跳过 3 个废弃；`builtin-dark` 39/39、`builtin-light` 39/39 全绿。
+- 说明：D90 迁移去向的**新状态**（如 `space-ctl-open`）尚未加入夹具；等 T0-C5/T1 需要时按需补真实夹具。

@@ -62,6 +62,10 @@ node automation/theme-system/scripts/preview.mjs --component T1-C2 --theme light
   缺状态时在同处补一个最小真实夹具，并把状态名加进本组件 `states`；补完跑 `--check`。
 - 主题令牌声明在 `automation/theme-system/themes.json`；与 Rust Provider 值必须一致。
 - hover/pressed 无头夹具无法真实触发时，允许用代码状态矩阵核对，但必须在报告里写明「未截图验证」。
+- **已废弃夹具不会参与采集**：fixtures 里带 `deprecated` 字段的状态（如 D90 后的 `share-ctl` / `share-domains` /
+  `share-request`）对应的 UI 面板已被决策移除，渲染只会产出「忽略未知属性」的假截图。`--all` 自动跳过它们，
+  `--list` 会列出迁移去向；被组件 `states` 引用或命令行显式点名则由 `--check` / 采集命令直接报错。
+  该字段只记录迁移目标，**不要**为它们补齐属性映射（那是伪造截图）。
 
 ### 1.4 审查与记录
 
