@@ -271,18 +271,11 @@ fn fill_should_stop(missing: usize, y_new: f32, y_last: f32) -> bool {
 /// 几何稳定阈值（逻辑像素）。低于这个位移视为滚动已静止。
 const FILL_STABLE_EPSILON: f32 = 0.5;
 
-/// D80-M1「共享中」uuid 集：控制面共享态的现查快照（build_rows 铺瓦片时
-/// 定位共享中角标）。手工标记量级小，每次刷新现取不缓存；变化刷新点由
-/// main.rs 的控制面回调触发 grid.sync() 整体重排。
+/// D92「共享中」uuid 集：控制面标记 ∪ 空间成员投影（统一入口在 spaces，
+/// 见 SHARE_PROJECTION 注释）。现查快照（build_rows 铺瓦片时定位角标）；
+/// 变化刷新点（sync_rows / 库装载 / 空间导入收尾）触发 grid.sync() 整体重排。
 fn shared_uuids() -> HashSet<Uuid> {
-    crate::SHARE_CONTROL.with(|control| {
-        control
-            .borrow()
-            .shared_entries()
-            .iter()
-            .map(|e| e.asset_uuid)
-            .collect()
-    })
+    crate::spaces::shared_uuids()
 }
 
 /// 一次 build_rows 的产物。

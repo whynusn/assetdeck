@@ -21,8 +21,9 @@ pub mod update_apply;
 pub mod update_check;
 
 pub use catalog_loader::{
-    content_paths, ensure_library_skeleton, load_library_catalog, load_real_library, CatalogError,
-    FacetEntry, LibraryFacets, MaterializedAsset, RealAssetResolver,
+    category_source_paths, content_paths, ensure_library_skeleton, load_library_catalog,
+    load_real_library, share_projection, CatalogError, FacetEntry, LibraryFacets,
+    MaterializedAsset, RealAssetResolver, ShareProjection,
 };
 pub use category_rows::CategoryRows;
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent, TEXT_TILE_HEIGHT};

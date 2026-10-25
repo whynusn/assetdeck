@@ -1330,6 +1330,48 @@ fn open_space_add_dialog(crud: &CrudCtx, hit: Option<AssetId>) {
     ui.set_space_add_open(true);
 }
 
+/// D92「将分类共享至」：整分类源路径 → 复用「添加到共享空间」弹窗链
+/// （SHARE_DOMAIN_PENDING 暂存 → space-add-picked → add_paths_to_space）。
+/// 幂等：已在空间的素材按 SHA-256 字节等值被空间库唯一拦截，重复执行只
+/// 补缺。空间视图不提供（分类菜单里的主库语义；空间内素材本就全员可见）。
+fn open_category_share_dialog(crud: &CrudCtx, name: &str) {
+    if spaces::in_space_view() {
+        if let Some(ui) = crud.ui.upgrade() {
+            show_notice(
+                &ui,
+                TargetNoticeTone::Warning,
+                "请回到「我的素材」再共享分类".to_string(),
+            );
+        }
+        return;
+    }
+    let Some(ui) = crud.ui.upgrade() else { return };
+    let root = std::path::PathBuf::from(
+        crud.library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned()),
+    );
+    let paths = ui_viewmodels::category_source_paths(&root, name);
+    if paths.is_empty() {
+        show_notice(
+            &ui,
+            TargetNoticeTone::Warning,
+            format!("分类「{name}」没有可共享的素材"),
+        );
+        return;
+    }
+    if spaces::spaces().is_empty() {
+        ui.set_space_ctl_error("".into());
+        spaces::sync_rows(&ui);
+        ui.set_space_ctl_open(true);
+        return;
+    }
+    SHARE_DOMAIN_PENDING.with(|slot| *slot.borrow_mut() = paths);
+    ui.set_space_add_hint("整分类素材会加入所选空间".into());
+    spaces::sync_rows(&ui);
+    ui.set_space_add_open(true);
+}
+
 /// D80-M1-b uuid → 可得行（ShareOffer）的目录物化闭包：SYNC_STATE 快照与
 /// Delta 的 added 集共用。库内已不存在的素材返回 None（不广播悬空可得）；
 /// 无 wiring/resolver（演示态）恒 None。
@@ -1594,6 +1636,9 @@ fn apply_categories(
     let mut counts = vec![total];
     counts.extend(entries.iter().map(|entry| entry.count as i32));
     ui.set_category_counts(ModelRc::from(Rc::new(VecModel::from(counts))));
+    // D92：库内容变了（装载/导入收尾/重索引都汇流到这里），共享可见性
+    // 投影随手刷新（false = 不整窗重排，装载流程随后自己 sync）。
+    spaces::refresh_share_projection(false);
     // 重载分类后回落到「全部」高亮，顶栏后缀同步回落，避免残留旧分类名。
     ui.set_selected_category(-1);
     ui.set_filter_label("全部".into());
@@ -3534,8 +3579,9 @@ fn main() {
     }
 
     // D84 分类菜单动作：0=重命名（打开分类重命名弹窗）1=删除（引用行归
-    // 待分类，对象文件不动）。菜单标题即命中分类名（右键时设定，菜单开着
-    // 不变）；动作只可能从开着的菜单触发，读标题即取命中。
+    // 待分类，对象文件不动）2=共享到空间（D92：整分类源路径进「添加到共享
+    // 空间」弹窗）。菜单标题即命中分类名（右键时设定，菜单开着不变）；
+    // 动作只可能从开着的菜单触发，读标题即取命中。
     {
         let crud = crud.clone();
         let pending_cat_rename = pending_cat_rename.clone();
@@ -3558,6 +3604,7 @@ fn main() {
                     // no-op，无需预查库。
                     crud.spawn_category_cmd("delete-category", &name, None, "删除分类");
                 }
+                2 => open_category_share_dialog(&crud, &name),
                 _ => {}
             }
         });

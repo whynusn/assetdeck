@@ -1245,6 +1245,22 @@ impl Store {
         self.for_each_asset_impl(true, visit)
     }
 
+    /// 分类内活动资产的 rel_path 清单（D92「将分类共享至」装配导入清单源）。
+    /// `None` = 收件箱（category_id IS NULL，D85）。`IS ?1` 是 NULL 安全比较，
+    /// 一条 SQL 覆盖两类 id；走 idx_assets_category_id，成本 = 分类行数。
+    pub fn rel_paths_in_category(&self, category_id: Option<u32>) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT rel_path FROM assets WHERE deleted = 0 AND category_id IS ?1",
+        )?;
+        let rows = stmt.query_map(params![category_id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn for_each_asset_impl<F>(&self, only_active: bool, mut visit: F) -> Result<()>
     where
         F: FnMut(AssetMeta),

@@ -209,6 +209,9 @@ export component AppWindow inherits Window {
     in property <string> filter-label: "全部";
     in property <[string]> categories: ["全部"];
     in property <[int]> category-counts: [];
+    // D92 分类共享态（与 categories 同序，下标 0 =「全部」聚合）：
+    // 0 无共享 / 1 部分共享 / 2 全共享。空间视图恒空 = 全 0（无标识）。
+    in property <[int]> category-share-states: [];
     // -1 = 全部，-2 = 检索结果态（不高亮任何分类），>=0 = 具体分类号
     in property <int> selected-category: -1;
     in-out property <string> search-text: "";
@@ -1207,6 +1210,33 @@ export component AppWindow inherits Window {
                                             overflow: elide;
                                         }
 
+                                        // D92 分类共享态：share 图标着共享紫。部分共享 =
+                                        // 裸图标（有共享但没全进）；全共享 = 图标坐
+                                        // shared-soft 底 + 1px 紫描边（与选中态/图标
+                                        // 按钮同一「填充 = 满」语系）；无共享不占位
+                                        //（侧栏保持安静，不给「没有」记视觉账）。
+                                        // 与瓦片「共享中」徽标同图标同色，两级视图
+                                        // 一种语言。
+                                        if i < root.category-share-states.length
+                                            && root.category-share-states[i] > 0: Rectangle {
+                                            width: root.category-share-states[i] == 2 ? 18px : 14px;
+                                            height: 16px;
+                                            y: (parent.height - self.height) / 2;
+                                            border-radius: Theme.radius;
+                                            background: root.category-share-states[i] == 2 ? Theme.shared-soft : transparent;
+                                            border-width: root.category-share-states[i] == 2 ? 1px : 0px;
+                                            border-color: Theme.shared;
+
+                                            Icon {
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                commands: Glyph.share;
+                                                tint: Theme.shared;
+                                                width: 10px;
+                                                height: 10px;
+                                            }
+                                        }
+
                                         Text {
                                             text: i < root.category-counts.length ? root.category-counts[i] : "";
                                             vertical-alignment: center;
@@ -1734,7 +1764,7 @@ export component AppWindow inherits Window {
                             // D80 共享角标：右上类型徽标正下方一枚状态点（在途=accent
                             // /已送达=绿/失败=红），白描边保证在缩略图上可辨。
                             if tile.share-badge != UiEnums.share-badge-none: Rectangle {
-                                x: parent.width - self.width - 8px;
+                                x: parent.width - self.width - 6px;
                                 y: 32px;
                                 width: 10px;
                                 height: 10px;
@@ -1746,24 +1776,36 @@ export component AppWindow inherits Window {
                                     : Theme.danger;
                             }
 
-                            // D80-M1「共享中」角标：发送结果点正下方一枚紫点（位置与
-                            // 颜色双重区分——可获得性在域中广播与单次传输结果语义不同）。
+                            // D92「共享中」徽标：share 图标胶囊（shared-soft 底 +
+                            // 1px 共享紫描边），与右上类型徽标同一形态语系——
+                            // 替代旧 8px 紫点（真机反馈：光点丑、与主题不符）。
+                            // 语义 = D80-M1 控制面标记 ∪ D92 空间成员投影。
                             if tile.shared: Rectangle {
-                                x: parent.width - self.width - 9px;
+                                x: parent.width - self.width - 6px;
                                 y: 46px;
-                                width: 8px;
-                                height: 8px;
-                                border-radius: self.width / 2;
-                                border-width: 2px;
-                                border-color: Theme.badge-ring;
-                                background: Theme.shared;
+                                width: 20px;
+                                height: 20px;
+                                border-radius: Theme.radius;
+                                background: Theme.shared-soft;
+                                border-width: 1px;
+                                border-color: Theme.shared;
+
+                                Icon {
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    commands: Glyph.share;
+                                    tint: Theme.shared;
+                                    width: 12px;
+                                    height: 12px;
+                                }
                             }
 
                             // D91 一致性角标：正本缺失（红）/被外部修改待重索引（黄）。
                             // 缺失优先——文件都不在了，「已修改」无从谈起。
+                            //（共享徽标改 20px 胶囊后从 y60 顺延到 y70。）
                             if tile.missing || tile.stale: Rectangle {
-                                x: parent.width - self.width - 9px;
-                                y: 60px;
+                                x: parent.width - self.width - 6px;
+                                y: 70px;
                                 width: 8px;
                                 height: 8px;
                                 border-radius: self.width / 2;
@@ -2626,12 +2668,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // —— 分类右键菜单（D84）：重命名 / 删除。删除语义 = 引用行归待分类
-        //（category 置 NULL），素材与对象文件不动，可重新归类——因此不做
-        // 二段确认（与瓦片「删除进回收站」同风险级）。样式同瓦片菜单浮层。
+        // —— 分类右键菜单（D84）：重命名 / 删除 / 共享到空间（D92）。删除语义
+        // = 引用行归待分类（category 置 NULL），素材与对象文件不动，可重新
+        // 归类——因此不做二段确认（与瓦片「删除进回收站」同风险级）。样式同
+        // 瓦片菜单浮层。
         if root.cat-menu-open: Rectangle {
             x: Math.min(root.cat-menu-x, root.width - 220px);
-            y: Math.min(root.cat-menu-y, root.height - 140px);
+            y: Math.min(root.cat-menu-y, root.height - 210px);
             width: 220px;
             height: cat-menu-layout.preferred-height;
             border-radius: Theme.radius-lg;
@@ -2660,6 +2703,16 @@ export component AppWindow inherits Window {
                     text: "重命名";
                     clicked => {
                         root.cat-menu-action(0);
+                    }
+                }
+                // D92：主库语义（空间视图的菜单不出现——空间内素材本就全员
+                // 可见，再「共享出去」只会误导）。
+                if !root.in-space-view: MenuItem {
+                    glyph: Glyph.share;
+                    text: "共享到空间…";
+                    detail: "整分类加入共享空间";
+                    clicked => {
+                        root.cat-menu-action(2);
                     }
                 }
                 Rectangle {

@@ -1233,7 +1233,7 @@ if (click_count % 2) == 1 {
 
 **分期**：P1 单机半场（空间库实例化 + SpaceRegistry + 侧边栏/浏览/添加/移除/另存 + 身份持久化，不联网可验收）；P2 网格半场（op 协议上 sync ALPN + 抗熵 + 按 hash 拉字节 + 到达通知）；P3 管理面收口（空间弹窗全功能 + 大小闸手动放行 + 迁移停用告知）；P4 真机批次（与既有 M1 真机批次合并）。
 
-**落地记录（2026-10-25）**：P1 = 59d169f；P2 = 483c02e（协议纯模型）+ 03a0a9c/b96cfbb（worker 通道：SPACE_STATE/SPACE_SYNC/SPACE_JOIN，Summary/Join 通道内应答，Fetch 经推送通道投递带 space_id 清单）+ 16c216f（消费面：每空间 ops.jsonl、op 按 content_hash 解析本地行（各库 uuid 各自生成）、库行反推补记 Add op、贴码加入 UI、空间投递免确认+乐观 ACK、DEVICE 钩子每会话一轮抗熵、大小闸超限挂起+管理弹窗手动放行、apply_join 修 joined_at=本地首入值）；P3 = 手动放行 + 迁移停用告知。**P4 真机验收清单**：① 双机同网段：A 建空间→B 贴码加入→B 名册/空间视图即时到达；② A 添加素材→B 自动补齐（抗熵+Fetch+免确认导入全链）；③ B 离线期 A 添加 N 项→B 上线 DEVICE 命中后自动补齐；④ 旋转邀请码→旧码 JoinErr、新码可入；⑤ Remove op 在 B 侧按摘要反查本地行生效；⑥ 大小闸：>500MB 批次挂起→管理弹窗手动下载放行；⑦ 全员离线重启（身份不漂移：52 位 id 跨重启稳定）；⑧ 大空间首拉（数百项）时间与进度体感；⑨ 主库视图/空间视图切换、清空库护栏、M0 直发默认隐藏回归。
+**落地记录（2026-10-25）**：P1 = 59d169f；P2 = 483c02e（协议纯模型）+ 03a0a9c/b96cfbb（worker 通道：SPACE_STATE/SPACE_SYNC/SPACE_JOIN，Summary/Join 通道内应答，Fetch 经推送通道投递带 space_id 清单）+ 16c216f（消费面：每空间 ops.jsonl、op 按 content_hash 解析本地行（各库 uuid 各自生成）、库行反推补记 Add op、贴码加入 UI、空间投递免确认+乐观 ACK、DEVICE 钩子每会话一轮抗熵、大小闸超限挂起+管理弹窗手动放行、apply_join 修 joined_at=本地首入值）；P3 = 手动放行 + 迁移停用告知。**P4 真机验收清单**：① 双机同网段：A 建空间→B 贴码加入→B 名册/空间视图即时到达；② A 添加素材→B 自动补齐（抗熵+Fetch+免确认导入全链）；③ B 离线期 A 添加 N 项→B 上线 DEVICE 命中后自动补齐；④ 旋转邀请码→旧码 JoinErr、新码可入；⑤ Remove op 在 B 侧按摘要反查本地行生效；⑥ 大小闸：>500MB 批次挂起→管理弹窗手动下载放行；⑦ 全员离线重启（身份不漂移：52 位 id 跨重启稳定）；⑧ 大空间首拉（数百项）时间与进度体感；⑨ 主库视图/空间视图切换、清空库护栏、M0 直发默认隐藏回归。**勘误（2026-10-24，v0.1.9 真机）**：P1/P2 的「添加到共享空间 / 从空间保存到我的素材」把清单归类指令误当导入档位传了 `--mode inbox`——该值不在 sample-library 合法档位表（fast|background）内，子进程 exit=1 报「未知 --mode」。修复：两处均改 `background`（与 `fast_import_mode=false` 配对，缩略图交 phase-2 派生、IO idle 优先级）；`inbox` 只是清单行 `{归类}` 列的指令，不是 mode 值（D92 批次修复并重放验证）。
 
 ### D91 内容一致性对账：启动审计 + 重索引子工序 + 缺失/外改角标（2026-10-24）
 
@@ -1246,3 +1246,18 @@ if (click_count % 2) == 1 {
 - **重索引语义**：文本走 set_text_content（FTS 触发器同步）+ SHA-256；图片 pHash 用**全分辨率解码**重算（与导入侧同一 `library::phash_of`，worker 缩略图像素不能喂哈希），content_hash 保持 None（图片走 pHash 感知去重，两套摘要语义互不侵犯）；非图片重算 SHA-256。缩略图/paste.png 经 worker 池重派生（有界批、BackgroundIdle）。导入侧同步修正：拷贝完成后 stat 库内正本回填 mtime（拷贝不保源 mtime）。
 - **孤儿清扫**：`objects/` 子目录无任何行引用（`all_uuids` 含回收站行——软删正本归 trash 对账管辖）且目录年龄 ≥ 600s（在途导入保护）→ 整目录回收。
 - **范围**：只对默认库根对账；空间库根（D90）另有同步机制，不在此批。工具缺失 = 对账缺席诚实降级（warn 日志，不打扰用户）。
+
+### D92 共享可见性投影层：三态分类标识 + 整分类共享 + 素材徽标重塑（2026-10-24）
+
+**背景（v0.1.9 真机验收四项）**：①「添加到共享空间」报错（见 D90 勘误）；②分类行要「全共享/部分共享/无共享」标识；③分类右键菜单要「将分类共享至」；④单素材 8px 紫光点丑、与 ux-audit 主题语系不符。核心架构问题：**「一个素材被共享了吗」该存在哪**——写进主库列（污染单机库语义、多空间要维护列）与 D90 副本集模型相抵触。
+
+**决策：「被共享了吗」是派生视图，不是存储状态。** 投影层单向推导，主库 schema 零改动：
+
+- **投影定义**：空间 op log（`Add − Remove`，按 content_hash 折叠，与 apply 侧同一套两段解析：Add 记哈希、Remove 抵扣）∩ 主库活动资产流 → 每分类 `(活动总数, 已入任一空间数)` + 共享 uuid 集。跨库 uuid 各异（D90），content_hash 是唯一对账键——投影天然继承「字节等值」语义。
+- **三态口径**：`shared==0 || total==0` → 无；`shared ≥ total` → 全；否则部分。「全部」聚合行 = 全库口径（下标 0 特判）。
+- **零成本无空间路径**：member_hashes 为空 → 投影直接 default 返回，不开库不做任何 IO。不建空间的用户对投影层无感知（性能预算不受扰）。
+- **缓存与刷新**：app-ui thread_local 缓存 `ShareProjection`；刷新汇流点三处——库装载（apply_categories 尾）、导入收尾（sync_rows 尾）、空间导入完成（on_space_import_finished）。事件驱动，零 Timer 轮询。
+- **空间视图豁免**：空间内素材按定义全员可见，标识无信息量——投影恒为主库侧语义，进空间视图不重算、不显示分类标识。
+- **UI 语言（与 ux-audit 徽标语系一致）**：分类行三态——**部分** = 裸 14px share 图标（共享紫）；**全** = 18px 胶囊（shared-soft 底 + 1px 共享紫描边 + 10px 图标）；**无** = 不占位（无共享是常态，不为常态制造视觉噪音）。单素材 = 右侧 y46 处 20px share 胶囊徽标（同形态语系）替代旧光点；瓦片右缘线统一 `w−6`（类型徽标/传输点/共享胶囊/一致性点对齐成线）。语义 = D80-M1 控制面标记 ∪ 投影 uuid 集（`spaces::shared_uuids` 统一入口）。
+- **「将分类共享至」**：右键菜单新 action → `category_source_paths` 解析分类下全部活动资产绝对路径 → 复用 space-add 弹窗（提示行「整分类素材会加入所选空间」）→ 沿用既有 add_paths_to_space 管线。**幂等免费**：D65 SHA-256 字节等值唯一拦截使重复共享零副作用。守卫：空间视图下提示回主库；空分类提示无可共享素材；无空间先开空间管理弹窗。
+- **索引支持**：store 新增 `rel_paths_in_category`（`IS ?1` NULL 安全，走 idx_assets_category_id）；ui-viewmodels 新增 `share_projection` / `category_source_paths`（app-ui 依赖白名单不变，store 访问仍经 viewmodels 门面）；`share_projection_spec.rs` 三测锁聚合口径/空成员快路径/路径解析。
