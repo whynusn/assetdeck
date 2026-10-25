@@ -27,6 +27,8 @@ fn row(uuid: &str, name: &str, category: Option<&str>) -> AssetMeta {
         content_hash: None,
         width: None,
         height: None,
+        mtime: None,
+        missing: false,
     }
 }
 

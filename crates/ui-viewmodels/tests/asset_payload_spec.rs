@@ -40,6 +40,8 @@ fn scaffold_relative_library(tag: &str, file_name: &str, bytes: &[u8]) -> PathBu
             content_hash: None,
             width: None,
             height: None,
+            mtime: None,
+            missing: false,
         })
         .expect("写入资产元数据失败");
     assert!(
@@ -188,6 +190,8 @@ fn scaffold_many(tag: &str, count: usize) -> PathBuf {
                 content_hash: None,
                 width: None,
                 height: None,
+                mtime: None,
+                missing: false,
             })
             .expect("写入资产元数据失败");
     }
