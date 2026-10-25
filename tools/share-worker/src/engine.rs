@@ -265,6 +265,7 @@ pub async fn send_batch(
     let manifest = TransferManifest {
         batch_id,
         sender_name: request.sender_name.clone(),
+        space_id: request.space_id,
         items,
     };
     manifest

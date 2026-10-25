@@ -17,6 +17,8 @@ pub fn target_bar_mode(mode: TargetBarMode) -> i32 {
     }
 }
 
+pub const NOTICE_TONE_INFO: i32 = 3;
+
 /// 提示语气 → UiEnums.notice-tone-*（与 slint 常量严格对应）。
 pub fn notice_tone(tone: TargetNoticeTone) -> i32 {
     match tone {

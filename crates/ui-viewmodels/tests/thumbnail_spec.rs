@@ -52,6 +52,8 @@ fn scaffold(tag: &str) -> PathBuf {
                 content_hash: None,
                 width,
                 height,
+                mtime: None,
+                missing: false,
             })
             .expect("写资产元数据失败");
     }

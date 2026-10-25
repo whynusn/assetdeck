@@ -1,0 +1,100 @@
+import { Button, ScrollView } from "std-widgets.slint";
+import { Theme, Typography, Spacing } from "theme.slint";
+
+export global NoticeTone {
+    out property <int> success: 0;
+    out property <int> warning: 1;
+    out property <int> error: 2;
+    out property <int> info: 3;
+}
+
+export struct NoticeRow { text: string, tone: int }
+
+// Shared inline feedback for forms and sustained problems. No timers or business logic.
+export component InlineNotice inherits Rectangle {
+    in property <string> text;
+    in property <bool> error: true;
+    in property <string> action-label;
+    callback action();
+    background: root.error ? Theme.danger-soft : Theme.accent-soft;
+    border-radius: Theme.radius;
+    height: content.preferred-height;
+    content := HorizontalLayout {
+        padding: Spacing.xl;
+        spacing: Spacing.md;
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: root.error ? Theme.danger : Theme.text;
+            font-size: Typography.body;
+            wrap: word-wrap;
+        }
+        if root.action-label != "": Button {
+            max-width: 100px;
+            text: root.action-label;
+            clicked => { root.action(); }
+        }
+    }
+}
+
+// Window-local overlay: never activates a separate window or changes grid geometry.
+export component ToastHost inherits Rectangle {
+    in property <string> text;
+    in property <int> tone;
+    out property <bool> hovered: hover.has-hover || close.has-focus || records.has-focus;
+    callback dismissed();
+    callback history-requested();
+    background: Theme.bg-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    height: body.preferred-height;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: Theme.scrim;
+    hover := TouchArea { }
+    body := VerticalLayout {
+        padding: Spacing.xl;
+        spacing: Spacing.md;
+        Text {
+            text: root.tone == NoticeTone.error ? "操作未完成" : root.tone == NoticeTone.warning ? "请留意" : root.tone == NoticeTone.info ? "提示" : "已完成";
+            color: root.tone == NoticeTone.error ? Theme.danger : root.tone == NoticeTone.warning ? Theme.warn : root.tone == NoticeTone.info ? Theme.accent : Theme.ok;
+            font-size: Typography.label;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Typography.body;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: Spacing.md;
+            records := Button { text: "查看记录"; clicked => { root.history-requested(); } }
+            Rectangle { horizontal-stretch: 1; }
+            close := Button { text: "关闭"; clicked => { root.dismissed(); } }
+        }
+    }
+}
+
+export component NoticeHistory inherits Rectangle {
+    in property <[NoticeRow]> rows;
+    callback closed();
+    background: Theme.bg-overlay;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    TouchArea { }
+    VerticalLayout {
+        padding: Spacing.xl;
+        spacing: Spacing.md;
+        HorizontalLayout {
+            Text { text: "最近通知 · 最多 20 条"; color: Theme.text; font-size: Typography.body; }
+            Button { text: "关闭"; max-width: 72px; clicked => { root.closed(); } }
+        }
+        ScrollView {
+            VerticalLayout {
+                spacing: Spacing.md;
+                for row in root.rows: InlineNotice { text: row.text; error: row.tone == NoticeTone.error; }
+            }
+        }
+    }
+}
