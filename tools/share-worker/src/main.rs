@@ -115,6 +115,38 @@ fn target_addr(id_z32: &str, addrs: &[String]) -> Option<EndpointAddr> {
     Some(addr)
 }
 
+/// 拨号地址补全（D93 连接修复）：命令携带的可用直连地址优先；一个都没有
+/// 时做一次**定向 mDNS 浏览**（同网段对端的 TXT 直连地址，命中即出）——
+/// 纯 id 拨号会走 pkarr 公网 DNS 解析，国内网络常不可达，必须排在局域网
+/// 路径之后当兜底而非默认。返回值直接喂 [`target_addr`]。
+async fn resolve_dial_addrs(
+    daemon: Option<ServiceDaemon>,
+    self_id: String,
+    peer_id: &str,
+    addrs: &[String],
+) -> Vec<String> {
+    let usable: Vec<String> = addrs
+        .iter()
+        .filter(|a| a.parse::<SocketAddr>().is_ok())
+        .cloned()
+        .collect();
+    if !usable.is_empty() {
+        return usable;
+    }
+    let Some(daemon) = daemon else {
+        return Vec::new();
+    };
+    let target = peer_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        mdns::scan_for(&daemon, &self_id, &target, mdns::SCAN_WINDOW)
+    })
+    .await
+    .ok()
+    .flatten()
+    .map(|device| device.addrs)
+    .unwrap_or_default()
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let _log = logging::init_from_env("share-worker", None, logging::Level::Info);
@@ -297,29 +329,48 @@ async fn run(
                         addrs,
                         message,
                     }) => {
-                        let Some(target) = target_addr(&peer_id, &addrs) else {
-                            emit(proto::out::sync_sent(&peer_id, false, "目标设备地址不合法"));
+                        if EndpointId::from_z32(&peer_id).is_err() {
+                            emit(proto::out::sync_sent(&peer_id, false, "目标设备标识不合法"));
                             continue;
-                        };
+                        }
                         let endpoint = endpoint.clone();
+                        let daemon = daemon_for_scan.clone();
+                        let self_id_for_scan = self_id.clone();
+                        let peer_for_log = peer_id.clone();
                         tokio::spawn(async move {
-                            report_sync_send(endpoint, target, message, peer_id).await;
+                            let addrs =
+                                resolve_dial_addrs(daemon, self_id_for_scan, &peer_for_log, &addrs)
+                                    .await;
+                            let Some(target) = target_addr(&peer_for_log, &addrs) else {
+                                emit(proto::out::sync_sent(&peer_for_log, false, "目标设备标识不合法"));
+                                return;
+                            };
+                            report_sync_send(endpoint, target, message, peer_for_log).await;
                         });
                     }
                     Some(proto::Command::SpaceState(book)) => {
                         books.spaces.replace(book);
                     }
                     Some(proto::Command::SpaceSync { peer_id, addrs }) => {
-                        let Some(target) = target_addr(&peer_id, &addrs) else {
-                            emit(proto::out::sync_sent(&peer_id, false, "目标设备地址不合法"));
+                        if EndpointId::from_z32(&peer_id).is_err() {
+                            emit(proto::out::sync_sent(&peer_id, false, "目标设备标识不合法"));
                             continue;
-                        };
+                        }
                         let message = SyncMessage::Space {
                             message: books.spaces.summary(),
                         };
-                        let peer_for_log = peer_id.clone();
                         let endpoint = endpoint.clone();
+                        let daemon = daemon_for_scan.clone();
+                        let self_id_for_scan = self_id.clone();
+                        let peer_for_log = peer_id.clone();
                         tokio::spawn(async move {
+                            let addrs =
+                                resolve_dial_addrs(daemon, self_id_for_scan, &peer_for_log, &addrs)
+                                    .await;
+                            let Some(target) = target_addr(&peer_for_log, &addrs) else {
+                                emit(proto::out::sync_sent(&peer_for_log, false, "目标设备标识不合法"));
+                                return;
+                            };
                             report_sync_send(endpoint, target, message, peer_for_log).await;
                         });
                     }
@@ -328,16 +379,25 @@ async fn run(
                         code,
                         joiner_name,
                     }) => {
-                        let Some(target) = target_addr(&owner_id, &[]) else {
+                        if EndpointId::from_z32(&owner_id).is_err() {
                             emit(proto::out::sync_sent(&owner_id, false, "空间主标识不合法"));
                             continue;
-                        };
+                        }
                         let message = SyncMessage::Space {
                             message: SpaceMessage::Join { code, joiner_name },
                         };
-                        let owner_for_log = owner_id.clone();
                         let endpoint = endpoint.clone();
+                        let daemon = daemon_for_scan.clone();
+                        let self_id_for_scan = self_id.clone();
+                        let owner_for_log = owner_id.clone();
                         tokio::spawn(async move {
+                            let addrs =
+                                resolve_dial_addrs(daemon, self_id_for_scan, &owner_for_log, &[])
+                                    .await;
+                            let Some(target) = target_addr(&owner_for_log, &addrs) else {
+                                emit(proto::out::sync_sent(&owner_for_log, false, "空间主标识不合法"));
+                                return;
+                            };
                             report_sync_send(endpoint, target, message, owner_for_log).await;
                         });
                     }

@@ -8,9 +8,15 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+# 发版跳验通道（D72 2026-10-25 增补）：head 提交信息带「[skip verify]」时三个验证 job
+# 全跳、package/release 照常。注意 Actions 语义：needs 依赖被 skip 会连坐跳过下游，
+# 故 package/release 的 if 必须 `!failure() && !cancelled()`（skip≠failure 放行、真失败/
+# 取消仍拦）。仅用于「刚全绿 + 零代码改动」的升版 tag 提交（release.ps1 -SkipVerify）；
+# 标记不生效时退化为全量验证（fail-open 到验证侧），PR/schedule/dispatch 事件
+# head_commit 为 null，恒不命中。
 jobs:
   lint-and-test:
-    if: github.event_name != 'schedule'
+    if: ${{ github.event_name != 'schedule' && !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: windows-latest
     # 本地开发用 windows-gnu 工具链，CI 用 runner 自带 MSVC——源码级兼容，产物不交叉使用
     steps:
@@ -40,6 +46,7 @@ jobs:
 
   # deny 不再排除 schedule：RustSec 公告库是持续变化的外部输入，每日定时扫描才有价值。
   deny:
+    if: ${{ !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +60,7 @@ jobs:
   # M7 内存回归（DECISIONS.md 行动项 A3）：预算超标即红，趋势产物存 artifact。
   # release 档出正式数字（D10 合同以发布形态为准）。
   mem-regression:
+    if: ${{ !contains(github.event.head_commit.message, '[skip verify]') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,9 +87,10 @@ jobs:
 
   # 统一打包（scripts/package.ps1）：一条流水线产出便携版 zip + 自解压安装版 exe。
   # 质量门禁（lint/test + 许可证）通过后，每次 push/PR 都产出可下载候选包。
+  # !failure()&&!cancelled()：验证 job 被 [skip verify] 跳过时照常打包（skip≠failure）。
   package:
     needs: [lint-and-test, deny]
-    if: github.event_name != 'schedule'
+    if: ${{ github.event_name != 'schedule' && !failure() && !cancelled() }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,9 +119,10 @@ jobs:
 
   # 打 v* tag（如 v0.1.0）时发布正式版：
   # 内存预算（D10）+ 质量/许可证门禁全绿后，把候选包发布到 GitHub Release。
+  # !failure()&&!cancelled()：同 package——验证 job 被标记跳过时发布链路照常走。
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
     needs: [package, mem-regression, deny]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

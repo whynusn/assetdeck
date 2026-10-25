@@ -9,7 +9,7 @@
 //! 边读边装配，不物化全量 AssetMeta Vector。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -490,6 +490,82 @@ pub fn content_paths(root: &Path) -> Vec<(Vec<u8>, String, PathBuf)> {
         }
     });
     rows
+}
+
+/// D92 共享可见性投影（主库侧产物）。`by_category`：分类名 → (活动总数,
+/// 已入任一空间数)；`shared_uuids`：内容哈希命中空间成员集的 uuid 集——
+/// 尺寸 = 实际共享条数，与库规模无关（瓦片角标现查集的驻留上界）。
+/// 分类命名与 facets 同源（NULL → 收件箱常量），保证按名对齐不漂。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ShareProjection {
+    pub by_category: HashMap<String, (u32, u32)>,
+    pub shared_uuids: HashSet<String>,
+}
+
+/// 对主库活动资产做一次流式聚合（D92）：成员哈希集为空 = 无空间常态，
+/// 零成本直返空投影。与 [`content_paths`] 同纪律：只读开库，WAL 下与
+/// 子进程写互不阻塞；for_each_asset_active 流式遍历，不物化全量。
+pub fn share_projection(root: &Path, member_hashes: &HashSet<Vec<u8>>) -> ShareProjection {
+    if member_hashes.is_empty() {
+        return ShareProjection::default();
+    }
+    let db = root.join("meta.db");
+    let Ok(store) = Store::open(&db) else {
+        return ShareProjection::default();
+    };
+    let mut projection = ShareProjection::default();
+    let _ = store.for_each_asset_active(|meta: store::AssetMeta| {
+        let name = meta
+            .category
+            .clone()
+            .unwrap_or_else(|| store::INBOX_CATEGORY.to_string());
+        let entry = projection.by_category.entry(name).or_insert((0, 0));
+        entry.0 += 1;
+        if meta
+            .content_hash
+            .as_deref()
+            .is_some_and(|hash| member_hashes.contains(hash))
+        {
+            entry.1 += 1;
+            projection.shared_uuids.insert(meta.uuid);
+        }
+    });
+    projection
+}
+
+/// 「将分类共享至」的导入清单源路径（D92）：分类内活动资产的正本绝对路径。
+/// 分类名按 facets 同源解析（「待分类」→ 收件箱 NULL；表内同名行防御性跳过，
+/// 与 load_real_library 的收件箱并存防御一致）。走 idx_assets_category_id，
+/// 成本 = 分类行数。
+pub fn category_source_paths(root: &Path, category: &str) -> Vec<PathBuf> {
+    let db = root.join("meta.db");
+    let Ok(store) = Store::open(&db) else {
+        return Vec::new();
+    };
+    let category_id = if category == store::INBOX_CATEGORY {
+        None
+    } else {
+        let found = store.list_categories().ok().and_then(|rows| {
+            rows.into_iter()
+                .find(|(_, name)| name == category)
+                .map(|(id, _)| id)
+        });
+        // 库里没有该分类（菜单滞留旧名）：无路径可共享。
+        match found {
+            Some(id) => Some(id),
+            None => return Vec::new(),
+        }
+    };
+    match store.rel_paths_in_category(category_id) {
+        Ok(rels) => rels
+            .into_iter()
+            .map(|rel| {
+                let joined = root.join(rel);
+                std::path::absolute(&joined).unwrap_or(joined)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// 打开真实库目录并同时返回 `FacetIndex` 与素材 resolver。

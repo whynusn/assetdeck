@@ -34,4 +34,6 @@ Cargo.lock.bak
 
 # 会话工具运行态（ZCode CLI 的 workspace 配置/计划，不进仓）
 /.zcode/
+# 会话工具运行态（Qoder 的 workspace 配置，不进仓；同 /.zcode/ 理由）
+/.qoder/
 
