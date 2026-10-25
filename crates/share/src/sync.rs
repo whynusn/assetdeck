@@ -97,6 +97,8 @@ pub enum SyncError {
     BadDeviceName,
     /// Roster 名册不合法（域名/成员 id/成员名形状）。
     BadRoster,
+    /// 空间报文载荷不合法（D90-P2；明细见 SpaceSyncError）。
+    BadSpace,
 }
 
 impl core::fmt::Display for SyncError {
@@ -112,6 +114,7 @@ impl core::fmt::Display for SyncError {
             SyncError::BadPeerId(id) => write!(f, "对端设备标识不合法：{id}"),
             SyncError::BadDeviceName => write!(f, "邀请报文的设备名不合法"),
             SyncError::BadRoster => write!(f, "群组名册不合法"),
+            SyncError::BadSpace => write!(f, "共享空间报文不合法"),
         }
     }
 }
@@ -162,6 +165,7 @@ impl SyncMessage {
                 }
             }
             SyncMessage::Roster { roster } => roster.validate().map_err(|_| SyncError::BadRoster),
+            SyncMessage::Space { message } => message.validate().map_err(|_| SyncError::BadSpace),
         }
     }
 }
@@ -199,6 +203,11 @@ pub enum SyncMessage {
     /// （名册不含自己 = 被踢出信号）。信任收口：只接受「有未决 JoinInvite
     /// 的对端（引导握手）或已配对对端（成员变更广播）」的名册。
     Roster { roster: GroupRoster },
+    /// 共享空间报文（D90-P2）：嵌套一级 serde tag，复用同一同步通道与
+    /// 解析面；域模型报文 D90 后不再产生（退役保留兼容）。
+    Space {
+        message: crate::space_sync::SpaceMessage,
+    },
 }
 
 #[cfg(test)]

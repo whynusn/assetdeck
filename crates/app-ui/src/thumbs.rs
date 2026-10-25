@@ -401,6 +401,17 @@ fn build_rows(
                 }
             };
 
+            // 一致性状态（D91）与共享角标共用一次 uuid 解析：缺失/已修改
+            // 从 reindex 子进程上报的线程局部集合现查（与 shared 同一纪律，
+            // 变化由宿主触发 grid.sync() 整体重排）。
+            let asset_uuid = thumbs_guard
+                .as_ref()
+                .and_then(|resolver| resolver.uuid_of(id))
+                .and_then(|uuid| uuid.parse::<Uuid>().ok());
+            let (missing, stale) = asset_uuid
+                .map(crate::consistency_flags_of)
+                .unwrap_or((false, false));
+
             let tile = TileData {
                 x: r.x,
                 y: r.y,
@@ -418,19 +429,15 @@ fn build_rows(
                 // 选区变化后统一触发，这里不缓存）。
                 selected: vm.is_selected(id),
                 // D80 共享角标：现查现取（uuid 查不到 = 演示库/未共享 = 无角标）。
-                share_badge: thumbs_guard
-                    .as_ref()
-                    .and_then(|resolver| resolver.uuid_of(id))
-                    .and_then(|uuid| uuid.parse::<Uuid>().ok())
+                share_badge: asset_uuid
                     .map(|uuid| ui_enums::share_badge(share_vm.badge(uuid)))
                     .unwrap_or(ui_enums::SHARE_BADGE_NONE),
                 // D80-M1「共享中」：控制面共享态现查（同一 uuid 键）。
-                shared: thumbs_guard
-                    .as_ref()
-                    .and_then(|resolver| resolver.uuid_of(id))
-                    .and_then(|uuid| uuid.parse::<Uuid>().ok())
+                shared: asset_uuid
                     .map(|uuid| shared.contains(&uuid))
                     .unwrap_or(false),
+                missing,
+                stale,
             };
             if loaded_real {
                 updates.push((i, tile.clone()));

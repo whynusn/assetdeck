@@ -13,6 +13,7 @@ pub mod registry;
 pub mod request;
 pub mod sharing;
 pub mod space;
+pub mod space_sync;
 pub mod sync;
 
 pub use domain::{DomainError, DomainKind, PairedDevice, PairedDevices, ShareDomain};
@@ -35,5 +36,10 @@ pub use sharing::{SharedState, SharingEntry};
 pub use space::{
     merge_lamport, parse_space_invite_code, space_invite_code, SpaceAssetKind, SpaceAssetMeta,
     SpaceError, SpaceInviteCode, SpaceMeta, SpaceOp, SpaceOpKind, SpaceRegistry, SpaceRole,
+};
+pub use space_sync::{
+    admit_join, apply_join, OpKey, ServeItem, SpaceBookEntry, SpaceBookState, SpaceJoinError,
+    SpaceMessage, SpaceSummaryEntry, SpaceSyncError, MAX_FETCH_ITEMS, MAX_OPS_PER_MESSAGE,
+    MAX_SUMMARY_KEYS, MAX_SUMMARY_SPACES,
 };
 pub use sync::{PeerSyncState, ShareOffer, SyncBookState, SyncError, SyncMessage};

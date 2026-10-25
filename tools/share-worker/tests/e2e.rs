@@ -53,6 +53,7 @@ fn request_for(batch_id: Uuid, receiver: &Endpoint, items: Vec<SendItem>) -> Sen
             .filter(|a| a.is_ipv4())
             .map(|a| SocketAddr::new("127.0.0.1".parse().unwrap(), a.port()).to_string())
             .collect(),
+        space_id: None,
         items,
     }
 }

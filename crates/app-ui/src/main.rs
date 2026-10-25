@@ -90,6 +90,41 @@ thread_local! {
     static SHARE_GRID: RefCell<Option<Rc<GridCtx>>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// D91 一致性角标集（UI 线程唯一实例）：reindex 子进程行协议（MARK/FIXED）
+    /// 上报的缺失/被外部修改 uuid。thumbs.rs 铺瓦片时经
+    /// [`consistency_flags_of`] 现查（pub(crate)），变化经合并定时器重排。
+    pub(crate) static CONSISTENCY_FLAGS: RefCell<ConsistencyFlags> =
+        RefCell::new(ConsistencyFlags::new());
+    /// 角标变化的合并同步定时器：MARK 可能连发（大改动批次），200ms 窗口内
+    /// 只排一次 grid.sync()，避免逐行重排风暴。
+    static CONSISTENCY_SYNC_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
+    /// 网格同步句柄（Rc 非 Send：reindex 读线程回调经 invoke_from_event_loop
+    /// 弹回 UI 线程后取用，同 SHARE_GRID 模式）。
+    static CONSISTENCY_GRID: RefCell<Option<Rc<GridCtx>>> = const { RefCell::new(None) };
+}
+
+/// D91 一致性角标集。
+#[derive(Default)]
+pub(crate) struct ConsistencyFlags {
+    missing: std::collections::HashSet<Uuid>,
+    stale: std::collections::HashSet<Uuid>,
+}
+
+impl ConsistencyFlags {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// 铺瓦片现查（thumbs.rs 调用）：素材当前的一致性角标 (missing, stale)。
+pub(crate) fn consistency_flags_of(uuid: Uuid) -> (bool, bool) {
+    CONSISTENCY_FLAGS.with(|flags| {
+        let flags = flags.borrow();
+        (flags.missing.contains(&uuid), flags.stale.contains(&uuid))
+    })
+}
+
 /// D80 共享接线的 UI 线程侧装配件（见 [`SHARE_WIRING`]）。
 #[derive(Clone)]
 struct ShareWiring {
@@ -4996,6 +5031,17 @@ fn main() {
         });
     }
 
+    // D91 启动一致性对账：reindex 子进程后台跑（idle 档、无进度条）。角标集
+    // 由 MARK/FIXED 行驱动现查；重索引动过内容才在结束时整库重载。只对默认
+    // 库根对账（空间库根 D90 另有同步机制，不在此批范围）。
+    {
+        let root = library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        CONSISTENCY_GRID.with(|slot| *slot.borrow_mut() = Some(grid.clone()));
+        spawn_consistency_audit(app.as_weak(), root);
+    }
+
     {
         let ui = app.as_weak();
         app.on_import_progress(move |done, total| {
@@ -5906,6 +5952,184 @@ fn spawn_derive_thumbs(
         .run_in_background();
 }
 
+/// D91 reindex 子进程行协议事件（[`parse_reindex_line`] 的产物，纯数据可跨线程）。
+#[derive(Debug, PartialEq, Eq)]
+enum ReindexEvent {
+    /// 扫描发现：`missing` = 正本缺失；`stale` = 被外部修改；两者皆 false =
+    /// 恢复/正常（ok，摘双角标）。
+    Mark {
+        missing: bool,
+        stale: bool,
+        uuid: Uuid,
+    },
+    /// 单个素材重索引完成（摘 stale 角标）。
+    Fixed { uuid: Uuid },
+    /// 摘要行 reindexed>0（重索引动过真实内容，结束时要整库重载）。
+    NeedsReload,
+}
+
+/// reindex stdout 行协议解析（纯函数；协议出处见 tools/reindex 的 lib.rs 头注）。
+/// 其余行（PROGRESS/done 无重索引/warn）不产生事件。
+fn parse_reindex_line(line: &str) -> Option<ReindexEvent> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if let Some(rest) = line.strip_prefix("MARK\t") {
+        let (state, uuid) = rest.split_once('\t')?;
+        let uuid = uuid.parse::<Uuid>().ok()?;
+        return match state {
+            "missing" => Some(ReindexEvent::Mark {
+                missing: true,
+                stale: false,
+                uuid,
+            }),
+            "stale" => Some(ReindexEvent::Mark {
+                missing: false,
+                stale: true,
+                uuid,
+            }),
+            "ok" => Some(ReindexEvent::Mark {
+                missing: false,
+                stale: false,
+                uuid,
+            }),
+            _ => None,
+        };
+    }
+    if let Some(uuid) = line.strip_prefix("FIXED\t") {
+        return Some(ReindexEvent::Fixed {
+            uuid: uuid.trim().parse::<Uuid>().ok()?,
+        });
+    }
+    if line.starts_with("done: ") {
+        for token in line.split_whitespace() {
+            if let Some(count) = token.strip_prefix("reindexed=") {
+                return count
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map(|_| ReindexEvent::NeedsReload);
+            }
+        }
+    }
+    None
+}
+
+/// 应用一条 reindex 事件到角标集并请求合并重排（UI 线程）。
+fn apply_reindex_event(event: ReindexEvent) {
+    match event {
+        ReindexEvent::Mark {
+            missing,
+            stale,
+            uuid,
+        } => {
+            CONSISTENCY_FLAGS.with(|flags| {
+                let mut flags = flags.borrow_mut();
+                if missing {
+                    // 缺失优先：文件都不在了，「已修改」无从谈起。
+                    flags.missing.insert(uuid);
+                    flags.stale.remove(&uuid);
+                } else if stale {
+                    flags.stale.insert(uuid);
+                    flags.missing.remove(&uuid);
+                } else {
+                    flags.missing.remove(&uuid);
+                    flags.stale.remove(&uuid);
+                }
+            });
+            schedule_consistency_sync();
+        }
+        ReindexEvent::Fixed { uuid } => {
+            CONSISTENCY_FLAGS.with(|flags| {
+                flags.borrow_mut().stale.remove(&uuid);
+            });
+            schedule_consistency_sync();
+        }
+        ReindexEvent::NeedsReload => {}
+    }
+}
+
+/// 角标变化的合并重排：200ms 单发定时器，窗口内的连发 MARK 只触发一次
+/// grid.sync()（reindex 扫描对大改动批次会瞬间上报几十条）。
+fn schedule_consistency_sync() {
+    let grid = CONSISTENCY_GRID.with(|slot| slot.borrow().as_ref().map(Rc::clone));
+    let Some(grid) = grid else {
+        return;
+    };
+    CONSISTENCY_SYNC_TIMER.with(|slot| {
+        slot.borrow().start(
+            TimerMode::SingleShot,
+            std::time::Duration::from_millis(200),
+            move || grid.sync(),
+        );
+    });
+}
+
+/// D91 启动一致性对账：reindex 子进程后台跑（idle 档、无进度条）。MARK/FIXED
+/// 行驱动角标现查集；`reindexed>0`（动过真实内容）才在结束时整库重载——复用
+/// on_thumbnails_generated 的收尾路径（重建 VM + grid.sync），不重复实现。
+fn spawn_consistency_audit(ui: slint::Weak<AppWindow>, root: String) {
+    if !std::path::Path::new(&root).join("meta.db").is_file() {
+        return; // 空库/演示模式：无索引可对账。
+    }
+    let reindex_exe = helper_exe("reindex.exe");
+    if !reindex_exe.is_file() {
+        // 工具缺失 = 对账缺席（诚实降级）：导入/缩略图功能不受影响，不打扰。
+        logging::warn!("reindex.exe 缺失，跳过启动一致性对账");
+        return;
+    }
+    let worker_exe = helper_exe("decode-worker.exe");
+    logging::info!("启动一致性对账: {root}");
+    let needs_reload = Arc::new(AtomicBool::new(false));
+    let reload_flag = Arc::clone(&needs_reload);
+    let mut task = ChildTask::new(
+        reindex_exe,
+        vec![
+            "--library".into(),
+            root,
+            "--worker-exe".into(),
+            worker_exe.to_string_lossy().into_owned(),
+            "--mode".into(),
+            "background".into(),
+        ],
+    );
+    if let Some(dir) = logging::logs_dir() {
+        task = task
+            .with_env("DSH_LOG_DIR", &dir.to_string_lossy())
+            .with_env("DSH_LOG_LEVEL", logging::current_level().as_str());
+    }
+    task = task.with_line(move |line| {
+        logging::info!("reindex: {line}");
+        match parse_reindex_line(&line) {
+            Some(ReindexEvent::NeedsReload) => reload_flag.store(true, Ordering::SeqCst),
+            Some(event) => {
+                let _ = slint::invoke_from_event_loop(move || apply_reindex_event(event));
+            }
+            None => {}
+        }
+    });
+    let _ = task
+        .with_finished(move |success, message| {
+            // with_finished 是 Fn（理论可多次回调），内层 FnOnce 闭包要的
+            // 句柄每次现克——Weak/Arc 克隆都是廉价的引用计数操作。
+            let ui = ui.clone();
+            let needs_reload = Arc::clone(&needs_reload);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui.upgrade() else {
+                    return;
+                };
+                if !success && !message.trim().is_empty() {
+                    show_notice(
+                        &ui,
+                        TargetNoticeTone::Warning,
+                        format!("一致性对账未完成：{}", message.trim()),
+                    );
+                } else if success && needs_reload.load(Ordering::SeqCst) {
+                    ui.invoke_thumbnails_generated();
+                }
+            });
+        })
+        .run_in_background();
+}
+
 /// 解析 `--library-root <path>` / `--library-root=<path>` 启动参数。
 ///
 /// 含空格的路径是重灾区：壳/快捷方式忘加引号时，argv 会把一个路径按空白切成
@@ -6099,6 +6323,82 @@ fn run_bench(args: &BenchArgs) -> i32 {
     println!("{line}");
     let _ = std::io::stdout().flush();
     0
+}
+
+#[cfg(test)]
+mod reindex_line_protocol_spec {
+    use super::{parse_reindex_line, ReindexEvent};
+    use ui_viewmodels::uuid::Uuid;
+
+    fn uuid(text: &str) -> Uuid {
+        text.parse::<Uuid>().expect("测试 uuid 预期合法")
+    }
+
+    #[test]
+    fn mark_lines_route_to_state_events() {
+        // 行协议里的 uuid 是库内真 uuid（字典序文本），非 u-N 短名。
+        let cases = [
+            (
+                "MARK\tmissing\t00000000-0000-0000-0000-000000000001",
+                Some(ReindexEvent::Mark {
+                    missing: true,
+                    stale: false,
+                    uuid: uuid("00000000-0000-0000-0000-000000000001"),
+                }),
+            ),
+            (
+                "MARK\tstale\t00000000-0000-0000-0000-000000000002",
+                Some(ReindexEvent::Mark {
+                    missing: false,
+                    stale: true,
+                    uuid: uuid("00000000-0000-0000-0000-000000000002"),
+                }),
+            ),
+            (
+                "MARK\tok\t00000000-0000-0000-0000-000000000003",
+                Some(ReindexEvent::Mark {
+                    missing: false,
+                    stale: false,
+                    uuid: uuid("00000000-0000-0000-0000-000000000003"),
+                }),
+            ),
+            (
+                "FIXED\t00000000-0000-0000-0000-000000000004\r",
+                Some(ReindexEvent::Fixed {
+                    uuid: uuid("00000000-0000-0000-0000-000000000004"),
+                }),
+            ),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parse_reindex_line(line), expected, "line={line}");
+        }
+    }
+
+    #[test]
+    fn done_line_needs_reload_only_when_reindexed() {
+        assert_eq!(
+            parse_reindex_line("done: reindexed=3 failed=0 missing=0 root=C:/lib"),
+            Some(ReindexEvent::NeedsReload)
+        );
+        assert_eq!(
+            parse_reindex_line("done: reindexed=0 failed=0 missing=2 root=C:/lib"),
+            None,
+            "只标记缺失/回填基线不触发整库重载"
+        );
+    }
+
+    #[test]
+    fn unrelated_lines_yield_no_event() {
+        for line in [
+            "PROGRESS\t5\t20",
+            "nothing to do: ready=12",
+            "MARK\tbogus\tu-1",
+            "MARK\tstale",
+            "",
+        ] {
+            assert_eq!(parse_reindex_line(line), None, "line={line}");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,20 @@
+[package]
+name = "reindex"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# D91 内容一致性对账与重索引。图片 pHash 在本进程内全分辨率解码（与导入侧
+# 同一 library::phash_of 实现，保证逐位一致）——本工具是离线编排进程，不是
+# UI 进程，D11 红线只约束 UI 主进程；缩略图/视频抽帧仍走 worker 子进程池。
+[dependencies]
+domain = { path = "../../crates/domain" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+library = { path = "../../crates/library" }
+logging = { path = "../../crates/logging" }
+media = { path = "../../crates/media" }
+store = { path = "../../crates/store" }
+worker = { path = "../../crates/worker" }
+
+[dev-dependencies]
+tempfile = "3"
