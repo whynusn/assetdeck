@@ -29,8 +29,8 @@
 //!   对端身份取自 QUIC 握手，非报文自报）
 //! - `SYNC_SENT\t<对端id>\t<ok|failed>\t<明细>` —— 我方同步报文结局
 //!   （M1-b；推送丢失由对端补拉自愈，仅知情不重试）
-//! - `SPACE_ADMITTED\t<space_id>\t<对端id>` —— 空间主侧受理了新成员
-//!   （D90-P2；UI 落盘名册 + op 并重推 SPACE_STATE）
+//! - `SPACE_ADMITTED\t<space_id>\t<对端id>\t<加入者名>` —— 空间主侧受理了
+//!   新成员（D90-P2；UI 落盘名册 + op 并重推 SPACE_STATE）
 //! - `NOTICE\t<提示：…|警示：…>` —— 用户知情消息（D64 前缀约定）
 //!
 //! stderr 归日志门面（D39），不承载协议。
@@ -278,8 +278,8 @@ pub mod out {
     }
 
     /// D90-P2：空间主侧受理了新成员（UI 落盘 spaces.json + ops 并重推 SPACE_STATE）。
-    pub fn space_admitted(space_id: &str, peer_id: &str) -> String {
-        format!("SPACE_ADMITTED\t{space_id}\t{peer_id}")
+    pub fn space_admitted(space_id: &str, peer_id: &str, joiner_name: &str) -> String {
+        format!("SPACE_ADMITTED\t{space_id}\t{peer_id}\t{joiner_name}")
     }
 }
 

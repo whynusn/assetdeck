@@ -1112,6 +1112,12 @@ fn spawn_share_worker(ui: slint::Weak<AppWindow>) {
             // 子进程线程只许 Weak<AppWindow>（Send 纪律）；Rc 状态机在
             // UI 线程经 SHARE_STDIN/SHARE_VM 线程局部取回。
             let _ = slint::invoke_from_event_loop(move || {
+                // D90-P2：空间相关行先于域模型状态机拦截（INCOMING 空间投递
+                // 免确认、STAGED 路由回空间根、SPACE_ADMITTED 落册、DEVICE
+                // 挂在线钩子）。true = 已消费，不进 share_vm。
+                if spaces::intercept_worker_line(&line) {
+                    return;
+                }
                 let actions = SHARE_VM.with(|vm| vm.borrow_mut().handle_line(&line));
                 dispatch_share_actions(&weak, actions);
                 // D90：READY（及任何携带身份的行）到达即回填空间身份——幂等，
@@ -1176,6 +1182,10 @@ fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareActio
             }
             ShareAction::Notice(tone, text) => show_notice(&ui, tone, text),
             ShareAction::BadgesChanged(uuids) => refresh_share_badges(&ui, &uuids),
+            // D90-P2：空间协议报文（Ops 差量/JoinOk/JoinErr）落 spaces 模块。
+            ShareAction::SpaceMessage { peer_id, message } => {
+                spaces::handle_space_message(&ui, &peer_id, message);
+            }
             ShareAction::PairDevice { .. }
             | ShareAction::JoinRequested { .. }
             | ShareAction::RosterReceived(_) => {
@@ -2269,10 +2279,31 @@ fn main() {
     // 缺省用内置 GitHub 主源；国内镜像顺序回落经此文件配置。
     let feeds_path = target_config_dir.join("update_feeds.toml");
 
-    // D80-M1 共享注册表：与 targets.json 同目录。损坏/缺失 = 空册起步
-    // （默认零共享不变量：没有配对/域/共享事实，任何人都看不到任何素材）。
-    // D90：域模型退役，注册表仅作迁移源保留（P3 shim 换算成空间）。
+    // D80-M1 共享注册表：域模型已随 D90 退役。旧文件一次性归档（改名
+    // .legacy.json，防重复打扰；原内容保留可查）——完整换算（域→空间 +
+    // 共享态→Add op + 字节入空间根）需要启动期编排跨库拷贝，违背「语义
+    // 简单」拍板且旧域仅存于开发期装机，诚实降级为停用告知：团队共享用
+    // 新空间一次贴码重建。归档后 SHARE_CONTROL 按空册装载，残留的
+    // 「共享中」角标随之消失。
     let share_registry_path = target_config_dir.join("share_registry.json");
+    let mut legacy_archive_notice: Option<String> = None;
+    if share_registry_path.is_file() {
+        let legacy = std::fs::read_to_string(&share_registry_path)
+            .ok()
+            .and_then(|text| ShareRegistry::from_json(&text));
+        let meaningful = legacy.as_ref().is_some_and(|registry| {
+            !registry.domains.is_empty() || !registry.shared.entries().is_empty()
+        });
+        if meaningful {
+            let archived = share_registry_path.with_extension("legacy.json");
+            if std::fs::rename(&share_registry_path, &archived).is_ok() {
+                legacy_archive_notice = Some(
+                    "旧版共享域已停用并归档。团队共享请使用新的「共享空间」：创建空间后把邀请码发给同事即可"
+                        .to_string(),
+                );
+            }
+        }
+    }
     let share_registry = std::fs::read_to_string(&share_registry_path)
         .ok()
         .and_then(|text| ShareRegistry::from_json(&text))
@@ -2455,9 +2486,18 @@ fn main() {
         current_filter: current_filter.clone(),
         filter_label: filter_label.clone(),
         thumb_cache: thumb_cache.clone(),
+        importing: importing.clone(),
     }));
     spaces::sync_rows(&app);
     app.set_direct_send_enabled(settings.borrow().direct_send_enabled);
+    if let Some(text) = legacy_archive_notice.take() {
+        notifications::publish(&app, ui_viewmodels::notifications::Severity::Info, text);
+    }
+    // D90-P2 大小闸（拍板②）：字节自动索取的离线累计上限。
+    spaces::set_gate(
+        settings.borrow().space_sync_gate,
+        settings.borrow().space_sync_gate_mb,
+    );
 
     // 用户画像损坏不得拖垮主程序：退回内置画像并留痕（内置画像有编译期测试兜底）。
     // D76.4：手编文件之上再拼接设置面板管理的「上框点位」覆盖（settings.toml，
@@ -3300,6 +3340,31 @@ fn main() {
                     );
                 }
                 None => ui.set_space_ctl_error("只有空间主可以重置邀请码".into()),
+            }
+        });
+    }
+
+    // 贴码加入（D90-P2）：拨空间主，JoinOk/JoinErr 经 SYNC_RECV 回来。
+    {
+        let ui = app.as_weak();
+        app.on_space_join(move |code| {
+            let Some(ui) = ui.upgrade() else { return };
+            if code.trim().is_empty() {
+                ui.set_space_ctl_error("先粘贴同事发来的邀请码".into());
+                return;
+            }
+            ui.set_space_ctl_error("".into());
+            ui.set_space_join_code("".into());
+            spaces::join_by_code(&ui, code.as_str());
+        });
+    }
+
+    // 大小闸手动放行（D90-P3）：闸门挡下的待下载素材，一键触发同步。
+    {
+        let ui = app.as_weak();
+        app.on_space_sync_pending(move || {
+            if let Some(ui) = ui.upgrade() {
+                spaces::force_pending_fetch(&ui);
             }
         });
     }
@@ -5085,6 +5150,8 @@ fn main() {
                     ui.set_content_y(0.0);
                     sync_counts(&ui, vm.borrow().total(), true);
                     grid.sync();
+                    // D90-P2：空间根导入完成 → serve 索引已变，整册重推。
+                    spaces::on_space_import_finished(std::path::Path::new(&root));
                     notifications::resolve(&ui, "library-refresh");
                     let tone = if ui.get_import_result_available()
                         && ui

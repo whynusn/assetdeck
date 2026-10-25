@@ -393,10 +393,15 @@ async fn run(
                                         }
                                     }
                                 }
-                                SyncInbound::SpaceAdmitted { space_id, peer_id } => {
+                                SyncInbound::SpaceAdmitted {
+                                    space_id,
+                                    peer_id,
+                                    joiner_name,
+                                } => {
                                     emit(proto::out::space_admitted(
                                         &space_id.to_string(),
                                         &peer_id,
+                                        &joiner_name,
                                     ));
                                 }
                                 SyncInbound::SpaceFetch {

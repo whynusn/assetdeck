@@ -21,8 +21,8 @@ pub mod update_apply;
 pub mod update_check;
 
 pub use catalog_loader::{
-    ensure_library_skeleton, load_library_catalog, load_real_library, CatalogError, FacetEntry,
-    LibraryFacets, MaterializedAsset, RealAssetResolver,
+    content_paths, ensure_library_skeleton, load_library_catalog, load_real_library, CatalogError,
+    FacetEntry, LibraryFacets, MaterializedAsset, RealAssetResolver,
 };
 pub use category_rows::CategoryRows;
 pub use grid_vm::{LibraryGridVm, ThumbnailProvider, VmEvent, TEXT_TILE_HEIGHT};
@@ -58,7 +58,15 @@ pub use share::{
     parse_space_invite_code, space_invite_code, SpaceError, SpaceInviteCode, SpaceMeta, SpaceOp,
     SpaceOpKind, SpaceRegistry, SpaceRole,
 };
-pub use space_vm::SpaceVm;
+// D90-P2：空间同步的报文/服务册/资产元数据/上限（app-ui 白名单不含 share）。
+pub use share::{
+    merge_lamport, ServeItem, SpaceAssetKind, SpaceAssetMeta, SpaceBookEntry, SpaceBookState,
+    SpaceMessage, MAX_FETCH_ITEMS,
+};
+pub use space_vm::{
+    parse_staged_payload, parse_transfer_manifest, sort_and_dedupe_ops, space_book_json,
+    space_ops_from_lines, space_ops_to_lines, space_send_line, SpaceVm,
+};
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,
     TargetPasteNotice, TargetRoutingVm, TuningTarget,

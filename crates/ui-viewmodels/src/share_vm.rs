@@ -155,6 +155,12 @@ pub enum ShareAction {
     /// 群主名册到达（M2，成员视角）：app-ui 侧互认全体成员 + 本地建域/
     /// 更新/移出（名册不含自己 = 被踢出信号）。
     RosterReceived(GroupRoster),
+    /// D90-P2：空间协议报文到达（Ops 差量 / JoinOk / JoinErr）。空间名册
+    /// 自持信任（成员身份在 spaces 侧按名册裁决），不走域模型信任门。
+    SpaceMessage {
+        peer_id: String,
+        message: share::SpaceMessage,
+    },
 }
 
 /// 入口报价（待确认的来件）。
@@ -852,6 +858,10 @@ impl ShareVm {
                 }
                 vec![ShareAction::RosterReceived(roster), ShareAction::Refresh]
             }
+            // D90-P2：空间报文原样透传（spaces 模块按空间成员身份裁决）。
+            SyncMessage::Space { message } => {
+                vec![ShareAction::SpaceMessage { peer_id, message }]
+            }
             _ => {
                 if !self.trusted_peers.contains(&peer_id) {
                     return Vec::new();
@@ -898,8 +908,7 @@ impl ShareVm {
                         removed,
                     } => self.apply_delta(peer_id, from_rev, to_rev, added, removed),
                     SyncMessage::JoinInvite { .. } | SyncMessage::Roster { .. } => Vec::new(),
-                    // D90-P2：空间协议报文不经域模型信任门（空间名册自持信任）。
-                    // 消费面在 app-ui spaces 模块（批 3 接线），VM 层暂不上抛。
+                    // Space 已在外层臂透传，此处结构上不可达（穷尽性保留）。
                     SyncMessage::Space { .. } => Vec::new(),
                 }
             }
