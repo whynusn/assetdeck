@@ -293,7 +293,13 @@ async fn loopback_space_join_admits_member_and_replies_full_state() {
         for _ in 0..3 {
             let conn = server.accept().await.expect("accept").await.expect("conn");
             handle_sync_connection(conn, &SyncBook::new(), &spaces_for_serve, |event| {
-                if let SyncInbound::SpaceAdmitted { space_id, peer_id } = event {
+                if let SyncInbound::SpaceAdmitted {
+                    space_id,
+                    peer_id,
+                    joiner_name,
+                } = event
+                {
+                    assert_eq!(joiner_name, "客服小美", "Admitted 事件应带加入者名");
                     if let Some(tx) = event_tx.take() {
                         let _ = tx.send((space_id, peer_id));
                     }

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use slint::Weak;
 use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
-    CategoryRows, Filter, LibraryGridVm, RealAssetResolver, SpaceMeta, SpaceVm, TargetNoticeTone,
+    CategoryRows, Filter, LibraryGridVm, RealAssetResolver, SpaceAssetMeta, SpaceBookEntry,
+    SpaceBookState, SpaceMessage, SpaceMeta, SpaceOp, SpaceOpKind, SpaceVm, TargetNoticeTone,
+    MAX_FETCH_ITEMS,
 };
 
 use crate::thumbs::{GridCtx, ThumbCache};
@@ -45,6 +47,8 @@ pub struct SpaceHost {
     pub current_filter: Rc<RefCell<Filter>>,
     pub filter_label: Rc<RefCell<slint::SharedString>>,
     pub thumb_cache: Rc<RefCell<ThumbCache>>,
+    /// 导入在途旗标（staged 空间投递走导入管线时复用主装配的同一把锁）。
+    pub importing: Arc<AtomicBool>,
 }
 
 thread_local! {
@@ -72,10 +76,12 @@ pub fn init(spaces_json: &Path, spaces_dir: PathBuf) {
 }
 
 /// worker READY 回填设备身份（变化才落盘）并刷新侧栏行（身份就绪态可显示）。
+/// 身份首落 = 服务册首推（READY 早于一切对端连接，此刻推册最及时）。
 pub fn handle_worker_ready(self_id: &str, self_name: &str) {
     let changed = SPACES.with(|vm| vm.borrow_mut().set_identity(self_id, self_name));
     if changed {
         persist();
+        push_space_state();
     }
 }
 
@@ -201,6 +207,9 @@ pub fn enter_space(id: Uuid) {
                     root: root.clone(),
                 })
             });
+            // 进入即对账：库里有、op log 没记的素材补 Add op（导入半途/
+            // 崩溃残留由下一次进入收敛）。
+            emit_missing_add_ops(id);
             // 作用域切换清过滤器：主库的分类 id 在空间分面表里无意义，
             // 残留旧过滤器会让后续 apply_filter/库写收尾把视图钉到空集。
             *scope_host.current_filter.borrow_mut() = Filter::All;
@@ -431,6 +440,7 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
     ];
     // 进度反馈交给导入管线的进度条（Info 级瞬时信息不弹窗，落日志）。
     logging::info!("向空间「{}」加入 {} 项素材", space.name, paths.len());
+    IMPORT_TARGET.with(|slot| *slot.borrow_mut() = Some(root.clone()));
     spawn_import_pipeline(
         ui_host.ui.clone(),
         args,
@@ -506,4 +516,709 @@ fn write_import_list(paths: &[PathBuf]) -> Option<PathBuf> {
     ));
     std::fs::write(&list, lines).ok()?;
     Some(list)
+}
+
+// —— D90-P2 网格半场：op log 持久化、抗熵接线、贴码加入与字节索取 ——
+//
+// 同步语义：op log（每空间 ops.jsonl，(lamport, author) 全序）是空间的事实
+// 源；本地库是它的物化视图。op 应用一律按 content_hash 解析本地行——各
+// 成员库的 uuid 各自生成（导入产新 uuid），op 里的作者 uuid 只在 op 域内
+// 寻址（Remove 的「添加者本人」判定查 op 域的 uuid→作者索引）。
+
+thread_local! {
+    /// 在线对端缓存（DEVICE 行）：fetch 选持有者 + 抗熵触发。
+    static ONLINE_PEERS: RefCell<std::collections::HashMap<String, Vec<String>>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// 本会话已发起过空间抗熵的对端（每对端一轮；worker 侧比对全量收敛，
+    /// 断档自愈靠下次会话，不靠重复发起——零 Timer 轮询）。
+    static SYNCED_PEERS: RefCell<std::collections::HashSet<String>> =
+        RefCell::new(std::collections::HashSet::new());
+    /// 已自动受理的空间投递批次（batch → space；STAGED 路由回空间根）。
+    static SPACE_BATCHES: RefCell<std::collections::HashMap<Uuid, Uuid>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// 大小闸（设置装载时回填）：(启用, MB 上限)。拍板②：默认 500MB 可调。
+    static GATE: RefCell<(bool, u32)> = const { RefCell::new((true, 500)) };
+    /// 全员离线时挂起的字节索取（对端上线即重试）。
+    static PENDING_FETCH: RefCell<Vec<(Uuid, Vec<SpaceAssetMeta>)>> =
+        const { RefCell::new(Vec::new()) };
+    /// 导入管线的目标根（主视图里向空间投放时活动根 ≠ 目标根，收尾回调
+    /// 据此归位）。导入由 importing 旗标串行，单槽即可。
+    static IMPORT_TARGET: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// 设置装载后回填大小闸。
+pub fn set_gate(enabled: bool, mb: u32) {
+    GATE.with(|slot| *slot.borrow_mut() = (enabled, mb));
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn notice(ui: &AppWindow, severity: ui_viewmodels::notifications::Severity, text: String) {
+    crate::notifications::publish(ui, severity, text);
+}
+
+fn ops_path(id: Uuid) -> Option<PathBuf> {
+    space_root_of(id).map(|root| root.join("ops.jsonl"))
+}
+
+/// 空间 op log（装载即排序去重；坏行跳过——log 是追加写，崩溃残留的半行
+/// 不拖垮整册）。
+pub fn load_ops(id: Uuid) -> Vec<SpaceOp> {
+    let Some(path) = ops_path(id) else {
+        return Vec::new();
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    ui_viewmodels::space_ops_from_lines(&text, id)
+}
+
+fn append_ops(id: Uuid, ops: &[SpaceOp]) {
+    if ops.is_empty() {
+        return;
+    }
+    let Some(path) = ops_path(id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let text = ui_viewmodels::space_ops_to_lines(ops);
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(error) = std::io::Write::write_all(&mut file, text.as_bytes()) {
+                logging::warn!("空间 op log 追加失败: {error}");
+            }
+        }
+        Err(error) => logging::warn!("空间 op log 打开失败: {error}"),
+    }
+}
+
+/// 组装并整册推送空间服务册（meta + op log + 字节服务索引）。
+/// 触发点：worker READY / SPACE_ADMITTED / op 应用 / 空间根导入完成。
+pub fn push_space_state() {
+    let mut book = SpaceBookState::default();
+    for meta in spaces() {
+        let Some(root) = space_root_of(meta.id) else {
+            continue;
+        };
+        let ops = load_ops(meta.id);
+        let serve = ui_viewmodels::content_paths(&root)
+            .into_iter()
+            .map(|(hash, _uuid, path)| ui_viewmodels::ServeItem {
+                content_hash: hash,
+                path: path.to_string_lossy().into_owned(),
+            })
+            .collect();
+        book.set(meta.id, SpaceBookEntry { meta, ops, serve });
+    }
+    crate::share_write_line(&format!(
+        "SPACE_STATE\t{}",
+        ui_viewmodels::space_book_json(&book)
+    ));
+}
+
+/// 空间根导入完成（导入管线收尾回调点名空间根时调用）：补记 Add op
+/// （库行反推——哈希/uuid/文件名/大小都在行里）+ serve 索引重推。
+pub fn on_space_import_finished(_active_root: &Path) {
+    // 导入目标根以登记为准（主视图里向空间投放时，活动根 ≠ 目标根）。
+    let target = IMPORT_TARGET.with(|slot| slot.borrow_mut().take());
+    if let Some(root) = target {
+        if let Some(id) = space_id_of_root(&root) {
+            emit_missing_add_ops(id);
+            push_space_state();
+        }
+        return;
+    }
+    let touches_space = SPACES_DIR.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|dir| _active_root.starts_with(dir))
+    });
+    if touches_space {
+        if let Some(id) = space_id_of_root(_active_root) {
+            emit_missing_add_ops(id);
+        }
+        push_space_state();
+    }
+}
+
+/// 目录名（uuid 连字符形态）反查空间 id。
+fn space_id_of_root(root: &Path) -> Option<Uuid> {
+    let name = root.file_name()?.to_str()?;
+    let id = Uuid::parse_str(name).ok()?;
+    space_by_id(id).map(|_| id)
+}
+
+/// 库里有行、op log 还没记的素材 → 补 Add op（作者 = 本机，uuid = 本地行
+/// uuid——「op 域 uuid = 添加者库内 uuid」的自洽形态）。进入空间视图时也
+/// 跑一遍（对账式补偿：导入失败半途、崩溃残留都能被下一次进入收敛）。
+fn emit_missing_add_ops(id: Uuid) {
+    let Some(root) = space_root_of(id) else {
+        return;
+    };
+    let Some(self_id) = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()))
+    else {
+        return;
+    };
+    let ops = load_ops(id);
+    let covered: std::collections::HashSet<Vec<u8>> = ops
+        .iter()
+        .filter_map(|op| match &op.op {
+            SpaceOpKind::Add { asset } => Some(asset.content_hash.clone()),
+            _ => None,
+        })
+        .collect();
+    let rows = ui_viewmodels::content_paths(&root);
+    let mut lamport = ops.iter().map(|op| op.lamport).max().unwrap_or(0);
+    let mut fresh: Vec<SpaceOp> = Vec::new();
+    let now = now_secs();
+    for (hash, uuid, path) in rows {
+        if covered.contains(&hash) {
+            continue;
+        }
+        let Ok(uuid) = uuid.parse::<Uuid>() else {
+            continue;
+        };
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        lamport += 1;
+        let op = SpaceOp {
+            space_id: id,
+            lamport,
+            author: self_id.clone(),
+            ts: now,
+            op: SpaceOpKind::Add {
+                asset: SpaceAssetMeta {
+                    uuid,
+                    file_name: name,
+                    kind: space_asset_kind_of(&path),
+                    size_bytes: size,
+                    content_hash: hash,
+                },
+            },
+        };
+        if op.validate().is_ok() {
+            fresh.push(op);
+        } else {
+            lamport -= 1;
+        }
+    }
+    if !fresh.is_empty() {
+        logging::info!("空间 {id} 补记 {} 条 Add op（库行反推）", fresh.len());
+        append_ops(id, &fresh);
+    }
+}
+
+/// 展示层扩展名分类（store 行不带类别；只影响清单展示与占位图标）。
+fn space_asset_kind_of(path: &Path) -> ui_viewmodels::SpaceAssetKind {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => ui_viewmodels::SpaceAssetKind::Image,
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => ui_viewmodels::SpaceAssetKind::Video,
+        "txt" | "md" => ui_viewmodels::SpaceAssetKind::Text,
+        _ => ui_viewmodels::SpaceAssetKind::Other,
+    }
+}
+
+/// worker 行预处理：空间相关行在进 share_vm 之前拦截（true = 已消费）。
+/// DEVICE 不拦截（设备表仍归 share_vm），只挂在线钩子。
+pub fn intercept_worker_line(line: &str) -> bool {
+    if let Some(rest) = line.strip_prefix("DEVICE\t") {
+        on_device_seen(rest);
+        return false;
+    }
+    if let Some(rest) = line.strip_prefix("SPACE_ADMITTED\t") {
+        let mut parts = rest.splitn(3, '\t');
+        if let (Some(space_id), Some(peer_id), Some(name)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            if let (Ok(space_id), Some(ui)) = (
+                space_id.parse::<Uuid>(),
+                host().and_then(|h| h.ui.upgrade()),
+            ) {
+                handle_admitted(&ui, space_id, peer_id, name);
+            }
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("INCOMING\t") {
+        return try_auto_accept(rest);
+    }
+    if let Some(rest) = line.strip_prefix("STAGED\t") {
+        return try_space_staged(rest);
+    }
+    false
+}
+
+/// DEVICE 行钩子：在线成员出现 → 发起一轮抗熵 + 重试挂起的字节索取。
+fn on_device_seen(rest: &str) {
+    let parts: Vec<&str> = rest.split('\t').collect();
+    let Some(id) = parts.first() else {
+        return;
+    };
+    let addrs: Vec<String> = parts
+        .get(3)
+        .map(|text| {
+            text.split(';')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    ONLINE_PEERS.with(|slot| {
+        slot.borrow_mut().insert(id.to_string(), addrs.clone());
+    });
+    let is_member = spaces().iter().any(|space| space.is_member(id));
+    if is_member {
+        let first_time = SYNCED_PEERS.with(|slot| slot.borrow_mut().insert(id.to_string()));
+        if first_time {
+            crate::share_write_line(&format!("SPACE_SYNC\t{id}\t{}", addrs.join(";")));
+        }
+        try_pending_fetch();
+    }
+}
+
+/// 空间主侧：镜像 worker 的 Join 受理（名册 + Roster op 落盘），然后整册
+/// 重推对齐 worker 册副本。
+fn handle_admitted(ui: &AppWindow, space_id: Uuid, peer_id: &str, joiner_name: &str) {
+    let Some(mut space) = space_by_id(space_id) else {
+        return;
+    };
+    if space.is_member(peer_id) {
+        return;
+    }
+    space.members.push(ui_viewmodels::RosterMember {
+        id: peer_id.to_string(),
+        name: joiner_name.to_string(),
+    });
+    let Some(self_id) = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()))
+    else {
+        return;
+    };
+    let applied = SPACES.with(|vm| vm.borrow_mut().apply_join(space.clone(), now_secs()));
+    if applied.is_ok() {
+        persist();
+        let lamport = load_ops(space_id)
+            .iter()
+            .map(|op| op.lamport)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let roster = SpaceOp {
+            space_id,
+            lamport,
+            author: self_id,
+            ts: now_secs(),
+            op: SpaceOpKind::Roster { space },
+        };
+        append_ops(space_id, std::slice::from_ref(&roster));
+        push_space_state();
+        sync_rows(ui);
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Success,
+            format!("「{joiner_name}」加入了共享空间"),
+        );
+    }
+}
+
+/// 空间报文消费面（ShareAction::SpaceMessage 的落点）。
+pub fn handle_space_message(ui: &AppWindow, peer_id: &str, message: SpaceMessage) {
+    match message {
+        SpaceMessage::Ops { ops } => merge_and_apply_ops(ui, ops),
+        SpaceMessage::JoinOk { meta, ops } => apply_join_ok(ui, meta, ops),
+        SpaceMessage::JoinErr { reason } => {
+            ui.set_space_ctl_error(reason.clone().into());
+            notice(ui, ui_viewmodels::notifications::Severity::Warning, reason);
+        }
+        // Summary/Fetch/Join 由 worker 在通道内应答/处置，到达 UI 即异常形态。
+        other => logging::warn!("忽略异常到达 UI 的空间报文（peer={peer_id}）: {other:?}"),
+    }
+}
+
+/// Ops 差量应用：验权（permits 按 op 域作者索引）→ 追加 log → 物化本地
+/// （Add 缺字节挂索取、Remove 按摘要反查本地行发 purge、Roster 落册）。
+fn merge_and_apply_ops(ui: &AppWindow, incoming: Vec<SpaceOp>) {
+    let mut by_space: std::collections::BTreeMap<Uuid, Vec<SpaceOp>> = Default::default();
+    for op in incoming {
+        if op.validate().is_ok() {
+            by_space.entry(op.space_id).or_default().push(op);
+        }
+    }
+    let mut roster_changed = false;
+    for (id, batch) in by_space {
+        let Some(space) = space_by_id(id) else {
+            logging::info!("收到未知空间 {id} 的 op，丢弃（不泄漏存在性）");
+            continue;
+        };
+        let mut ops = load_ops(id);
+        let known: std::collections::HashSet<(u64, String)> = ops
+            .iter()
+            .map(|op| (op.lamport, op.author.clone()))
+            .collect();
+        // op 域的 uuid → 添加者索引（Remove 的「添加者本人」判定）。
+        let mut added_by: std::collections::HashMap<Uuid, String> = Default::default();
+        for op in &ops {
+            if let SpaceOpKind::Add { asset } = &op.op {
+                added_by.insert(asset.uuid, op.author.clone());
+            }
+        }
+        let mut fresh: Vec<SpaceOp> = Vec::new();
+        for op in batch {
+            let key = (op.lamport, op.author.clone());
+            if known.contains(&key) || !op.permits(&space, &added_by) {
+                continue;
+            }
+            if let SpaceOpKind::Add { asset } = &op.op {
+                added_by.insert(asset.uuid, op.author.clone());
+            }
+            fresh.push(op);
+        }
+        if fresh.is_empty() {
+            continue;
+        }
+        append_ops(id, &fresh);
+        ops.extend(fresh.iter().cloned());
+        ui_viewmodels::sort_and_dedupe_ops(&mut ops);
+
+        // 物化：内容索引一份扫全（持有判定 + Remove 反查）。
+        let Some(root) = space_root_of(id) else {
+            continue;
+        };
+        let rows = ui_viewmodels::content_paths(&root);
+        let mut have: std::collections::HashSet<Vec<u8>> = Default::default();
+        let mut uuid_by_hash: std::collections::HashMap<Vec<u8>, String> = Default::default();
+        for (hash, uuid, _path) in rows {
+            have.insert(hash.clone());
+            uuid_by_hash.insert(hash, uuid);
+        }
+        let mut hash_by_op_uuid: std::collections::HashMap<Uuid, Vec<u8>> = Default::default();
+        for op in &ops {
+            if let SpaceOpKind::Add { asset } = &op.op {
+                hash_by_op_uuid.insert(asset.uuid, asset.content_hash.clone());
+            }
+        }
+        let mut missing: Vec<SpaceAssetMeta> = Vec::new();
+        let mut purge_uuids: Vec<String> = Vec::new();
+        for op in &fresh {
+            match &op.op {
+                SpaceOpKind::Add { asset } => {
+                    if !have.contains(&asset.content_hash) {
+                        missing.push(asset.clone());
+                    }
+                }
+                SpaceOpKind::Remove { asset_uuid } => {
+                    if let Some(hash) = hash_by_op_uuid.get(asset_uuid) {
+                        if let Some(local) = uuid_by_hash.get(hash) {
+                            purge_uuids.push(local.clone());
+                        }
+                    }
+                }
+                SpaceOpKind::Roster { space: meta } => {
+                    let _ = SPACES.with(|vm| vm.borrow_mut().apply_join(meta.clone(), now_secs()));
+                    roster_changed = true;
+                }
+                // 结构 op（分类/改名/归类）应用面留 P3：log 已收，物化待接。
+                other => logging::info!("空间结构 op 待 P3 物化: {other:?}"),
+            }
+        }
+        if !purge_uuids.is_empty() {
+            spawn_purge(&root, &purge_uuids);
+        }
+        if !missing.is_empty() {
+            fetch_missing(ui, &space, missing);
+        }
+        if active().is_some_and(|scope| scope.id == id) {
+            enter_space(id);
+        }
+    }
+    if roster_changed {
+        persist();
+    }
+    push_space_state();
+    if roster_changed {
+        sync_rows(ui);
+    }
+}
+
+/// JoinOk 应用（加入侧冷启动）：建根 + 落册 + 整写 op log + 进入 + 补字节。
+fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceOp>) {
+    let id = meta.id;
+    let root = match space_root_of(id) {
+        Some(root) => root,
+        None => return,
+    };
+    if let Err(error) = std::fs::create_dir_all(&root) {
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Error,
+            format!("初始化空间目录失败：{error}"),
+        );
+        return;
+    }
+    if let Err(error) = ui_viewmodels::ensure_library_skeleton(&root) {
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Error,
+            format!("初始化空间库失败：{error}"),
+        );
+        return;
+    }
+    let mut sorted = ops;
+    ui_viewmodels::sort_and_dedupe_ops(&mut sorted);
+    if let Some(path) = ops_path(id) {
+        let _ = crate::atomic_write(&path, &ui_viewmodels::space_ops_to_lines(&sorted));
+    }
+    let missing = missing_from_ops(&root, &sorted);
+    let name = meta.name.clone();
+    if SPACES
+        .with(|vm| vm.borrow_mut().apply_join(meta, now_secs()))
+        .is_ok()
+    {
+        persist();
+        sync_rows(ui);
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Success,
+            format!("已加入共享空间「{name}」，素材会自动同步到本机"),
+        );
+        enter_space(id);
+        if !missing.is_empty() {
+            if let Some(space) = space_by_id(id) {
+                fetch_missing(ui, &space, missing);
+            }
+        }
+        push_space_state();
+    }
+}
+
+/// op log 里 Add 了、本地库还没有字节的素材集（join 冷启动/对账共用）。
+fn missing_from_ops(root: &Path, ops: &[SpaceOp]) -> Vec<SpaceAssetMeta> {
+    let have: std::collections::HashSet<Vec<u8>> = ui_viewmodels::content_paths(root)
+        .into_iter()
+        .map(|(hash, _uuid, _path)| hash)
+        .collect();
+    ops.iter()
+        .filter_map(|op| match &op.op {
+            SpaceOpKind::Add { asset } => Some(asset),
+            _ => None,
+        })
+        .filter(|asset| !have.contains(&asset.content_hash))
+        .cloned()
+        .collect()
+}
+
+/// 字节索取：大小闸（拍板②）→ 选在线持有者 → 分批发 Fetch；全员离线挂起，
+/// 对端上线重试（事件驱动，零 Timer）。
+fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) {
+    if items.is_empty() {
+        return;
+    }
+    let (gate_on, mb) = GATE.with(|slot| *slot.borrow());
+    let total: u64 = items.iter().map(|item| item.size_bytes).sum();
+    if gate_on && total > u64::from(mb) * 1024 * 1024 {
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Warning,
+            format!(
+                "「{}」有 {} 项新素材（{}），超过同步上限 {}MB，暂不自动下载",
+                space.name,
+                items.len(),
+                ui_viewmodels::human_size(total),
+                mb
+            ),
+        );
+        return;
+    }
+    match online_member(space) {
+        Some((peer, addrs)) => send_fetch(space.id, items, &peer, &addrs),
+        None => {
+            logging::info!(
+                "空间「{}」{} 项待补字节，暂无在线成员（上线自动续传）",
+                space.name,
+                items.len()
+            );
+            PENDING_FETCH.with(|slot| slot.borrow_mut().push((space.id, items)));
+        }
+    }
+}
+
+fn try_pending_fetch() {
+    let pending: Vec<(Uuid, Vec<SpaceAssetMeta>)> =
+        PENDING_FETCH.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    let mut kept = Vec::new();
+    for (id, items) in pending {
+        let Some(space) = space_by_id(id) else {
+            continue;
+        };
+        match online_member(&space) {
+            Some((peer, addrs)) => send_fetch(id, items, &peer, &addrs),
+            None => kept.push((id, items)),
+        }
+    }
+    PENDING_FETCH.with(|slot| *slot.borrow_mut() = kept);
+}
+
+fn send_fetch(space_id: Uuid, items: Vec<SpaceAssetMeta>, peer: &str, addrs: &[String]) {
+    for chunk in items.chunks(MAX_FETCH_ITEMS) {
+        let Some(line) = ui_viewmodels::space_send_line(
+            peer,
+            addrs,
+            SpaceMessage::Fetch {
+                space_id,
+                items: chunk.to_vec(),
+            },
+        ) else {
+            return;
+        };
+        crate::share_write_line(&line);
+    }
+}
+
+/// 该空间任一在线成员（非本机）。
+fn online_member(space: &SpaceMeta) -> Option<(String, Vec<String>)> {
+    let self_id = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()));
+    ONLINE_PEERS.with(|slot| {
+        let peers = slot.borrow();
+        space
+            .members
+            .iter()
+            .filter(|member| Some(&member.id) != self_id.as_ref())
+            .find_map(|member| {
+                peers
+                    .get(&member.id)
+                    .cloned()
+                    .map(|a| (member.id.clone(), a))
+            })
+    })
+}
+
+/// 贴码加入：解析 → 拨空间主（SPACE_JOIN，worker 纯 id 直连）。应答
+/// JoinOk/JoinErr 经 SYNC_RECV 回来。
+pub fn join_by_code(ui: &AppWindow, code: &str) {
+    let code = code.trim();
+    let parsed = match ui_viewmodels::parse_space_invite_code(code) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            ui.set_space_ctl_error(error.to_string().into());
+            return;
+        }
+    };
+    let Some((self_id, self_name)) = SPACES.with(|vm| {
+        vm.borrow()
+            .identity()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+    }) else {
+        ui.set_space_ctl_error("共享引擎尚未就绪，请稍后再试".into());
+        return;
+    };
+    if space_by_id(parsed.space_id).is_some() {
+        ui.set_space_ctl_error("已经在该空间里了".into());
+        return;
+    }
+    let _ = self_id;
+    crate::share_write_line(&format!(
+        "SPACE_JOIN\t{}\t{}\t{self_name}",
+        parsed.owner_id, code
+    ));
+    notice(
+        ui,
+        ui_viewmodels::notifications::Severity::Info,
+        "正在连接空间主…对方不在线时稍后会提示失败".to_string(),
+    );
+}
+
+/// INCOMING 拦截：空间投递（manifest.space_id）免首连确认（入空间 =
+/// 同意接收，D90 确认移位）。未知空间 = 显式拒绝。返回 true = 行已消费。
+fn try_auto_accept(payload: &str) -> bool {
+    let Some(manifest) = ui_viewmodels::parse_transfer_manifest(payload) else {
+        return false;
+    };
+    let Some(space_id) = manifest.space_id else {
+        return false;
+    };
+    let Some(ui) = host().and_then(|h| h.ui.upgrade()) else {
+        return false;
+    };
+    let known = space_by_id(space_id).is_some_and(|space| {
+        SPACES.with(|vm| {
+            vm.borrow()
+                .identity()
+                .is_some_and(|(id, _)| space.is_member(id))
+        })
+    });
+    if known {
+        SPACE_BATCHES.with(|slot| {
+            slot.borrow_mut().insert(manifest.batch_id, space_id);
+        });
+        crate::share_write_line(&format!("ACCEPT\t{}", manifest.batch_id));
+        notice(
+            &ui,
+            ui_viewmodels::notifications::Severity::Info,
+            format!("正在接收空间素材…共 {} 项", manifest.items.len()),
+        );
+    } else {
+        crate::share_write_line(&format!("REJECT\t{}\t未知空间", manifest.batch_id));
+    }
+    true
+}
+
+/// STAGED 拦截：空间批次落空间根导入（同一导入管线，收件箱语义），乐观
+/// ACK——本地导入若失败，下次抗熵发现字节仍缺会自愈重取。
+fn try_space_staged(payload: &str) -> bool {
+    let Some((batch, paths)) = ui_viewmodels::parse_staged_payload(payload) else {
+        return false;
+    };
+    let Some(space_id) = SPACE_BATCHES.with(|slot| slot.borrow_mut().remove(&batch)) else {
+        return false;
+    };
+    let Some(scope_host) = host() else {
+        return true;
+    };
+    let Some(ui) = scope_host.ui.upgrade() else {
+        return true;
+    };
+    add_paths_to_space(space_id, paths, scope_host.importing.clone());
+    crate::share_write_line(&format!("ACK\t{batch}"));
+    notice(
+        &ui,
+        ui_viewmodels::notifications::Severity::Info,
+        "空间素材已接收，正在导入本机副本…".to_string(),
+    );
+    true
+}
+
+/// 空间库 purge（Remove op 物化）：单写者纪律，子进程执行。
+fn spawn_purge(root: &Path, uuids: &[String]) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new(crate::helper_exe("sample-library"));
+    command
+        .arg("--cmd")
+        .arg("purge")
+        .arg("--library")
+        .arg(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for uuid in uuids {
+        command.arg("--uuid").arg(uuid);
+    }
+    command.creation_flags(CREATE_NO_WINDOW);
+    match command.spawn() {
+        Ok(_) => logging::info!("空间 Remove 物化：purge {} 项", uuids.len()),
+        Err(error) => logging::warn!("空间 purge 子进程启动失败: {error}"),
+    }
 }

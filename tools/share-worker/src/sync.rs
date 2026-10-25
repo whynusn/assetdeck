@@ -87,6 +87,7 @@ pub enum SyncInbound {
     SpaceAdmitted {
         space_id: uuid::Uuid,
         peer_id: String,
+        joiner_name: String,
     },
     /// D90-P2：收到字节索取（同步通道不传字节——main 侧组装推送通道投递）。
     SpaceFetch {
@@ -223,6 +224,7 @@ pub async fn handle_sync_connection(
                             on_event(SyncInbound::SpaceAdmitted {
                                 space_id: admitted.space_id,
                                 peer_id,
+                                joiner_name,
                             });
                         }
                         SyncMessage::Space {

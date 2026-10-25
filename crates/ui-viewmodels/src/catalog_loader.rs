@@ -474,6 +474,24 @@ pub fn ensure_library_skeleton(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 扫库构建 D90-P2 的内容索引（content_hash → 本地 uuid + 正本绝对路径）：
+/// 字节服务（serve 索引）/ Add 缺字节判定 / Remove 按内容摘要反查本地行
+/// 共用一份扫描。D65 起全类目都落 content_hash；缺摘要的行自然跳过。
+/// 只读打开（WAL 下与子进程写互不阻塞）。
+pub fn content_paths(root: &Path) -> Vec<(Vec<u8>, String, PathBuf)> {
+    let db = root.join("meta.db");
+    let Ok(store) = Store::open(&db) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    let _ = store.for_each_asset(|meta: store::AssetMeta| {
+        if let Some(hash) = meta.content_hash {
+            rows.push((hash, meta.uuid, root.join(&meta.rel_path)));
+        }
+    });
+    rows
+}
+
 /// 打开真实库目录并同时返回 `FacetIndex` 与素材 resolver。
 ///
 /// `index` 由 meta.db 流式装载；`uuids` 按同样的 `AssetId` 顺序保存，确保

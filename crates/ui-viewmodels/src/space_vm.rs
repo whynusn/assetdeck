@@ -8,7 +8,8 @@
 //! P1（单机半场）不碰网络：本 VM 只管本地清单；P2 的 op log 同步状态
 //! （已应用 seq / 等待源）在此 VM 上扩展，不另起炉灶。
 
-use share::{SpaceError, SpaceMeta, SpaceRegistry};
+use share::{SpaceBookState, SpaceMessage};
+use share::{SpaceError, SpaceMeta, SpaceOp, SpaceRegistry};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default)]
@@ -102,10 +103,88 @@ impl SpaceVm {
         id.hyphenated().to_string()
     }
 
+    /// 名册原位覆盖（Roster op / JoinOk 应用）：joined_at 保留本地首次
+    /// 加入时间（share::apply_join 语义），未知空间 = 新行插入。
+    pub fn apply_join(&mut self, meta: SpaceMeta, now: i64) -> Result<(), SpaceError> {
+        share::apply_join(&mut self.registry, meta, now)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// 本机身份（worker READY 回填后可用；创建/加入的前置）。
+    pub fn identity(&self) -> Option<(&str, &str)> {
+        self.registry
+            .self_id
+            .as_deref()
+            .map(|id| (id, self.registry.self_name.as_str()))
+    }
+
     /// 侧栏空间行的副标签：成员数（P1 口径；P2 追加同步状态）。
     pub fn member_label(space: &SpaceMeta) -> String {
         format!("{} 名成员", space.members.len())
     }
+}
+
+// —— D90-P2 行协议/持久化辅助（serde_json 只在本 crate；app-ui 依赖
+// 白名单不含 serde 系，一切 JSON 收发经此转字符串）——
+
+/// ops.jsonl 文本 → 排序去重后的 op log（坏行跳过；键 = (lamport, author)，
+/// 与 share crate 的全序同源）。只保留属于 `space_id` 的行。
+pub fn space_ops_from_lines(text: &str, space_id: Uuid) -> Vec<SpaceOp> {
+    let mut ops: Vec<SpaceOp> = text
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_end_matches(['\r', ' ']);
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<SpaceOp>(trimmed)
+                .ok()
+                .filter(|op| op.space_id == space_id && op.validate().is_ok())
+        })
+        .collect();
+    sort_and_dedupe_ops(&mut ops);
+    ops
+}
+
+/// op log → ops.jsonl 文本（每行一条 JSON；追加与整写共用）。
+pub fn space_ops_to_lines(ops: &[SpaceOp]) -> String {
+    let mut text = String::new();
+    for op in ops {
+        if let Ok(json) = serde_json::to_string(op) {
+            text.push_str(&json);
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// 排序 (lamport, author) + 按键去重（装载与合并共用；接收序无关收敛）。
+pub fn sort_and_dedupe_ops(ops: &mut Vec<SpaceOp>) {
+    ops.sort_by(|a, b| a.lamport.cmp(&b.lamport).then(a.author.cmp(&b.author)));
+    ops.dedup_by(|a, b| a.lamport == b.lamport && a.author == b.author);
+}
+
+/// 服务册 → SPACE_STATE 行载荷 JSON。
+pub fn space_book_json(book: &SpaceBookState) -> String {
+    serde_json::to_string(book).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// 空间报文 → SYNC_SEND 行（对端 id + 地址段 + SyncMessage::Space JSON）。
+pub fn space_send_line(peer_id: &str, addrs: &[String], message: SpaceMessage) -> Option<String> {
+    let message = share::SyncMessage::Space { message };
+    let json = serde_json::to_string(&message).ok()?;
+    Some(format!("SYNC_SEND\t{peer_id}\t{}\t{json}", addrs.join(";")))
+}
+
+/// INCOMING 载荷解析（auto-accept 判定用：是否空间投递 + 目标空间）。
+pub fn parse_transfer_manifest(json: &str) -> Option<share::TransferManifest> {
+    serde_json::from_str(json).ok()
+}
+
+/// STAGED 载荷解析：(batch_id, 暂存路径表)。
+pub fn parse_staged_payload(json: &str) -> Option<(Uuid, Vec<std::path::PathBuf>)> {
+    serde_json::from_str::<(Uuid, Vec<std::path::PathBuf>)>(json).ok()
 }
 
 #[cfg(test)]
@@ -171,5 +250,128 @@ mod tests {
             SpaceVm::space_root_name(id),
             "01234567-89ab-cdef-0123-456789abcdef"
         );
+    }
+
+    #[test]
+    fn apply_join_preserves_local_joined_at_and_covers_roster() {
+        let mut vm = SpaceVm::new();
+        vm.set_identity(&device_id(1), "客服小美");
+        // 合法 secret 只能源自 create_space（z32 表手拼必错）。
+        let mut meta = {
+            let mut owner_registry = SpaceRegistry::new();
+            owner_registry.self_id = Some(device_id(2));
+            owner_registry.self_name = "店长".into();
+            owner_registry.create_space("团队素材", 1).unwrap()
+        };
+        meta.members.push(share::RosterMember {
+            id: device_id(1),
+            name: "客服小美".into(),
+        });
+        vm.apply_join(meta.clone(), 5000).unwrap();
+        assert!(vm.take_dirty());
+        assert_eq!(vm.spaces()[0].joined_at, 5000);
+        // Roster 更新（成员变化）原位覆盖，joined_at 保留本地首入值。
+        meta.members.pop();
+        meta.secret_gen = 2;
+        vm.apply_join(meta, 9000).unwrap();
+        assert_eq!(vm.spaces().len(), 1);
+        assert_eq!(vm.spaces()[0].joined_at, 5000);
+        assert_eq!(vm.spaces()[0].secret_gen, 2);
+        assert_eq!(vm.spaces()[0].members.len(), 1);
+    }
+
+    #[test]
+    fn ops_lines_roundtrip_sorts_and_dedupes() {
+        let space_id = Uuid::new_v4();
+        let author = "a".repeat(52);
+        let op = |lamport: u64| SpaceOp {
+            space_id,
+            lamport,
+            author: author.clone(),
+            ts: 0,
+            op: share::SpaceOpKind::CategoryCreate {
+                name: "新品".into(),
+            },
+        };
+        // 乱序 + 重放 + 坏行 + 他人空间的行 → 装载后 = 排序去重后的本空间 log。
+        let other = SpaceOp {
+            space_id: Uuid::new_v4(),
+            lamport: 1,
+            author: author.clone(),
+            ts: 0,
+            op: share::SpaceOpKind::CategoryCreate {
+                name: "别人".into(),
+            },
+        };
+        let text = format!(
+            "{}\n{}\n{}\nnot-json\n{}\n",
+            serde_json::to_string(&op(2)).unwrap(),
+            serde_json::to_string(&op(1)).unwrap(),
+            serde_json::to_string(&op(1)).unwrap(),
+            serde_json::to_string(&other).unwrap(),
+        );
+        let loaded = space_ops_from_lines(&text, space_id);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].lamport, 1);
+        assert_eq!(loaded[1].lamport, 2);
+
+        // 整写 → 再装载闭环。
+        let rewritten = space_ops_to_lines(&loaded);
+        assert_eq!(space_ops_from_lines(&rewritten, space_id), loaded);
+    }
+
+    #[test]
+    fn send_line_and_payload_parsers() {
+        let peer = "a".repeat(52);
+        let fetch = SpaceMessage::Fetch {
+            space_id: Uuid::new_v4(),
+            items: vec![share::SpaceAssetMeta {
+                uuid: Uuid::new_v4(),
+                file_name: "a.png".into(),
+                kind: share::SpaceAssetKind::Image,
+                size_bytes: 8,
+                content_hash: vec![1u8; 32],
+            }],
+        };
+        let line = space_send_line(&peer, &["1.2.3.4:5".into()], fetch).unwrap();
+        assert!(line.starts_with(&format!("SYNC_SEND\t{peer}\t1.2.3.4:5\t")));
+        assert!(line.contains(r#""kind":"space""#));
+        assert!(line.contains(r#""kind":"fetch""#));
+
+        // INCOMING / STAGED 载荷解析。
+        let manifest = share::TransferManifest {
+            batch_id: Uuid::new_v4(),
+            sender_name: "对方".into(),
+            space_id: Some(Uuid::new_v4()),
+            items: vec![],
+        };
+        let parsed = parse_transfer_manifest(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert!(parsed.space_id.is_some());
+        let staged = parse_staged_payload(
+            &serde_json::to_string(&(Uuid::new_v4(), vec!["C:\\s\\a.png"])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(staged.1.len(), 1);
+    }
+
+    #[test]
+    fn book_json_roundtrips_state() {
+        use share::SpaceBookEntry;
+        let entry = SpaceBookEntry {
+            meta: {
+                let mut registry = SpaceRegistry::new();
+                registry.self_id = Some("a".repeat(52));
+                registry.self_name = "店长".into();
+                registry.create_space("团队素材", 1).unwrap()
+            },
+            ops: Vec::new(),
+            serve: Vec::new(),
+        };
+        let mut book = SpaceBookState::default();
+        book.set(entry.meta.id, entry);
+        let json = space_book_json(&book);
+        assert!(json.contains(r#""spaces""#));
+        let back: SpaceBookState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spaces.len(), 1);
     }
 }

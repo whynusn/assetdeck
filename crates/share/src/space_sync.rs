@@ -213,7 +213,8 @@ pub fn admit_join(
     Ok(true)
 }
 
-/// 加入侧落册：JoinOk 的 meta 进本机清单（重入 = 原位覆盖，joined_at 刷新）。
+/// 加入侧落册：JoinOk/Roster 的 meta 进本机清单。重入/名册更新 = 原位
+/// 覆盖但保留本地首次加入时间（joined_at = 我何时加入，不是名册几时刷新）。
 pub fn apply_join(
     registry: &mut crate::space::SpaceRegistry,
     meta: SpaceMeta,
@@ -225,7 +226,11 @@ pub fn apply_join(
         ..meta
     };
     match registry.find_mut(joined.id) {
-        Some(slot) => *slot = joined,
+        Some(slot) => {
+            let mut next = joined;
+            next.joined_at = slot.joined_at;
+            *slot = next;
+        }
         None => registry.spaces.push(joined),
     }
     Ok(())
@@ -762,10 +767,10 @@ mod tests {
         assert_eq!(registry.spaces.len(), 1);
         assert_eq!(registry.spaces[0].joined_at, 5000);
 
-        // 重入 = 原位覆盖（joined_at 刷新，不新增行）。
+        // 重入/名册更新 = 原位覆盖，joined_at 保留首次加入值。
         apply_join(&mut registry, meta, 6000).unwrap();
         assert_eq!(registry.spaces.len(), 1);
-        assert_eq!(registry.spaces[0].joined_at, 6000);
+        assert_eq!(registry.spaces[0].joined_at, 5000);
     }
 
     #[test]

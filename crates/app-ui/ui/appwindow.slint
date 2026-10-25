@@ -367,6 +367,9 @@ export component AppWindow inherits Window {
     callback space-leave(string);
     callback space-invite-copy(string);
     callback space-invite-reset(string);
+    // 贴码加入（D90-P2）：粘贴同事给的邀请码，一次点击加入。
+    in-out property <string> space-join-code: "";
+    callback space-join(string);
     callback space-ctl-closed();
     // 「添加到共享空间」弹窗：行即空间，点击即加（右键菜单 menu-action(7)）。
     in property <bool> space-add-open: false;
@@ -3175,6 +3178,27 @@ export component AppWindow inherits Window {
                         text: "创建";
                         clicked => {
                             root.space-create(root.space-new-name);
+                        }
+                    }
+                }
+
+                // 加入行：贴同事给的邀请码（加入即进入，素材自动同步到本机）。
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.space-join-code;
+                        placeholder-text: "粘贴同事发来的邀请码";
+                        horizontal-stretch: 1;
+                        accepted(text) => {
+                            root.space-join(text);
+                        }
+                    }
+                    Button {
+                        height: Metrics.control;
+                        text: "加入";
+                        clicked => {
+                            root.space-join(root.space-join-code);
                         }
                     }
                 }
