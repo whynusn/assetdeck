@@ -7,16 +7,21 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 
 #[cfg(windows)]
-use windows::core::{GUID, Interface, PCWSTR};
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows::core::{Interface, GUID, HSTRING, PCWSTR};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED, IPersistFile,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath,
+    FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, ShellExecuteW,
+    KNOWN_FOLDER_FLAG,
 };
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -32,6 +37,9 @@ const PAYLOAD: &[u8] = include_bytes!("../../dist.tar.gz");
 const APP_NAME: &str = "素材管理器";
 const INSTALL_DIR_NAME: &str = "素材管理器";
 const MAIN_EXE: &str = "asset-manager.exe";
+// D94 防火墙放行的对象与规则名（ASCII 无空格：netsh/cmd 双上下文引用安全）。
+const WORKER_EXE: &str = "share-worker.exe";
+const FW_RULE_NAME: &str = "AssetDeck-Share-UDP-In";
 
 fn main() {
     let mut silent = false;
@@ -92,12 +100,28 @@ fn main() {
     if with_shortcuts {
         let _ = create_shortcuts(&install_dir);
     }
+    // D94：共享链路（QUIC 直连 + mDNS 应答）吃入站 UDP。Windows 首绑弹窗
+    // 的授权按当时的网络档位记忆（实测装机只落了 Public 档），换网络即
+    // 失效——安装期统一写 profile=any 规则。失败只提示不阻断安装。
+    if !configure_firewall(&install_dir, silent) && !silent {
+        let _ = message_box(
+            "防火墙放行未完成",
+            "共享团队功能需要 Windows 防火墙放行 share-worker.exe（入站 UDP）。\n\
+             本次未放行，其他设备可能连不上本机。\n\n\
+             可重新以管理员身份运行安装器自动放行，或自行在防火墙中允许该程序。",
+            MB_ICONWARNING | MB_OK,
+        );
+    }
     let _ = launch_app(&install_dir);
 
     if !silent {
         let _ = message_box(
             "安装完成",
-            &format!("{} 已安装到：\n{}\n\n正在启动程序。", APP_NAME, install_dir.display()),
+            &format!(
+                "{} 已安装到：\n{}\n\n正在启动程序。",
+                APP_NAME,
+                install_dir.display()
+            ),
             MB_ICONINFORMATION | MB_OK,
         );
     }
@@ -180,6 +204,75 @@ fn install(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// netsh 后台档：GUI 子系统进程 spawn 控制台程序会弹黑框（快捷方式迁移时
+/// 踩过的坑），直接调用一律 CREATE_NO_WINDOW。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// 提权链的 cmd 窗口隐藏档：用户只应看到 UAC 确认框。
+const SW_HIDE: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(0);
+
+/// D94 防火墙放行 share-worker（入站 UDP：QUIC 直连 + mDNS 应答）。
+/// Windows 首绑弹窗的授权按当时的网络档位记忆，换网络即失效；安装期统一
+/// 写 profile=any 规则。安装器提权时直接 netsh；免管理员安装经一次 UAC
+/// （runas + cmd /s /c 串联 delete+add，避免双弹窗）完成；拒绝/失败只跳过，
+/// 不阻断安装（返回 false，调用方决定是否提示）。
+#[cfg(windows)]
+fn configure_firewall(install_dir: &Path, silent: bool) -> bool {
+    let exe = install_dir.join(WORKER_EXE);
+    if !exe.is_file() {
+        return false;
+    }
+    // program=<带引号路径> 必须整体是单个 netsh 参数；std 对含空格参数的
+    // 自动引号会与内层引号套娃（explorer /select 同款坑），raw_arg 原样传。
+    let program_arg = format!("program=\"{}\"", exe.display());
+    let rule_arg = format!("name={FW_RULE_NAME}");
+    let _ = Command::new("netsh")
+        .args(["advfirewall", "firewall", "delete", "rule", &rule_arg])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let direct_ok = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &rule_arg,
+            "dir=in",
+            "action=allow",
+            "protocol=udp",
+            "profile=any",
+            "enable=yes",
+        ])
+        .raw_arg(program_arg.clone())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    if direct_ok {
+        return true;
+    }
+    if silent {
+        // OTA 静默更新不打 UAC：本轮跳过，下次交互安装或手动放行补上。
+        return false;
+    }
+    // 免管理员：一次 UAC 完成 delete+add。cmd /s /c 使内层引号原样存活；
+    // SW_HIDE 藏掉 cmd 窗口，用户只看到 UAC 确认框。
+    let chain = format!(
+        "netsh advfirewall firewall delete rule {rule_arg} & netsh advfirewall firewall add rule \
+         {rule_arg} dir=in action=allow protocol=udp profile=any enable=yes {program_arg}"
+    );
+    let params = HSTRING::from(format!("/s /c \"{chain}\""));
+    let verb = HSTRING::from("runas");
+    let file = HSTRING::from("cmd.exe");
+    let instance = unsafe { ShellExecuteW(None, &verb, &file, &params, None, SW_HIDE) };
+    // ShellExecuteW 返回值 ≤ 32 = 失败/用户取消 UAC。
+    instance.0 as isize > 32
+}
+
+#[cfg(not(windows))]
+fn configure_firewall(_install_dir: &Path, _silent: bool) -> bool {
+    true
+}
+
 #[cfg(windows)]
 fn create_shortcuts(install_dir: &Path) -> Result<(), String> {
     let desktop = PathBuf::from(known_folder(&FOLDERID_Desktop, "桌面")?);
@@ -221,7 +314,12 @@ fn known_folder(folder: &GUID, label: &str) -> Result<String, String> {
 
 /// .lnk 快捷方式：IShellLinkW + IPersistFile 原生 COM，不再经 PowerShell。
 #[cfg(windows)]
-fn create_shortcut(folder: &Path, name: &str, target: &Path, working_dir: &str) -> Result<(), String> {
+fn create_shortcut(
+    folder: &Path,
+    name: &str,
+    target: &Path,
+    working_dir: &str,
+) -> Result<(), String> {
     let shortcut_path = folder.join(format!("{}.lnk", name));
     let to_wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let target16 = to_wide(&target.display().to_string());
@@ -234,7 +332,8 @@ fn create_shortcut(folder: &Path, name: &str, target: &Path, working_dir: &str) 
             return Err(format!("COM 初始化失败: {hr:?}"));
         }
         let result = (|| -> Result<(), windows::core::Error> {
-            let link: IShellLinkW = CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER)?;
+            let link: IShellLinkW =
+                CoCreateInstance(&CLSID_SHELL_LINK, None, CLSCTX_INPROC_SERVER)?;
             link.SetPath(PCWSTR(target16.as_ptr()))?;
             link.SetWorkingDirectory(PCWSTR(work16.as_ptr()))?;
             link.SetIconLocation(PCWSTR(target16.as_ptr()), 0)?;
@@ -243,8 +342,7 @@ fn create_shortcut(folder: &Path, name: &str, target: &Path, working_dir: &str) 
             Ok(())
         })();
         CoUninitialize();
-        result
-            .map_err(|e| format!("创建快捷方式 {} 失败: {e}", shortcut_path.display()))?;
+        result.map_err(|e| format!("创建快捷方式 {} 失败: {e}", shortcut_path.display()))?;
     }
     Ok(())
 }
@@ -279,4 +377,5 @@ const MB_YESNO: u32 = 0x00000004;
 const MB_ICONQUESTION: u32 = 0x00000020;
 const MB_ICONINFORMATION: u32 = 0x00000040;
 const MB_ICONERROR: u32 = 0x00000010;
+const MB_ICONWARNING: u32 = 0x00000030;
 const IDYES: i32 = 6;

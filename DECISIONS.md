@@ -1290,3 +1290,18 @@ if (click_count % 2) == 1 {
 - **worker**：三处拨号 handler（SyncSend/SpaceSync/SpaceJoin）统一先 `EndpointId::from_z32` 预检 + `resolve_dial_addrs` 地址补全——命令行带可用直连地址（SocketAddr 可解析）优先；否则 `mdns::scan_for` 定向浏览目标 id（命中即出，窗口 = SCAN_WINDOW，不扫全网）；纯 id 拨号仍是最后兜底（跨网段将来靠 iroh relay，另行决策）。mdns 解析器抽 `entry_from_info`（`ResolvedService` TXT 属性 id/n/a）供 scan/scan_for 共用，补 `scan_for` 未命中即返的测试。
 
 **打包勘误（顺带）**：D91 的 reindex.exe 未进 `scripts/package.ps1`（v0.1.10 日志可见 `reindex.exe 缺失 WARN` = 对账缺席降级）——build 清单、`$required` 数组、tar 校验数组三处补收录；CI package job 直接跑该脚本自动覆盖。
+
+### D94 共享入站放行进安装器 + worker 拨号可观测日志（2026-10-25，v0.1.11 真机仍失败取证）
+
+**背景**：v0.1.11（D93 修复版）双机加入团队仍失败，两机日志同签名 `ResolveRemote → ~8s close`（QUIC 直连拨号超时）。实网取证（临时 mDNS 探针 example + 防火墙规则审计 + DNS 判定）钉死**双层根因**：
+
+- **发现层（本机环境性死路，非代码缺陷）**：① 本机多播回路**同机自发自收都不通**——mihomo TUN 环境所致（防火墙规则排除实验 + 四配置接口轮测证实，mdns_sd `multicast_loop` 默认开 = 库无责；普通双机局域网不受影响）；② 系统 DNS 全被 TUN fake-ip 劫持（TXT 查询 → NXDOMAIN）→ iroh `DnsAddressLookup`（n0_dns TXT）死路；③ `PkarrResolver::n0_dns()` 走 HTTPS relay（`https://dns.iroh.link/pkarr`，443 经 TUN 可达）且 publish 实测成功 → **解析层大概率活，断点在 QUIC 直连本身**。
+- **连接层（主根因，可产品化修复）**：Windows 防火墙对入站 UDP 的放行按「首次绑定弹窗时」的网络档位记忆——本机审计 4 条规则全落 Public 档（恰配当前 Public 网络，**换网络即失效**）；对端机器未放行/档位不符时，QUIC 入站被静默丢弃，发起端表现就是 ResolveRemote 超时。次要可能：校园网 AP 客户端隔离（对端不可见，无法远程判定）。
+
+**决策**：
+
+- **installer 安装期写防火墙规则**：`netsh advfirewall firewall add rule name="AssetDeck-Share-UDP-In" dir=in action=allow protocol=udp profile=any program="<install>\share-worker.exe"`（先 delete 同名规则保幂等）。`profile=any` 是关键——一次放行对域/专用/公用三档永久生效，绕开「首绑弹窗按档位记忆」的整个失效面。三条路径：安装器提权（D78）→ 直接 netsh（`CREATE_NO_WINDOW` 防黑框）；免管理员安装 → `ShellExecuteW runas cmd /s /c` 一次 UAC 串联 delete+add（避免双弹窗，`SW_HIDE` 藏窗）；`--silent`（OTA 自更新）→ **不打 UAC 直接跳过**（静默流程弹 UAC 是惊吓，规则下次交互安装补上）。失败/拒绝只 `MB_ICONWARNING` 提示不阻断安装。
+- **worker 拨号可观测日志（D94 排障纪律）**：`resolve_dial_addrs` 三来源各落 INFO（命令行直连地址 / 定向 mDNS 命中 / mDNS 未命中或未启动回落纯 id），同步拨号失败真因（解析无果/QUIC 超时/对端拒绝）落 worker 日志 WARN——UI 只拿面向用户的短文案，网络细节只进日志。下次报障先看 worker 日志的「拨号地址来自 X」行即可二分断层。
+- **程序级规则而非端口级**：`program=` 锚定 share-worker.exe 完整路径，卸载/换目录由 delete 幂等 + 重装重建兜底；不开放裸端口。
+
+**复验协议**：两机重装 v0.1.12（安装期自动放行）→ 双 app 同开（worker 随 app 存活）→ 同网段。存量老版机器手动放行：`netsh advfirewall firewall add rule name="AssetDeck-Share-UDP-In" dir=in action=allow protocol=udp profile=any program="C:\Users\<用户>\AppData\Local\Programs\素材管理器\share-worker.exe"`。本机 TUN 环境（多播死 + DNS 劫持）下自测预期降级为 pkarr relay 解析路径，双机直连验证以普通网络为准。

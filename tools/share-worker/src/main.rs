@@ -119,6 +119,7 @@ fn target_addr(id_z32: &str, addrs: &[String]) -> Option<EndpointAddr> {
 /// 时做一次**定向 mDNS 浏览**（同网段对端的 TXT 直连地址，命中即出）——
 /// 纯 id 拨号会走 pkarr 公网 DNS 解析，国内网络常不可达，必须排在局域网
 /// 路径之后当兜底而非默认。返回值直接喂 [`target_addr`]。
+/// D94：三种来源都落 INFO 日志——真机排障靠 worker 日志定位断在哪一层。
 async fn resolve_dial_addrs(
     daemon: Option<ServiceDaemon>,
     self_id: String,
@@ -131,20 +132,33 @@ async fn resolve_dial_addrs(
         .cloned()
         .collect();
     if !usable.is_empty() {
+        logging::info!("拨号地址来自命令行 peer={peer_id} addrs={usable:?}");
         return usable;
     }
     let Some(daemon) = daemon else {
+        logging::info!("mDNS 未启动，纯 id 拨号（pkarr 解析） peer={peer_id}");
         return Vec::new();
     };
     let target = peer_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    let found = tokio::task::spawn_blocking(move || {
         mdns::scan_for(&daemon, &self_id, &target, mdns::SCAN_WINDOW)
     })
     .await
     .ok()
-    .flatten()
-    .map(|device| device.addrs)
-    .unwrap_or_default()
+    .flatten();
+    match found {
+        Some(device) => {
+            logging::info!(
+                "拨号地址来自定向 mDNS peer={peer_id} addrs={:?}",
+                device.addrs
+            );
+            device.addrs
+        }
+        None => {
+            logging::info!("定向 mDNS 未命中，纯 id 拨号（pkarr 解析） peer={peer_id}");
+            Vec::new()
+        }
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -546,7 +560,12 @@ async fn report_sync_send(
             }
             emit(proto::out::sync_sent(&peer_id, true, ""));
         }
-        Err(error) => emit(proto::out::sync_sent(&peer_id, false, &error.to_string())),
+        Err(error) => {
+            // 拨号失败的真因（解析无果/QUIC 超时/对端拒绝）只落在 worker
+            // 日志里；UI 只拿到面向用户的短文案（D94 排障纪律）。
+            logging::warn!("同步拨号失败 peer={peer_id}: {error}");
+            emit(proto::out::sync_sent(&peer_id, false, &error.to_string()));
+        }
     }
 }
 
