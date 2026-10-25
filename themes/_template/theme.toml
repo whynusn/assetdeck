@@ -1,0 +1,99 @@
+# 主题包骨架模板（复制整个 _template 目录并改名为你的主题 id）
+#
+# 复制后必须改：meta.id（= 目录名）、meta.name、meta.description、[palette] 全部色值。
+# 未填的 [palette] 键会导致校验失败（缺键即拒绝，不继承内置值）。
+# 完整字段说明见 automation/theme-system/theme-spec.md §3。
+
+[meta]
+id = "_template"
+name = "主题模板"
+author = "assetdeck"
+version = "0.1.0"
+base = "light"          # dark | light —— 决定 std-widgets 跟随哪一档
+description = "可复制的主题包骨架，不是可加载的主题"
+license = "CC0-1.0"     # 主题包本身（非素材）的许可证
+
+[palette]
+# 背景层级：窗口 < 面板 < 条 < 抬起面
+bg-app = "#fbf7fa"
+bg-panel = "#ffffff"
+bg-bar = "#f6eef4"
+bg-raised = "#ffffff"
+bg-raised-hover = "#faf0f6"
+bg-raised-press = "#f0e2ea"
+bg-input = "#ffffff"
+
+# 描边
+line = "#eddfe8"
+line-strong = "#ddc8d6"
+control-track-border = "#8a8a8a"
+
+# 文本三级
+text = "#2b2028"
+text-2 = "#5a4a54"
+text-3 = "#6b5a64"
+
+# 强调
+accent = "#c2477f"
+accent-hover = "#ad3c70"
+accent-press = "#96335f"
+accent-ink = "#ffffff"
+accent-soft = "#fbe3ee"
+
+# 语义色（各自必须有 soft 变体）
+danger = "#b8384a"
+danger-soft = "#fbe8ea"
+danger-press = "#9c2f3e"
+danger-ink = "#ffffff"
+warn = "#8a5c0d"
+warn-soft = "#faf0d8"
+ok = "#1f7a4d"
+ok-soft = "#e3f2e8"
+shared = "#7d3a9e"
+shared-soft = "#f2e8f8"
+
+# 浮层与遮罩
+bg-overlay = "#fffafd"
+scrim = "#00000033"
+
+# 瓦片名称条 / 徽标
+label-bar-bg = "#ffffffcc"
+label-bar-bg-hover = "#ffffff"
+label-bar-text = "#2b2028"
+badge-bg = "#00000099"
+badge-text = "#ffffff"
+badge-ring = "#ffffffcc"
+tile-veil = "#ffffffd9"
+card-icon = "#6b5a64"
+
+[geometry]
+radius = "10px"
+radius-lg = "16px"
+border-width = "1px"
+density = "comfortable"     # compact | comfortable | spacious
+tile-radius = "12px"
+tile-gap = "10px"
+
+[typography]
+font-family = "Microsoft YaHei UI"   # 必须是系统已装字体
+font-size-scale = "1.0"              # 0.9 – 1.2
+line-height = "1.45"
+letter-spacing = "0px"
+
+[icons]
+stroke-weight = "1.7"
+line-cap = "round"
+size = "16px"
+set = "line"
+
+[motion]
+enabled = true
+fast = "100ms"
+state = "120ms"
+enter = "150ms"
+easing = "ease-out"
+
+# [decoration]             # 有素材时取消注释，并在 THIRD_PARTY.md 登记来源
+# background = "assets/bg.avif"
+# background-tint = "#ffffff66"
+# corner = "assets/corner.webp"

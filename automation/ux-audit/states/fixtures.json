@@ -64,7 +64,8 @@
             "preview": "",
             "selected": true,
             "share-badge": 2,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -80,7 +81,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 492,
@@ -96,7 +98,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 0,
@@ -112,7 +115,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 3,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -128,7 +132,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 492,
@@ -144,7 +149,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 1,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           },
           {
             "x": 0,
@@ -160,7 +166,8 @@
             "preview": "本周排期：周一需求评审，周三视觉走查，周五发版",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -176,7 +183,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           }
         ],
         "trash-count": 5
@@ -222,7 +230,8 @@
             "preview": "",
             "selected": true,
             "share-badge": 2,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -238,7 +247,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 3,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 492,
@@ -254,7 +264,8 @@
             "preview": "10 月 23 日评审：分类收敛、日志导出、空态文案三项通过",
             "selected": false,
             "share-badge": 0,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           },
           {
             "x": 0,
@@ -270,7 +281,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 1,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -286,7 +298,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 492,
@@ -302,7 +315,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 2,
-            "shared": true
+            "shared": true,
+            "search-segments": []
           }
         ]
       }
@@ -329,7 +343,8 @@
             "preview": "",
             "selected": true,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -345,7 +360,8 @@
             "preview": "",
             "selected": true,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 492,
@@ -361,7 +377,8 @@
             "preview": "",
             "selected": true,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 0,
@@ -377,7 +394,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           }
         ]
       }
@@ -402,7 +420,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           },
           {
             "x": 246,
@@ -418,7 +437,8 @@
             "preview": "",
             "selected": false,
             "share-badge": 0,
-            "shared": false
+            "shared": false,
+            "search-segments": []
           }
         ]
       }

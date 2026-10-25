@@ -1,0 +1,388 @@
+{
+  "schemaVersion": 1,
+  "project": "assetdeck",
+  "contractVersion": 1,
+  "contract": "automation/theme-system/theme-spec.md",
+  "branch": "theme-system",
+  "baseBranch": "main",
+  "createdAt": "2026-10-25T00:30:00+08:00",
+  "updatedAt": "2026-10-25T00:30:00+08:00",
+  "runCount": 0,
+  "lastRuns": [],
+  "current": null,
+  "shippedThemes": [],
+  "modules": [
+    {
+      "id": "T0",
+      "name": "主题系统基座",
+      "intent": "先把「主题包 → 校验 → 注入 → 预览」这条链路打通并可回归，之后每个主题包都只是数据。没有基座就产主题，等于给每个主题写一套补丁。",
+      "components": [
+        {
+          "id": "T0-C1",
+          "name": "主题包 schema 与解析器",
+          "priority": 1,
+          "dependsOn": [],
+          "status": "pending",
+          "source": [
+            "crates/ui-viewmodels/src/theme.rs",
+            "automation/theme-system/theme-spec.md"
+          ],
+          "anchors": [
+            "ThemeTokens",
+            "ThemeProvider",
+            "ThemePack"
+          ],
+          "states": [],
+          "focus": "按 theme-spec §3 定义 ThemePack 结构（meta/palette/geometry/typography/icons/motion/decoration/sound）；serde 解析 + 未知键报错；色值解析支持 #rgb/#rrggbb/#rrggbbaa；缺键必须报错而非继承内置值。放在 ui-viewmodels（app-ui 依赖白名单不允许新增 crate）。不改任何现有 UI 行为。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C2",
+          "name": "主题包校验器（含对比度门禁）",
+          "priority": 1,
+          "dependsOn": [
+            "T0-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/ui-viewmodels/src/theme.rs"
+          ],
+          "anchors": [
+            "validate",
+            "contrast",
+            "relative_luminance"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default",
+            "theme-light"
+          ],
+          "focus": "按 theme-spec §6 实现 validate()：键集合完整性、色值合法性、对比度（复用 theme.rs 已有的 relative_luminance/contrast/composite_over 口径）、几何越界、装饰体积、base 与亮度一致性。错误必须定位到具体键。校验失败整包拒绝。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C3",
+          "name": "内置主题等价性回归",
+          "priority": 1,
+          "dependsOn": [
+            "T0-C2"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/ui-viewmodels/src/theme.rs",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "DarkThemeProvider",
+            "LightThemeProvider",
+            "apply_theme"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default",
+            "theme-light"
+          ],
+          "focus": "把内置 dark/light 表达为 builtin 主题包（编译期内嵌），并证明视觉输出与改造前逐字节一致（preview 截图 hash 对照）。这是「主题系统没改变既有产品」的唯一证据，也是后续所有主题包的基准。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C4",
+          "name": "主题包加载与目录即放即用",
+          "priority": 2,
+          "dependsOn": [
+            "T0-C2"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/ui-viewmodels/src/theme.rs",
+            "crates/app-ui/src/main.rs",
+            "themes/"
+          ],
+          "anchors": [
+            "themes",
+            "load_packs",
+            "ThemePack"
+          ],
+          "states": [
+            "settings-default"
+          ],
+          "focus": "从 themes/ 目录扫描主题包（与 settings.toml 同目录约定：有库根用库根，否则 exe 目录）；解析失败的包跳过并在日志留原因，绝不阻断启动；内存：只存解析后的令牌结构，不预载装饰图。不引入新依赖。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C5",
+          "name": "设置面板主题选择器",
+          "priority": 2,
+          "dependsOn": [
+            "T0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/ui-viewmodels/src/settings.rs",
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "SettingKind",
+            "light_theme",
+            "SETTING_SPECS"
+          ],
+          "states": [
+            "settings-default"
+          ],
+          "focus": "SettingKind 从单一 Toggle 扩展出 Select（或等效）；外观分区加入主题选择；现有 light_theme 开关与主题选择的关系必须明确定义（不产生两套互相打架的入口）；切换即时生效 + 持久化到 settings.toml。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C6",
+          "name": "几何与字体令牌运行时化",
+          "priority": 2,
+          "dependsOn": [
+            "T0-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/theme.slint",
+            "crates/ui-viewmodels/src/theme.rs",
+            "crates/app-ui/src/main.rs"
+          ],
+          "anchors": [
+            "Theme",
+            "Typography",
+            "Spacing",
+            "Metrics",
+            "default-font-family"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "把 radius/radius-lg/font-size/font-family/density 从编译期常量变成可注入令牌：theme.slint 的几何令牌转 in-out，壳层写 Window.default-font-family/default-font-size（已实测可用）。注意 ui_hygiene 的 spacing/radius/font 字面量计数不得升高——令牌定义在 theme.slint 内且名字不变。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C7",
+          "name": "装饰层（背景/水印/贴纸）",
+          "priority": 3,
+          "dependsOn": [
+            "T0-C4",
+            "T0-C6"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/ui/appwindow.slint",
+            "crates/app-ui/src/main.rs",
+            "crates/ui-viewmodels/src/theme.rs"
+          ],
+          "anchors": [
+            "background",
+            "watermark",
+            "stickers",
+            "tile-veil"
+          ],
+          "states": [
+            "shell-empty",
+            "shell-grid"
+          ],
+          "focus": "窗口底纹理/水印/任意贴纸的渲染：装饰只进无正文区域或带色罩；图像懒加载（slint::Image::load_from_path，已有用法）+ 尺寸上限 + 随主题切换释放旧图；内存预算不得回归（装饰常驻 ≤ 2 张）。正文可读性用对比度实测复核。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T0-C8",
+          "name": "主题系统护栏与许可门禁",
+          "priority": 3,
+          "dependsOn": [
+            "T0-C2",
+            "T0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "crates/app-ui/tests/ui_hygiene.rs",
+            "automation/theme-system/scripts/license-audit.mjs",
+            "automation/theme-system/scripts/preview.mjs"
+          ],
+          "anchors": [
+            "all_animations_consume_motion_tokens",
+            "THIRD_PARTY.md"
+          ],
+          "states": [],
+          "focus": "机械护栏：主题系统不得成为硬编码新入口（ui_hygiene 计数不升）；preview --check 校验主题声明与夹具引用；license-audit 校验 THIRD_PARTY/许可白名单/体积/IP 关键词。把这三者固化成每轮必跑门禁。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "id": "T1",
+      "name": "首发主题包",
+      "intent": "基座建成后用真实主题验证「差异大」与「产出流程」，并把许可纪律走通一遍。每个主题包是一次独立交付，允许并行推进。",
+      "components": [
+        {
+          "id": "T1-C1",
+          "name": "主题包制作规范与模板",
+          "priority": 2,
+          "dependsOn": [
+            "T0-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "themes/",
+            "automation/theme-system/theme-spec.md"
+          ],
+          "anchors": [
+            "theme.toml",
+            "THIRD_PARTY.md"
+          ],
+          "states": [],
+          "focus": "产出一个可复制的主题包骨架（含注释齐全的 theme.toml 模板 + THIRD_PARTY.md 模板 + README 说明如何取素材），让新主题包的制作成本降到「填表 + 放图」。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T1-C2",
+          "name": "标杆主题包：原创粉色猫咪",
+          "priority": 2,
+          "dependsOn": [
+            "T1-C1",
+            "T0-C7"
+          ],
+          "status": "pending",
+          "source": [
+            "themes/",
+            "crates/ui-viewmodels/src/theme.rs"
+          ],
+          "anchors": [
+            "palette",
+            "decoration",
+            "geometry"
+          ],
+          "states": [
+            "shell-grid",
+            "shell-empty",
+            "settings-default"
+          ],
+          "focus": "按用户指定的「粉色可爱猫咪」方向做原创形象主题：低饱和粉白、圆角、角饰贴纸。素材只用 CC0/OFL 等开源资源或自制，命名与形象不得触碰商业 IP（license-audit 会拦）。差异幅度要比内置主题可感知（色板 + 几何 + 装饰 + 字体至少 4 维同时变）。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T1-C3",
+          "name": "主题包 #2：暗色高对比/低视觉疲劳向",
+          "priority": 3,
+          "dependsOn": [
+            "T1-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "themes/"
+          ],
+          "anchors": [
+            "palette",
+            "geometry"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "第二个主题包，验证「同一基座能承载风格迥异的主题」：暗色系、更高对比、紧凑密度、可能换图标描边风格。重点验证 density 与图标维度真实生效（而非只换色）。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T1-C4",
+          "name": "主题包 #3：极简编辑/纸质感",
+          "priority": 3,
+          "dependsOn": [
+            "T1-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "themes/"
+          ],
+          "anchors": [
+            "palette",
+            "typography",
+            "decoration"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "第三个主题包，验证字体与背景装饰维度：衬线/等宽字族、纸纹背景、无水印极简风。验证字体族确实按系统已装族生效，并如实记录「不支持打包字体」的边界。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T1-C5",
+          "name": "主题包 #4：用户向上题（网取开源素材）",
+          "priority": 4,
+          "dependsOn": [
+            "T1-C1"
+          ],
+          "status": "pending",
+          "source": [
+            "themes/"
+          ],
+          "anchors": [
+            "palette",
+            "decoration"
+          ],
+          "states": [
+            "shell-grid"
+          ],
+          "focus": "从网络取开源素材（CC0 纹理/插画/字体）做第 4 个主题包，走通「下载 → 记录来源 → 入 THIRD_PARTY → 过 license-audit」的完整链路。这是对「允许上网下载开源素材」这一需求的正面验证。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        },
+        {
+          "id": "T1-C6",
+          "name": "主题包质量横评与回归基线",
+          "priority": 4,
+          "dependsOn": [
+            "T1-C2",
+            "T1-C3",
+            "T1-C4"
+          ],
+          "status": "pending",
+          "source": [
+            "automation/theme-system/",
+            "target/theme-system/shots/"
+          ],
+          "anchors": [
+            "preview",
+            "license-audit"
+          ],
+          "states": [
+            "shell-grid",
+            "settings-default"
+          ],
+          "focus": "对已产出主题做统一横评：状态覆盖、差异幅度、正文可读性、切换无跳变、许可合规。建立「主题回归基线」（每个主题 × 关键状态的截图），供后续改动做视觉回归对照。",
+          "lastRun": null,
+          "auditedAtCommit": null,
+          "notes": ""
+        }
+      ]
+    }
+  ],
+  "findings": []
+}
