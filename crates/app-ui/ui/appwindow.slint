@@ -370,6 +370,9 @@ export component AppWindow inherits Window {
     // 贴码加入（D90-P2）：粘贴同事给的邀请码，一次点击加入。
     in-out property <string> space-join-code: "";
     callback space-join(string);
+    // 大小闸手动放行（D90-P3）：闸门挡下的待下载素材，用户显式触发同步。
+    in property <int> space-pending-sync: 0;
+    callback space-sync-pending();
     callback space-ctl-closed();
     // 「添加到共享空间」弹窗：行即空间，点击即加（右键菜单 menu-action(7)）。
     in property <bool> space-add-open: false;
@@ -3201,6 +3204,11 @@ export component AppWindow inherits Window {
                             root.space-join(root.space-join-code);
                         }
                     }
+                }
+                if root.space-pending-sync > 0: InlineNotice {
+                    text: root.space-pending-sync + " 项新素材超过同步上限，暂缓下载";
+                    action-label: "手动下载";
+                    action => { root.space-sync-pending(); }
                 }
                 if root.space-ctl-error != "": InlineNotice { text: root.space-ctl-error; }
                 if !root.space-ctl-ready: InlineNotice {

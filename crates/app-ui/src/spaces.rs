@@ -173,6 +173,7 @@ pub fn sync_rows(ui: &AppWindow) {
     ui.set_selected_space(selected.unwrap_or(-1));
     ui.set_in_space_view(in_space_view());
     ui.set_space_ctl_ready(SPACES.with(|vm| vm.borrow().is_ready()));
+    refresh_pending(ui);
 }
 
 /// 进入空间视图（或重进刷新）：换根装载 = 库重载同构。
@@ -538,9 +539,9 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
     /// 大小闸（设置装载时回填）：(启用, MB 上限)。拍板②：默认 500MB 可调。
     static GATE: RefCell<(bool, u32)> = const { RefCell::new((true, 500)) };
-    /// 全员离线时挂起的字节索取（对端上线即重试）。
-    static PENDING_FETCH: RefCell<Vec<(Uuid, Vec<SpaceAssetMeta>)>> =
-        const { RefCell::new(Vec::new()) };
+    /// 挂起的字节索取。gated = 被大小闸挡下（等用户手动放行，对端上线
+    /// 不自动重试）；否则 = 无人在线（对端上线自动续传）。
+    static PENDING_FETCH: RefCell<Vec<PendingFetch>> = const { RefCell::new(Vec::new()) };
     /// 导入管线的目标根（主视图里向空间投放时活动根 ≠ 目标根，收尾回调
     /// 据此归位）。导入由 importing 旗标串行，单槽即可。
     static IMPORT_TARGET: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -1021,8 +1022,73 @@ fn missing_from_ops(root: &Path, ops: &[SpaceOp]) -> Vec<SpaceAssetMeta> {
         .collect()
 }
 
+/// 挂起的字节索取条目（空间 + 素材 + 是否被大小闸挡下）。
+struct PendingFetch {
+    space_id: Uuid,
+    items: Vec<SpaceAssetMeta>,
+    gated: bool,
+}
+
+fn push_pending(space_id: Uuid, items: Vec<SpaceAssetMeta>, gated: bool) {
+    PENDING_FETCH.with(|slot| {
+        slot.borrow_mut().push(PendingFetch {
+            space_id,
+            items,
+            gated,
+        })
+    });
+}
+
+/// 大小闸挡下待手动放行的素材总数（管理弹窗的「待下载」入口据此显隐）。
+pub fn pending_sync_count() -> usize {
+    PENDING_FETCH.with(|slot| {
+        slot.borrow()
+            .iter()
+            .filter(|pending| pending.gated)
+            .map(|pending| pending.items.len())
+            .sum()
+    })
+}
+
+/// 刷新「待下载」计数（UI 属性）。
+pub fn refresh_pending(ui: &AppWindow) {
+    ui.set_space_pending_sync(pending_sync_count() as i32);
+}
+
+/// 手动放行（绕过大小闸的用户显式动作）：有在线成员即发；无人在线转
+/// 普通挂起（上线自动续传）。
+pub fn force_pending_fetch(ui: &AppWindow) {
+    let pending: Vec<PendingFetch> =
+        PENDING_FETCH.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    let mut offline = 0usize;
+    for entry in pending {
+        if !entry.gated {
+            // 非闸门挂起项原样回挂（这里只放行闸门项）。
+            PENDING_FETCH.with(|slot| slot.borrow_mut().push(entry));
+            continue;
+        }
+        if let Some(space) = space_by_id(entry.space_id) {
+            if let Some((peer, addrs)) = online_member(&space) {
+                send_fetch(entry.space_id, entry.items, &peer, &addrs);
+                continue;
+            }
+        }
+        offline += entry.items.len();
+        push_pending(entry.space_id, entry.items, false);
+    }
+    if offline > 0 {
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Info,
+            format!("{offline} 项已排队，等成员上线自动下载"),
+        );
+    }
+    refresh_pending(ui);
+}
+
 /// 字节索取：大小闸（拍板②）→ 选在线持有者 → 分批发 Fetch；全员离线挂起，
-/// 对端上线重试（事件驱动，零 Timer）。
+/// 对端上线重试（事件驱动，零 Timer）。闸门挡下的挂起转手动（管理弹窗
+/// 「待下载」入口放行）。
 fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) {
     if items.is_empty() {
         return;
@@ -1034,13 +1100,15 @@ fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) 
             ui,
             ui_viewmodels::notifications::Severity::Warning,
             format!(
-                "「{}」有 {} 项新素材（{}），超过同步上限 {}MB，暂不自动下载",
+                "「{}」有 {} 项新素材（{}），超过同步上限 {}MB，已挂起——可在「共享空间」里手动下载",
                 space.name,
                 items.len(),
                 ui_viewmodels::human_size(total),
                 mb
             ),
         );
+        push_pending(space.id, items, true);
+        refresh_pending(ui);
         return;
     }
     match online_member(space) {
@@ -1051,22 +1119,35 @@ fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) 
                 space.name,
                 items.len()
             );
-            PENDING_FETCH.with(|slot| slot.borrow_mut().push((space.id, items)));
+            push_pending(space.id, items, false);
         }
     }
 }
 
 fn try_pending_fetch() {
-    let pending: Vec<(Uuid, Vec<SpaceAssetMeta>)> =
+    let pending: Vec<PendingFetch> =
         PENDING_FETCH.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
     let mut kept = Vec::new();
-    for (id, items) in pending {
-        let Some(space) = space_by_id(id) else {
+    for mut entry in pending {
+        // 闸门项只认手动放行（force_pending_fetch），对端上线不自动重试。
+        if entry.gated {
+            kept.push(entry);
             continue;
-        };
-        match online_member(&space) {
-            Some((peer, addrs)) => send_fetch(id, items, &peer, &addrs),
-            None => kept.push((id, items)),
+        }
+        let mut handled = false;
+        if let Some(space) = space_by_id(entry.space_id) {
+            if let Some((peer, addrs)) = online_member(&space) {
+                send_fetch(
+                    entry.space_id,
+                    std::mem::take(&mut entry.items),
+                    &peer,
+                    &addrs,
+                );
+                handled = true;
+            }
+        }
+        if !handled {
+            kept.push(entry);
         }
     }
     PENDING_FETCH.with(|slot| *slot.borrow_mut() = kept);
