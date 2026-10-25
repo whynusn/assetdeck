@@ -244,9 +244,12 @@ node automation/theme-system/scripts/preview.mjs --all --phase before
 
 - 任务：「每小时主题系统推进（theme-system）」，cron `30 * * * *`（Asia/Shanghai，错开 ux-audit 的整点），
   独立会话，Full Access，`cwd` = 本 worktree 的绝对路径。
+- 任务 ID `f34977ba-9f0c-4ac6-96b9-218e39f3abfc`（2026-10-25 创建，无过期时间）。
 - 提示词副本在 `automation/theme-system/automation-prompt.md`；改提示词后必须用
   `qoder_cron action=update` 同步任务，否则下一次运行仍用旧提示词。
 - 暂停/恢复：`qoder_cron action=disable|enable`；立即跑一次：`action=run`。
+- **不要给本任务设 `expiresAt`**：ux-audit 的任务因到期被置为 `pauseReason: "expired"` 静默停摆，
+  夹具漂移长期无人发现（见 journal「夹具漂移修复」）。需要停下时显式 `disable`。
 - 单次运行可能超过 1 小时（首次全量编译），下一整点的运行会因锁直接退出——这是预期行为。
 - 合并回主线由用户在主工作树执行 `git merge theme-system`；自动化本身**永不 push**、
   **永不把 main 合并进除 theme-system 之外的分支**。
