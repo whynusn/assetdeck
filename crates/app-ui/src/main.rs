@@ -4,7 +4,9 @@
 slint::include_modules!();
 
 mod cards;
+mod notifications;
 mod spaces;
+use notifications::show_notice;
 mod task_runner;
 mod thumbs;
 mod ui_enums;
@@ -37,11 +39,8 @@ use task_runner::ChildTask;
 use thumbs::{GridCtx, ThumbCache, ThumbSource, THUMB_CACHE_CAPACITY};
 
 thread_local! {
-    /// 成功提示的自动消隐计时器。Slint 的 Timer 非 Send，只能在 UI 线程持有；
-    /// 放线程局部里，供 `show_notice` 每次成功时重启，警告/错误时停掉。
     // D50 弹窗两段式动效的单发定时器：入场下一帧翻转 / 出场播完再卸载。
     static CLASSIFY_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
-    static NOTICE_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     /// D56 更新弹窗两段式入场（同 CLASSIFY_ANIM_TIMER 模式）。
     static UPDATE_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     /// D73 运行中间隔检查的节拍器：Repeated 每 10min 醒一次只评估到期与否，
@@ -269,29 +268,6 @@ fn sync_target_tunings(ui: &AppWindow, routing: &TargetRoutingRuntime) {
     ui.set_target_tunings(ModelRc::from(Rc::new(VecModel::from(rows))));
 }
 
-fn show_notice(ui: &AppWindow, tone: TargetNoticeTone, text: String) {
-    ui.set_notice_tone(ui_enums::notice_tone(tone));
-    ui.set_notice_text(text.into());
-    // 成功类提示是「事情办成了」的一次性反馈，无需常驻挤占纵向空间：几秒后自动消隐。
-    // 警告/错误需要用户读到并处理，保持常驻，由用户手动关闭或被下一条提示覆盖。
-    if matches!(tone, TargetNoticeTone::Success) {
-        let ui_weak = ui.as_weak();
-        NOTICE_TIMER.with(|slot| {
-            slot.borrow().start(
-                slint::TimerMode::SingleShot,
-                std::time::Duration::from_millis(3200),
-                move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_notice_text("".into());
-                    }
-                },
-            );
-        });
-    } else {
-        NOTICE_TIMER.with(|slot| slot.borrow().stop());
-    }
-}
-
 /// 前台变化唤醒闭包工厂：只做「敲醒 UI 事件循环去 poll」一件事，
 /// 真正的窗口枚举与热目标决策留在 UI 线程的 `on_poll_targets` 里。
 /// 工厂化是因为退路 Timer 每轮重试接管事件驱动时都要重新 `Box` 一份。
@@ -480,9 +456,9 @@ impl CrudCtx {
             return;
         };
         if self.importing.load(Ordering::SeqCst) {
-            show_notice(
+            notifications::publish(
                 &ui,
-                TargetNoticeTone::Warning,
+                ui_viewmodels::notifications::Severity::Info,
                 "正在导入/生成缩略图，请等进度条结束后再操作".to_string(),
             );
             return;
@@ -515,9 +491,9 @@ impl CrudCtx {
             return;
         };
         if self.importing.load(Ordering::SeqCst) {
-            show_notice(
+            notifications::publish(
                 &ui,
-                TargetNoticeTone::Warning,
+                ui_viewmodels::notifications::Severity::Info,
                 "正在导入/生成缩略图，请等进度条结束后再操作".to_string(),
             );
             return;
@@ -623,10 +599,15 @@ impl CrudCtx {
                 self.apply_filter(self.filter(), label);
             }
             Err(error) => {
-                show_notice(&ui, TargetNoticeTone::Error, format!("库刷新失败: {error}"));
+                notifications::set_problem(
+                    &ui,
+                    "library-refresh",
+                    format!("库刷新失败：{error}。请重试刷新。"),
+                );
                 return;
             }
         }
+        notifications::resolve(&ui, "library-refresh");
         if success {
             show_notice(&ui, TargetNoticeTone::Success, format!("{label}完成"));
         } else {
@@ -680,9 +661,9 @@ impl ImportFlow {
     fn open(self: &Rc<Self>, paths: Vec<std::path::PathBuf>) {
         if self.importing.load(Ordering::SeqCst) {
             if let Some(ui) = self.ui.upgrade() {
-                show_notice(
+                notifications::publish(
                     &ui,
-                    TargetNoticeTone::Warning,
+                    ui_viewmodels::notifications::Severity::Info,
                     "已经在导入素材，请等进度条结束后再操作".to_string(),
                 );
             }
@@ -1883,9 +1864,9 @@ fn spawn_update_install(ui: &slint::Weak<AppWindow>, importing: &AtomicBool) {
     }
     if importing.load(Ordering::SeqCst) {
         if let Some(app) = ui.upgrade() {
-            show_notice(
+            notifications::publish(
                 &app,
-                TargetNoticeTone::Error,
+                ui_viewmodels::notifications::Severity::Info,
                 "素材导入进行中，导入完成后再更新".to_string(),
             );
         }
@@ -4291,15 +4272,13 @@ fn main() {
         app.on_import_files_requested(move || {
             if importing_flag.load(Ordering::SeqCst) {
                 if let Some(ui) = import_flow.ui.upgrade() {
-                    show_notice(
-                        &ui,
-                        TargetNoticeTone::Warning,
-                        "已经在导入素材，请等进度条结束后再操作".to_string(),
-                    );
+                    notifications::publish(
+                        &ui, ui_viewmodels::notifications::Severity::Info,
+                        "已经在导入素材，请等进度条结束后再操作".to_string());
                 }
                 return;
             }
-            let filter = "素材与素材包 (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo|所有文件 (*.*)|*.*";
+            let filter = "素材与素材包 (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo;*.csv)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.txt;*.md;*.emo;*.csv|所有文件 (*.*)|*.*";
             match routing.borrow_mut().dialogs().pick_open_files("选择要导入的素材", filter) {
                 Ok(Some(paths)) if !paths.is_empty() => import_flow.open(paths),
                 Ok(_) => {} // 取消 / 空选 = 零副作用
@@ -4349,9 +4328,9 @@ fn main() {
                 return;
             };
             if importing.load(Ordering::SeqCst) {
-                show_notice(
+                notifications::publish(
                     &ui,
-                    TargetNoticeTone::Warning,
+                    ui_viewmodels::notifications::Severity::Info,
                     "正在导入/刷新素材，请等进度条结束后再操作".to_string(),
                 );
                 return;
@@ -4379,6 +4358,7 @@ fn main() {
                     ui.set_content_y(0.0);
                     sync_counts(&ui, vm.borrow().total(), true);
                     grid.sync();
+                    notifications::resolve(&ui, "library-refresh");
                     show_notice(
                         &ui,
                         TargetNoticeTone::Success,
@@ -4386,10 +4366,10 @@ fn main() {
                     );
                 }
                 Err(error) => {
-                    show_notice(
+                    notifications::set_problem(
                         &ui,
-                        TargetNoticeTone::Error,
-                        format!("刷新素材库失败: {error}"),
+                        "library-refresh",
+                        format!("刷新素材库失败：{error}。请重试刷新。"),
                     );
                     return;
                 }
@@ -4454,15 +4434,23 @@ fn main() {
         });
     }
 
-    // 手动收起提示条：用户点关闭按钮时清空 notice-text，同时停掉自动消隐计时器。
     {
-        let ui = app.as_weak();
-        app.on_notice_dismissed(move || {
-            let ui = ui.unwrap();
-            ui.set_notice_text("".into());
-            NOTICE_TIMER.with(|slot| slot.borrow().stop());
+        let weak = app.as_weak();
+        app.on_import_result_requested(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_import_result_open(true);
+                let weak = ui.as_weak();
+                Timer::single_shot(std::time::Duration::from_millis(16), move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if ui.get_import_result_open() {
+                            ui.set_import_result_shown(true);
+                        }
+                    }
+                });
+            }
         });
     }
+    notifications::wire(&app);
 
     // D38 一键打开日志：资源管理器直接**选中本次会话的日志文件**——目录里
     // 保留最近 8 份（每进程一份），打开目录容易点开上一次会话的旧日志
@@ -5014,17 +5002,13 @@ fn main() {
                     ui.set_content_y(0.0);
                     sync_counts(&ui, vm.borrow().total(), true);
                     grid.sync();
-                    show_notice(
-                        &ui,
-                        TargetNoticeTone::Success,
-                        "缩略图生成完成，已刷新预览".to_string(),
-                    );
+                    notifications::resolve(&ui, "library-refresh");
                 }
                 Err(error) => {
-                    show_notice(
+                    notifications::set_problem(
                         &ui,
-                        TargetNoticeTone::Error,
-                        format!("缩略图生成后刷新库失败: {error}"),
+                        "library-refresh",
+                        format!("缩略图生成后刷新库失败：{error}。请重试刷新。"),
                     );
                 }
             }
@@ -5101,13 +5085,24 @@ fn main() {
                     ui.set_content_y(0.0);
                     sync_counts(&ui, vm.borrow().total(), true);
                     grid.sync();
-                    show_notice(&ui, TargetNoticeTone::Success, message.to_string());
+                    notifications::resolve(&ui, "library-refresh");
+                    let tone = if ui.get_import_result_available()
+                        && ui
+                            .get_import_result_rows()
+                            .iter()
+                            .any(|row| row.kind == ui_enums::IMPORT_RESULT_FAILED)
+                    {
+                        TargetNoticeTone::Warning
+                    } else {
+                        TargetNoticeTone::Success
+                    };
+                    show_notice(&ui, tone, message.to_string());
                 }
                 Err(error) => {
-                    show_notice(
+                    notifications::set_problem(
                         &ui,
-                        TargetNoticeTone::Error,
-                        format!("导入后刷新库失败: {error}"),
+                        "library-refresh",
+                        format!("导入后刷新库失败：{error}。请重试刷新。"),
                     );
                 }
             }
@@ -5132,11 +5127,9 @@ fn main() {
         app.on_clear_library_requested(move || {
             let ui = ui.unwrap();
             if importing.load(Ordering::SeqCst) {
-                show_notice(
-                    &ui,
-                    TargetNoticeTone::Warning,
-                    "正在导入素材/生成缩略图，请等进度条结束后再清空".to_string(),
-                );
+                notifications::publish(
+                    &ui, ui_viewmodels::notifications::Severity::Info,
+                    "正在导入素材/生成缩略图，请等进度条结束后再清空".to_string());
                 return;
             }
             if !clear_armed.get() {
@@ -5379,9 +5372,9 @@ fn main() {
             ui.set_import_menu_open(false);
             ui.set_import_menu_shown(false);
             if importing.load(Ordering::SeqCst) {
-                show_notice(
+                notifications::publish(
                     &ui,
-                    TargetNoticeTone::Warning,
+                    ui_viewmodels::notifications::Severity::Info,
                     "已经在导入素材，请等进度条结束后再操作".to_string(),
                 );
                 return;
@@ -5641,11 +5634,8 @@ fn spawn_import_pipeline(
     // 新导入开始时收起上一次的结果弹窗，避免两层弹窗叠放。
     ui_ready.set_import_result_open(false);
     ui_ready.set_import_result_shown(false);
-    show_notice(
-        &ui_ready,
-        TargetNoticeTone::Success,
-        format!("开始导入：{label}"),
-    );
+    // The progress row already communicates that import has started.
+    ui_ready.set_import_result_available(false);
     logging::info!("开始导入 label={label} root={root} args={import_args:?}");
 
     let weak = ui.clone();
@@ -5825,8 +5815,8 @@ fn spawn_import_pipeline(
                         }
                         None => "导入完成，正在后台生成缩略图...".to_string(),
                     };
-                    // D65 结果弹窗：有需要核对/知情的条目（跳过/相似/失败）才弹，
-                    // 干净导入维持轻提示不加点击成本。明细行来自 RESULTITEM 协议。
+                    // D89：保留明细入口，跳过/相似/失败不再强制打开结果窗口。
+                    // 明细行来自 RESULTITEM 协议。
                     let rows: Vec<ImportResultRowData> = result_items_finished
                         .lock()
                         .unwrap()
@@ -5838,18 +5828,13 @@ fn spawn_import_pipeline(
                             distance: *distance,
                         })
                         .collect();
+                    ui.set_import_result_available(false);
                     if !rows.is_empty() {
                         ui.set_import_result_summary(summary.as_str().into());
                         ui.set_import_result_rows(slint::ModelRc::from(Rc::new(VecModel::from(
                             rows,
                         ))));
-                        ui.set_import_result_open(true);
-                        let weak_anim = weak_invoke.clone();
-                        Timer::single_shot(std::time::Duration::from_millis(16), move || {
-                            if let Some(ui) = weak_anim.upgrade() {
-                                ui.set_import_result_shown(true);
-                            }
-                        });
+                        ui.set_import_result_available(true);
                     }
                     ui.invoke_import_finished(true, summary.into());
                 }

@@ -6,6 +6,7 @@ pub mod classify;
 pub mod grid_vm;
 pub mod layout;
 pub mod legacy_migration;
+pub mod notifications;
 pub mod search;
 pub mod selection;
 pub mod settings;

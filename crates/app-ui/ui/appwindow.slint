@@ -1,3 +1,5 @@
+import { ToastHost, InlineNotice, NoticeHistory, NoticeRow, NoticeTone } from "notifications.slint";
+export { NoticeRow } from "notifications.slint";
 // 素材管理器主窗：哑渲染——只绑定属性与转发回调，业务逻辑全在 ui-viewmodels。
 //
 // 配色/圆角/图标一律走 theme.slint 的令牌与字形表；输入框、按钮、进度条用内置
@@ -19,9 +21,9 @@ export global UiEnums {
     out property <int> target-mode-ready: 1;
     out property <int> target-mode-needs-confirmation: 2;
     out property <int> target-mode-choose: 3;
-    out property <int> notice-tone-success: 0;
-    out property <int> notice-tone-warning: 1;
-    out property <int> notice-tone-error: 2;
+    out property <int> notice-tone-success: NoticeTone.success;
+    out property <int> notice-tone-warning: NoticeTone.warning;
+    out property <int> notice-tone-error: NoticeTone.error;
     // 目标健康度：颜色由视图映射到 Theme.ok/warn/danger/text-3。
     out property <int> target-health-green: 0;
     out property <int> target-health-yellow: 1;
@@ -230,9 +232,13 @@ export component AppWindow inherits Window {
     callback target-rename-cancelled();
     in property <string> notice-text: "";
     in property <int> notice-tone: 0;
-    // notice-text 设成 in-out：壳层负责写入提示，视图侧的自动消隐 Timer 与关闭按钮
-    // 负责在数秒后或用户点击时把它清空。成功类提示不该常驻占一整行。
     callback notice-dismissed();
+    in-out property <bool> notice-hovered: false;
+    in-out property <bool> notice-history-open: false;
+    in property <[NoticeRow]> notice-history;
+    in property <string> notice-banner;
+    in property <bool> import-result-available: false;
+    callback import-result-requested();
     in property <bool> progress-visible: false;
     in property <float> progress-percent: 0.0;
     in property <string> progress-text: "";
@@ -606,6 +612,10 @@ export component AppWindow inherits Window {
 
         capture_key_pressed(event) => {
             if (event.text == Key.Escape) {
+                if root.notice-history-open {
+                    root.notice-history-open = false;
+                    return accept;
+                }
                 root.escape-pressed();
                 return accept;
             }
@@ -1063,69 +1073,11 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.notice-text != "": Rectangle {
-                height: Metrics.control-primary;
-                background: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger-soft
-                    : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn-soft
-                    : Theme.ok-soft;
-
-                HorizontalLayout {
-                    padding-left: Spacing.bar-pad;
-                    padding-right: Spacing.bar-pad;
-                    spacing: Spacing.md;
-
-                    Icon {
-                        y: (parent.height - self.height) / 2;
-                        commands: root.notice-tone == UiEnums.notice-tone-error ? Glyph.ban
-                            : root.notice-tone == UiEnums.notice-tone-warning ? Glyph.alert
-                            : Glyph.check;
-                        tint: root.notice-tone == UiEnums.notice-tone-error ? Theme.danger
-                            : root.notice-tone == UiEnums.notice-tone-warning ? Theme.warn
-                            : Theme.ok;
-                        width: 14px;
-                        height: 14px;
-                    }
-
-                    Text {
-                        text: root.notice-text;
-                        horizontal-stretch: 1;
-                        color: Theme.text;
-                        font-size: Typography.label;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-
-                    // 关闭提示：成功类提示会自动消隐，这里再给用户一个随时收起的入口，
-                    // 避免一整行长期占用纵向空间。做成轻量的无边框图标，融进色条里。
-                    notice-close := Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        width: Metrics.hit-min;
-                        height: Metrics.hit-min;
-                        border-radius: Theme.radius;
-                        background: notice-close-touch.has-hover ? Theme.bg-raised-hover : transparent;
-                        animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
-
-                        Icon {
-                            commands: Glyph.close;
-                            tint: Theme.text-2;
-                            width: 12px;
-                            height: 12px;
-                        }
-
-                        notice-close-touch := TouchArea {
-                            mouse-cursor: MouseCursor.pointer;
-                            clicked => {
-                                root.notice-dismissed();
-                            }
-                        }
-
-                        Tooltip {
-                            text: @markdown("收起这条提示");
-                        }
-                    }
-                }
+            if root.notice-banner != "": InlineNotice {
+                text: root.notice-banner;
+                action-label: "重试刷新";
+                action => { root.refresh-library-requested(); }
             }
-
             if root.progress-visible: Rectangle {
                 height: Metrics.control-primary;
                 background: Theme.bg-panel;
@@ -3226,17 +3178,9 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if root.space-ctl-error != "": Text {
-                    text: root.space-ctl-error;
-                    color: Theme.danger;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                if !root.space-ctl-ready: Text {
+                if root.space-ctl-error != "": InlineNotice { text: root.space-ctl-error; }
+                if !root.space-ctl-ready: InlineNotice {
                     text: "共享引擎启动中，稍候片刻即可创建空间";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
                 }
 
                 // 空间清单：行 = 名称 + 成员数 + 邀请码/退出。
@@ -3877,5 +3821,39 @@ export component AppWindow inherits Window {
             }
         }
     }
+        // Compact persistent entry; details survive expiration of the toast.
+        HorizontalLayout {
+            x: root.width - self.width - 16px;
+            y: root.height - self.height - 12px;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            spacing: 8px;
+            if root.import-result-available: Button {
+                text: "导入明细";
+                clicked => { root.import-result-requested(); }
+            }
+            if root.notice-history.length > 0: Button {
+                text: "通知记录";
+                clicked => { root.notice-history-open = !root.notice-history-open; }
+            }
+        }
+        if root.notice-text != "" && !root.notice-history-open: ToastHost {
+            x: root.width - self.width - 16px;
+            y: root.height - self.height - 56px;
+            width: Math.min(420px, root.width - 32px);
+            text: root.notice-text;
+            tone: root.notice-tone;
+            changed hovered => { root.notice-hovered = self.hovered; }
+            dismissed => { root.notice-hovered = false; root.notice-dismissed(); }
+            history-requested => { root.notice-hovered = false; root.notice-history-open = true; }
+        }
+        if root.notice-history-open: NoticeHistory {
+            x: root.width - self.width - 16px;
+            y: root.height - self.height - 56px;
+            width: Math.min(460px, root.width - 32px);
+            height: Math.min(400px, root.height - 100px);
+            rows: root.notice-history;
+            closed => { root.notice-history-open = false; }
+        }
     } // key-root FocusScope 收口
 }
