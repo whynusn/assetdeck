@@ -26,7 +26,7 @@ use ui_viewmodels::{
 use crate::thumbs::{GridCtx, ThumbCache};
 use crate::{
     apply_categories, default_library_root, recent_first_sorter, spawn_import_pipeline,
-    sync_counts, AppWindow, SpaceRowData, COLUMNS, CONTAINER_WIDTH, GAP,
+    sync_counts, AppWindow, COLUMNS, CONTAINER_WIDTH, GAP,
 };
 
 /// 活动空间作用域（None = 主库视图）。
@@ -82,6 +82,11 @@ pub fn handle_worker_ready(self_id: &str, self_name: &str) {
     if changed {
         persist();
         push_space_state();
+        // D93 连接修复：身份首落即发一轮 mDNS 发现。D90 退役了发 SCAN 的
+        // 设备选择器 UI 后，同网段对端地址再无人发现——拨号全退 pkarr 公网
+        // DNS（国内常不可达）。顺序钉死：SPACE_STATE 先入 worker（抗熵
+        // Summary 用已装好的册），SCAN 随后 → DEVICE 行 → 每会话一轮抗熵。
+        crate::share_write_line("SCAN");
     }
 }
 
@@ -151,32 +156,34 @@ fn host() -> Option<Rc<SpaceHost>> {
     HOST.with(|slot| slot.borrow().clone())
 }
 
-/// 侧栏/弹窗空间行同步：行模型 + 选中态 + 作用域旗标一次摆齐。
+/// 侧栏/弹窗团队态同步：绑定三件套（name/sub/id）+ 作用域旗标一次摆齐。
+/// D93：同时最多绑定一个团队——首行即团队；空册 = 未绑定（name 空串）。
 pub fn sync_rows(ui: &AppWindow) {
-    let list = spaces();
-    let selected = active().map(|scope| {
-        list.iter()
-            .position(|s| s.id == scope.id)
-            .map(|i| i as i32)
-            .unwrap_or(-1)
-    });
-    let rows: Vec<SpaceRowData> = list
-        .iter()
-        .map(|space| SpaceRowData {
-            id: space.id.to_string().into(),
-            name: space.name.clone().into(),
-            sub_label: SpaceVm::member_label(space).into(),
-        })
-        .collect();
-    ui.set_space_rows(slint::ModelRc::new(slint::VecModel::from(rows.clone())));
-    ui.set_space_add_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
-    ui.set_selected_space(selected.unwrap_or(-1));
+    let bound = spaces().into_iter().next();
+    match &bound {
+        Some(space) => {
+            ui.set_team_name(space.name.clone().into());
+            ui.set_team_sub(SpaceVm::member_label(space).into());
+            ui.set_team_id(space.id.to_string().into());
+        }
+        None => {
+            ui.set_team_name("".into());
+            ui.set_team_sub("".into());
+            ui.set_team_id("".into());
+        }
+    }
     ui.set_in_space_view(in_space_view());
     ui.set_space_ctl_ready(SPACES.with(|vm| vm.borrow().is_ready()));
     refresh_pending(ui);
     // D92：空间册/作用域变更汇流点——投影随手刷新（enter_space 途中
     // in_space_view 已置真，这里只清侧栏态；主视图侧整窗重排亮新角标）。
     refresh_share_projection(true);
+}
+
+/// D93 绑定的团队（册首行；None = 未绑定）。「共享到团队」的一切入口
+/// 以它为唯一目的地——不再有空间选择弹窗。
+pub fn bound_space() -> Option<SpaceMeta> {
+    spaces().into_iter().next()
 }
 
 /// 进入空间视图（或重进刷新）：换根装载 = 库重载同构。
@@ -231,7 +238,7 @@ pub fn enter_space(id: Uuid) {
             crate::show_notice(
                 &ui,
                 TargetNoticeTone::Warning,
-                format!("打开共享空间「{}」失败：{error}", space.name),
+                format!("打开团队「{}」失败：{error}", space.name),
             );
         }
     }
@@ -317,9 +324,22 @@ fn load_space_catalog(
     ui_viewmodels::load_real_library(root)
 }
 
-/// 创建空间：注册表行 + 目录骨架 + 直接进入（创建即到达，少一次点击）。
+/// 创建团队（D93：同时最多绑定一个）：注册表行 + 目录骨架 + 直接进入
+/// （创建即到达，少一次点击）。已绑定 → 明说换绑路径，不弹确认框。
 pub fn create_space(name: &str) {
     let Some(ui_host) = host() else { return };
+    if let Some(bound) = bound_space() {
+        if let Some(ui) = ui_host.ui.upgrade() {
+            ui.set_space_ctl_error(
+                format!(
+                    "已绑定团队「{}」。先退出当前团队，再创建新团队（换绑）",
+                    bound.name
+                )
+                .into(),
+            );
+        }
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -333,7 +353,7 @@ pub fn create_space(name: &str) {
                         crate::show_notice(
                             &ui,
                             TargetNoticeTone::Error,
-                            format!("创建空间目录失败：{error}"),
+                            format!("创建团队目录失败：{error}"),
                         );
                     }
                     SPACES.with(|vm| {
@@ -349,7 +369,7 @@ pub fn create_space(name: &str) {
                 crate::show_notice(
                     &ui,
                     TargetNoticeTone::Success,
-                    format!("共享空间「{name}」已创建，把素材右键添加进来，或直接拖入"),
+                    format!("团队「{name}」已创建，把素材右键共享进来，或直接拖入"),
                 );
             }
             enter_space(id);
@@ -362,7 +382,7 @@ pub fn create_space(name: &str) {
     }
 }
 
-/// 退出并删除空间（P1：本机单成员空间，退出 = 本地副本整目录删除）。
+/// 退出并删除团队（本机副本整目录删除；D93 换绑 = 退出后再创建/贴码）。
 pub fn leave_space(id: Uuid) {
     let Some(ui_host) = host() else { return };
     let was_active = active().is_some_and(|scope| scope.id == id);
@@ -385,7 +405,7 @@ pub fn leave_space(id: Uuid) {
         crate::show_notice(
             &ui,
             TargetNoticeTone::Success,
-            "已退出共享空间，本地副本已删除".to_string(),
+            "已退出团队，本地副本已删除。现在可以创建或加入新团队".to_string(),
         );
     }
 }
@@ -446,7 +466,7 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
         "background".to_string(),
     ];
     // 进度反馈交给导入管线的进度条（Info 级瞬时信息不弹窗，落日志）。
-    logging::info!("向空间「{}」加入 {} 项素材", space.name, paths.len());
+    logging::info!("向团队「{}」加入 {} 项素材", space.name, paths.len());
     IMPORT_TARGET.with(|slot| *slot.borrow_mut() = Some(root.clone()));
     spawn_import_pipeline(
         ui_host.ui.clone(),
@@ -497,7 +517,7 @@ pub fn save_paths_to_library(paths: Vec<PathBuf>, importing: Arc<AtomicBool>) {
         "background".to_string(),
     ];
     // 进度反馈交给导入管线的进度条（Info 级瞬时信息不弹窗，落日志）。
-    logging::info!("向我的素材保存 {} 项（来自共享空间）", paths.len());
+    logging::info!("向我的素材保存 {} 项（来自团队）", paths.len());
     spawn_import_pipeline(
         ui_host.ui.clone(),
         args,
@@ -977,7 +997,7 @@ fn handle_admitted(ui: &AppWindow, space_id: Uuid, peer_id: &str, joiner_name: &
         notice(
             ui,
             ui_viewmodels::notifications::Severity::Success,
-            format!("「{joiner_name}」加入了共享空间"),
+            format!("「{joiner_name}」加入了团队"),
         );
     }
 }
@@ -1112,7 +1132,7 @@ fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceO
         notice(
             ui,
             ui_viewmodels::notifications::Severity::Error,
-            format!("初始化空间目录失败：{error}"),
+            format!("初始化团队目录失败：{error}"),
         );
         return;
     }
@@ -1120,7 +1140,7 @@ fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceO
         notice(
             ui,
             ui_viewmodels::notifications::Severity::Error,
-            format!("初始化空间库失败：{error}"),
+            format!("初始化团队库失败：{error}"),
         );
         return;
     }
@@ -1140,7 +1160,7 @@ fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceO
         notice(
             ui,
             ui_viewmodels::notifications::Severity::Success,
-            format!("已加入共享空间「{name}」，素材会自动同步到本机"),
+            format!("已加入团队「{name}」，素材会自动同步到本机"),
         );
         enter_space(id);
         if !missing.is_empty() {
@@ -1246,7 +1266,7 @@ fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) 
             ui,
             ui_viewmodels::notifications::Severity::Warning,
             format!(
-                "「{}」有 {} 项新素材（{}），超过同步上限 {}MB，已挂起——可在「共享空间」里手动下载",
+                "「{}」有 {} 项新素材（{}），超过同步上限 {}MB，已挂起——可在「团队」里手动下载",
                 space.name,
                 items.len(),
                 ui_viewmodels::human_size(total),
@@ -1261,7 +1281,7 @@ fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) 
         Some((peer, addrs)) => send_fetch(space.id, items, &peer, &addrs),
         None => {
             logging::info!(
-                "空间「{}」{} 项待补字节，暂无在线成员（上线自动续传）",
+                "团队「{}」{} 项待补字节，暂无在线成员（上线自动续传）",
                 space.name,
                 items.len()
             );
@@ -1352,8 +1372,16 @@ pub fn join_by_code(ui: &AppWindow, code: &str) {
         ui.set_space_ctl_error("共享引擎尚未就绪，请稍后再试".into());
         return;
     };
-    if space_by_id(parsed.space_id).is_some() {
-        ui.set_space_ctl_error("已经在该空间里了".into());
+    // D93 单团队守卫：已绑定 → 只放行同团队重入提示；换绑必须先退出
+    //（退出 = 本地副本删除的显式知情动作，代替换绑确认框）。
+    if let Some(bound) = bound_space() {
+        if bound.id != parsed.space_id {
+            ui.set_space_ctl_error(
+                format!("已绑定团队「{}」。先退出当前团队，再贴新码换绑", bound.name).into(),
+            );
+        } else {
+            ui.set_space_ctl_error("已经在该团队里了".into());
+        }
         return;
     }
     let _ = self_id;
@@ -1364,7 +1392,7 @@ pub fn join_by_code(ui: &AppWindow, code: &str) {
     notice(
         ui,
         ui_viewmodels::notifications::Severity::Info,
-        "正在连接空间主…对方不在线时稍后会提示失败".to_string(),
+        "正在连接团队主…对方不在线时稍后会提示失败".to_string(),
     );
 }
 

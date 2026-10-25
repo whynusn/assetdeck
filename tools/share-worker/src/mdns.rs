@@ -115,6 +115,33 @@ impl Announcer {
     }
 }
 
+/// Resolved 事件的 TXT 解析：id 形状（52 位 z32）+ 至少一个直连地址，
+/// 否则不是可用的本协议设备。（事件载荷是 `Box<ResolvedService>`，与
+/// 注册侧的 `ServiceInfo` 不同型，此处按事件侧定型。）
+fn entry_from_info(info: &mdns_sd::ResolvedService) -> Option<DeviceEntry> {
+    let props = info.get_properties();
+    let id = props.get_property_val_str("id")?;
+    if id.len() != 52 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let name = sanitize_name(props.get_property_val_str("n").unwrap_or("未知设备"));
+    let addrs: Vec<String> = props
+        .get_property_val_str("a")
+        .unwrap_or("")
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if addrs.is_empty() {
+        return None;
+    }
+    Some(DeviceEntry {
+        id: id.to_string(),
+        name,
+        addrs,
+    })
+}
+
 /// 一轮浏览：窗口内收集 Resolved 事件，合并成设备表（同 id 后到者覆盖，
 /// 地址取并集去重）。自己（`self_id`）剔除。
 pub fn scan(daemon: &ServiceDaemon, self_id: &str, window: Duration) -> Vec<DeviceEntry> {
@@ -126,39 +153,22 @@ pub fn scan(daemon: &ServiceDaemon, self_id: &str, window: Duration) -> Vec<Devi
     while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(remaining) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let props = info.get_properties();
-                let Some(id) = props.get_property_val_str("id") else {
+                let Some(entry) = entry_from_info(&info) else {
                     continue;
                 };
-                if id == self_id || id.len() != 52 || !id.bytes().all(|b| b.is_ascii_alphanumeric())
-                {
+                if entry.id == self_id {
                     continue;
                 }
-                let name = sanitize_name(props.get_property_val_str("n").unwrap_or("未知设备"));
-                let addrs: Vec<String> = props
-                    .get_property_val_str("a")
-                    .unwrap_or("")
-                    .split(';')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                if addrs.is_empty() {
-                    continue;
-                }
-                match devices.iter_mut().find(|d| d.id == id) {
-                    Some(entry) => {
-                        entry.name = name;
-                        for addr in addrs {
-                            if !entry.addrs.contains(&addr) {
-                                entry.addrs.push(addr);
+                match devices.iter_mut().find(|d| d.id == entry.id) {
+                    Some(existing) => {
+                        existing.name = entry.name;
+                        for addr in entry.addrs {
+                            if !existing.addrs.contains(&addr) {
+                                existing.addrs.push(addr);
                             }
                         }
                     }
-                    None => devices.push(DeviceEntry {
-                        id: id.to_string(),
-                        name,
-                        addrs,
-                    }),
+                    None => devices.push(entry),
                 }
             }
             Ok(_) => {}
@@ -167,6 +177,41 @@ pub fn scan(daemon: &ServiceDaemon, self_id: &str, window: Duration) -> Vec<Devi
     }
     let _ = daemon.stop_browse(MDNS_SERVICE);
     devices
+}
+
+/// 定向浏览：只找 `target_id` 一台设备，**命中即出**（JOIN 等即时拨号把等待
+/// 从整窗口压到首答；mDNS 一问一答通常亚秒）；窗口耗尽返回 None。
+/// D93 连接修复的支点：D90 退役了发 SCAN 的 UI 后同网段对端地址无人发现，
+/// 拨号回退 pkarr 公网 DNS（国内常不可达）——定向浏览让同网段先于公网解析。
+pub fn scan_for(
+    daemon: &ServiceDaemon,
+    self_id: &str,
+    target_id: &str,
+    window: Duration,
+) -> Option<DeviceEntry> {
+    let Ok(rx) = daemon.browse(MDNS_SERVICE) else {
+        return None;
+    };
+    let deadline = Instant::now() + window;
+    let found = loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break None;
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(ServiceEvent::ServiceResolved(info)) => {
+                let Some(entry) = entry_from_info(&info) else {
+                    continue;
+                };
+                if entry.id == target_id && target_id != self_id {
+                    break Some(entry);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    let _ = daemon.stop_browse(MDNS_SERVICE);
+    found
 }
 
 #[cfg(test)]
@@ -207,5 +252,18 @@ mod tests {
         let daemon = ServiceDaemon::new().expect("daemon");
         let devices = scan(&daemon, "a".repeat(52).as_str(), Duration::from_millis(50));
         assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn scan_for_misses_cleanly_when_target_absent() {
+        // 定向浏览的降级路径：窗口内目标不出现 → None（不 panic、不误命中）。
+        let daemon = ServiceDaemon::new().expect("daemon");
+        let found = scan_for(
+            &daemon,
+            "a".repeat(52).as_str(),
+            &"b".repeat(52),
+            Duration::from_millis(50),
+        );
+        assert!(found.is_none());
     }
 }

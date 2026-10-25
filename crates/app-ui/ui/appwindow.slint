@@ -166,14 +166,6 @@ export struct ShareCtlMemberData {
     checked: bool,
 }
 
-// D90 共享空间行（侧栏空间段 + 空间管理弹窗 + 添加到空间弹窗共用）：
-// id = 空间 uuid 文本（回调回传寻址）；sub-label = 成员数（P2 追加同步态）。
-export struct SpaceRowData {
-    id: string,
-    name: string,
-    sub-label: string,
-}
-
 // D80-M1-b 发现面行：对端（id 供选中回传 / detail = 可得项数）与它的可得清单行
 //（asset-id 供索取回调回传；kind = UiEnums.card-kind-*；size = 人话字节数）。
 export struct ShareFacePeerData {
@@ -347,23 +339,26 @@ export component AppWindow inherits Window {
     // 在途批次摘要条（多批并发「；」连接；空串 = 不渲染）。
         in property <string> share-summary-text: "";
 
-    // —— D90 共享空间 ——
-    // 作用域：进入空间 = 分类列表换成空间自己的（回收站/维护区只在主库
-    // 视图渲染），顶栏后缀显示空间名。selected-space = 空间行下标。
+    // —— D90 共享空间（D93 收敛为单团队绑定）——
+    // 作用域：进入团队 = 分类列表换成团队自己的（回收站/维护区只在主库
+    // 视图渲染），顶栏后缀显示团队名。团队素材柜 = 换根库视图。
     in property <bool> in-space-view: false;
-    in property <int> selected-space: -1;
-    in property <[SpaceRowData]> space-rows;
+    // D93：绑定团队三件套（空 name = 未绑定）。同时最多绑定一个团队，
+    // 换绑 = 退出当前再创建/贴码——侧栏不再有空间清单，语义只此一行。
+    in property <string> team-name: "";
+    in property <string> team-sub: "";
+    in property <string> team-id: "";
     // D90 拍板④：M0 直发默认隐藏，熟手经设置打开（菜单项据此渲染）。
     in property <bool> direct-send-enabled: false;
     callback space-picked(string);
     callback space-exit-requested();
     callback space-manage-open-requested();
-    // 空间管理弹窗（D90 后唯一的共享管理面）：创建 + 清单 + 邀请码。
+    // 团队管理弹窗（D93 后唯一的共享管理面）：未绑定 = 创建/贴码；已绑定 = 团队卡。
     in property <bool> space-ctl-open: false;
     in property <bool> space-ctl-ready: false;
     in-out property <string> space-new-name: "";
     in property <string> space-ctl-error: "";
-    // 邀请码展示（space-ctl-invite-for 指明所属空间；空串 = 收起展示）。
+    // 邀请码展示（space-ctl-invite-for 指明所属团队；空串 = 收起展示）。
     in property <string> space-ctl-invite: "";
     in property <string> space-ctl-invite-for: "";
     callback space-create(string);
@@ -377,12 +372,6 @@ export component AppWindow inherits Window {
     in property <int> space-pending-sync: 0;
     callback space-sync-pending();
     callback space-ctl-closed();
-    // 「添加到共享空间」弹窗：行即空间，点击即加（右键菜单 menu-action(7)）。
-    in property <bool> space-add-open: false;
-    in property <[SpaceRowData]> space-add-rows;
-    in property <string> space-add-hint: "";
-    callback space-add-picked(string);
-    callback space-add-closed();
 
     // —— 回调转发（无业务逻辑）——
     callback scroll-changed(length);
@@ -588,7 +577,7 @@ export component AppWindow inherits Window {
         || root.target-rename-open
         || root.tuning-open
         || root.share-devices-open || root.share-offer-open
-        || root.space-ctl-open || root.space-add-open
+        || root.space-ctl-open
         || root.update-open;
 
     // 浮层全部收拢后把焦点还给壳层根：弹窗输入框随条件元素销毁会清空焦点，
@@ -1017,7 +1006,7 @@ export component AppWindow inherits Window {
 
                         IconButton {
                             glyph: Glyph.share;
-                            tip: "共享空间：创建或加入团队空间，把素材共享给同事";
+                            tip: "团队：创建或绑定团队，把素材共享给同事";
                             active: root.space-ctl-open;
                             clicked => {
                                 root.space-manage-open-requested();
@@ -1324,24 +1313,26 @@ export component AppWindow inherits Window {
                             background: Theme.line;
                         }
 
-                        // —— D90 共享空间段：行 = 已加入空间，点击进入（换根浏览）——
+                        // —— D93 团队段：单行（同时最多绑定一个团队）——
+                        // 绑定态：行 = 团队名 + 成员数，点击进入团队素材柜；
+                        // 未绑定：行 = 绑定引导（管理弹窗里创建/贴码）。
                         SectionLabel {
                             x: Spacing.xl;
                             height: Metrics.row-compact;
-                            text: "共享空间";
+                            text: "团队";
                         }
 
-                        for space[i] in root.space-rows: Rectangle {
+                        if root.team-name != "": Rectangle {
                             height: 36px;
-                            background: i == root.selected-space ? Theme.accent-soft
-                                : (space-touch.has-hover ? Theme.bg-raised : transparent);
+                            background: root.in-space-view ? Theme.accent-soft
+                                : (team-touch.has-hover ? Theme.bg-raised : transparent);
                             animate background { duration: Motion.enabled ? Motion.fast : 0ms; easing: ease-out; }
 
                             Rectangle {
                                 x: 0;
                                 width: 3px;
                                 height: parent.height;
-                                background: i == root.selected-space ? Theme.accent : transparent;
+                                background: root.in-space-view ? Theme.accent : transparent;
                             }
 
                             HorizontalLayout {
@@ -1351,58 +1342,58 @@ export component AppWindow inherits Window {
 
                                 Icon {
                                     y: (parent.height - self.height) / 2;
-                                    commands: Glyph.share;
-                                    tint: i == root.selected-space ? Theme.accent : Theme.text-3;
-                                    width: 13px;
-                                    height: 13px;
+                                    commands: Glyph.users;
+                                    tint: root.in-space-view ? Theme.accent : Theme.text-3;
+                                    width: 14px;
+                                    height: 14px;
                                 }
 
                                 Text {
-                                    text: space.name;
+                                    text: root.team-name;
                                     vertical-alignment: center;
                                     horizontal-stretch: 1;
-                                    color: i == root.selected-space ? Theme.text : Theme.text-2;
+                                    color: root.in-space-view ? Theme.text : Theme.text-2;
                                     font-size: Typography.body;
                                     overflow: elide;
                                 }
 
                                 Text {
-                                    text: space.sub-label;
+                                    text: root.team-sub;
                                     vertical-alignment: center;
                                     color: Theme.text-3;
                                     font-size: Typography.caption;
                                 }
                             }
 
-                            space-touch := TouchArea {
+                            team-touch := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
-                                    root.space-picked(space.id);
+                                    root.space-picked(root.team-id);
                                 }
                                 Tooltip {
-                                    text: @markdown("共享空间：素材已同步到本地，**双击即可发给客户**");
+                                    text: @markdown("团队素材柜：素材已同步到本地，**双击即可发给客户**");
                                 }
                             }
                         }
 
-                        // 空状态：一次点击直达创建/加入（管理弹窗）。
-                        if root.space-rows.length == 0: Rectangle {
+                        // 未绑定：一次点击直达创建/加入（管理弹窗）。
+                        if root.team-name == "": Rectangle {
                             height: 36px;
-                            background: space-empty-touch.has-hover ? Theme.bg-raised : transparent;
+                            background: team-empty-touch.has-hover ? Theme.bg-raised : transparent;
 
                             HorizontalLayout {
                                 padding-left: Spacing.xl;
                                 padding-right: Spacing.xl;
 
                                 Text {
-                                    text: "+ 创建或加入空间";
+                                    text: "+ 绑定团队";
                                     vertical-alignment: center;
                                     color: Theme.text-3;
                                     font-size: Typography.body;
                                 }
                             }
 
-                            space-empty-touch := TouchArea {
+                            team-empty-touch := TouchArea {
                                 mouse-cursor: MouseCursor.pointer;
                                 clicked => {
                                     root.space-manage-open-requested();
@@ -1419,7 +1410,7 @@ export component AppWindow inherits Window {
 
                             SectionLabel {
                                 height: 18px;
-                                text: root.in-space-view ? "共享空间" : "素材库";
+                                text: root.in-space-view ? "团队" : "素材库";
                             }
 
                             // 导入单入口：一个按钮弹出菜单，按来源二选一「文件 / 文件夹」。
@@ -2631,7 +2622,7 @@ export component AppWindow inherits Window {
                 MenuItem {
                     glyph: Glyph.trash;
                     text: root.in-space-view ? "从空间移除" : "删除";
-                    detail: root.in-space-view ? "只影响共享空间，我的素材不动" : "进回收站，可恢复";
+                    detail: root.in-space-view ? "只影响团队素材，我的素材不动" : "进回收站，可恢复";
                     danger: true;
                     clicked => {
                         root.menu-action(4);
@@ -2647,16 +2638,17 @@ export component AppWindow inherits Window {
                         root.menu-action(5);
                     }
                 }
-                // D90 共享空间：主库视图添加进空间（副本即落本地+广播）。
+                // D93 团队：主库视图共享进绑定团队（副本即落本地+广播，
+                // 绑定团队唯一 → 无选择弹窗，直达）。
                 if !root.in-space-view: MenuItem {
                     glyph: Glyph.share;
-                    text: "添加到共享空间…";
-                    detail: "同步给空间里的每位成员";
+                    text: "共享到团队";
+                    detail: "同步给团队里的每位成员";
                     clicked => {
                         root.menu-action(7);
                     }
                 }
-                // D90：空间视图把副本存回我的素材（同一导入管线，内容等值自动去重）。
+                // D90：团队视图把副本存回我的素材（同一导入管线，内容等值自动去重）。
                 if root.in-space-view: MenuItem {
                     glyph: Glyph.share;
                     text: "保存到我的素材";
@@ -2705,12 +2697,12 @@ export component AppWindow inherits Window {
                         root.cat-menu-action(0);
                     }
                 }
-                // D92：主库语义（空间视图的菜单不出现——空间内素材本就全员
-                // 可见，再「共享出去」只会误导）。
+                // D92/D93：主库语义（团队视图的菜单不出现——团队内素材本就
+                // 全员可见，再「共享出去」只会误导）。
                 if !root.in-space-view: MenuItem {
                     glyph: Glyph.share;
-                    text: "共享到空间…";
-                    detail: "整分类加入共享空间";
+                    text: "共享到团队";
+                    detail: "整分类同步给团队成员";
                     clicked => {
                         root.cat-menu-action(2);
                     }
@@ -3093,102 +3085,9 @@ export component AppWindow inherits Window {
             }
         }
 
-        // —— D90「添加到共享空间」弹窗：行即空间，点哪加哪 ——
-        // 副本立即落本地；在线成员即时收到，离线成员上线自动补齐（副本集）。
-        if root.space-add-open: Rectangle {
-            x: (root.width - 340px) / 2;
-            y: Math.max(16px, (root.height - self.height) / 2);
-            width: 340px;
-            height: space-add-layout.preferred-height;
-            border-radius: Theme.radius-lg;
-            border-width: 1px;
-            border-color: Theme.line-strong;
-            background: Theme.bg-overlay;
-            drop-shadow-blur: 16px;
-            drop-shadow-offset-y: 4px;
-            drop-shadow-color: Theme.scrim;
-
-            space-add-layout := VerticalLayout {
-                padding: Spacing.dialog-pad;
-                spacing: 10px;
-
-                TitleLabel {
-                    text: "添加到共享空间";
-                }
-                Text {
-                    text: "素材会复制进空间并同步给每位成员；对方不在线也没关系，上线后自动收到。";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-
-                if root.space-add-rows.length == 0: Text {
-                    text: root.space-add-hint;
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                for space in root.space-add-rows: Rectangle {
-                    height: 36px;
-                    border-radius: Theme.radius;
-                    background: Theme.bg-raised;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 10px;
-                        spacing: 8px;
-
-                        Text {
-                            text: space.name;
-                            color: Theme.text;
-                            font-size: Typography.body;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                        Text {
-                            text: space.sub-label;
-                            color: Theme.text-3;
-                            font-size: Typography.caption;
-                            vertical-alignment: center;
-                        }
-                        Button {
-                            height: Metrics.row-compact;
-                            primary: true;
-                            text: "添加";
-                            clicked => {
-                                root.space-add-picked(space.id);
-                            }
-                        }
-                    }
-                }
-                if root.space-add-rows.length == 0: HorizontalLayout {
-                    spacing: 8px;
-
-                    Button {
-                        height: Metrics.control;
-                        text: "创建共享空间…";
-                        clicked => { root.space-manage-open-requested(); }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        height: Metrics.control;
-                        text: "取消";
-                        clicked => { root.space-add-closed(); }
-                    }
-                }
-            }
-        }
-
-        // —— D90 共享空间管理弹窗：创建 + 清单 + 邀请码（唯一共享管理面）——
-        // 心智模型（拍板：语义简单清晰）：空间 = 大家共用的素材柜，放进去的
-        // 素材自动同步到每位成员电脑；不在线的成员上线后自动补齐。
+        // —— D93 团队管理弹窗：未绑定 = 创建/贴码；已绑定 = 团队卡 + 邀请码 ——
+        // 心智模型：团队 = 大家共用的素材柜，放进去的素材自动同步到每位成员
+        // 电脑；同时最多绑定一个团队，换绑 = 退出再绑（不弹换绑确认框）。
         if root.space-ctl-open: Rectangle {
             x: (root.width - 420px) / 2;
             y: Math.max(16px, (root.height - self.height) / 2);
@@ -3207,54 +3106,114 @@ export component AppWindow inherits Window {
                 spacing: 10px;
 
                 TitleLabel {
-                    text: "共享空间";
+                    text: "团队";
                 }
                 Text {
-                    text: "共享空间像大家共用的素材柜：加进去的素材自动同步到每位成员的电脑，不在线也会在上线后收到，用起来和自己的素材完全一样。";
+                    text: "团队像大家共用的素材柜：共享进去的素材自动同步到每位成员的电脑，不在线也会在上线后收到。同时只绑定一个团队，退出后随时换绑。";
                     color: Theme.text-3;
                     font-size: Typography.label;
                     wrap: word-wrap;
                 }
 
-                // 创建行：名字 + 创建（创建即进入空间视图，直接往里拖素材）。
-                HorizontalLayout {
+                // —— 已绑定：团队卡（名称 + 成员数 + 邀请码/退出）——
+                if root.team-name != "": VerticalLayout {
                     spacing: 8px;
 
-                    LineEdit {
-                        text <=> root.space-new-name;
-                        placeholder-text: "新空间名称（如：团队素材）";
-                        horizontal-stretch: 1;
-                        accepted(text) => {
-                            root.space-create(text);
+                    Rectangle {
+                        height: Metrics.control;
+                        border-radius: Theme.radius;
+                        background: Theme.bg-raised;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            spacing: 8px;
+
+                            Icon {
+                                y: (parent.height - self.height) / 2;
+                                commands: Glyph.users;
+                                tint: Theme.text-2;
+                                width: 14px;
+                                height: 14px;
+                            }
+                            Text {
+                                text: root.team-name;
+                                color: Theme.text;
+                                font-size: Typography.body;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.team-sub;
+                                color: Theme.text-3;
+                                font-size: Typography.caption;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                height: Metrics.row-compact;
+                                text: "邀请码";
+                                clicked => { root.space-invite-copy(root.team-id); }
+                            }
+                            DangerButton {
+                                height: Metrics.row-compact;
+                                text: "退出团队";
+                                clicked => { root.space-leave(root.team-id); }
+                            }
                         }
                     }
-                    Button {
-                        height: Metrics.control;
-                        primary: true;
-                        text: "创建";
-                        clicked => {
-                            root.space-create(root.space-new-name);
-                        }
+                    Text {
+                        text: "换团队？先退出当前团队（本地副本会删除），再创建或输入新邀请码。";
+                        color: Theme.text-3;
+                        font-size: Typography.caption;
+                        wrap: word-wrap;
                     }
                 }
 
-                // 加入行：贴同事给的邀请码（加入即进入，素材自动同步到本机）。
-                HorizontalLayout {
+                // —— 未绑定：创建 + 贴码（绑定的唯一入口）——
+                if root.team-name == "": VerticalLayout {
                     spacing: 8px;
 
-                    LineEdit {
-                        text <=> root.space-join-code;
-                        placeholder-text: "粘贴同事发来的邀请码";
-                        horizontal-stretch: 1;
-                        accepted(text) => {
-                            root.space-join(text);
+                    // 创建行：名字 + 创建（创建即进入团队素材柜，直接往里拖素材）。
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        LineEdit {
+                            text <=> root.space-new-name;
+                            placeholder-text: "新团队名称（如：售前组）";
+                            horizontal-stretch: 1;
+                            accepted(text) => {
+                                root.space-create(text);
+                            }
+                        }
+                        Button {
+                            height: Metrics.control;
+                            primary: true;
+                            text: "创建";
+                            clicked => {
+                                root.space-create(root.space-new-name);
+                            }
                         }
                     }
-                    Button {
-                        height: Metrics.control;
-                        text: "加入";
-                        clicked => {
-                            root.space-join(root.space-join-code);
+
+                    // 加入行：贴同事给的邀请码（加入即进入，素材自动同步到本机）。
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        LineEdit {
+                            text <=> root.space-join-code;
+                            placeholder-text: "粘贴同事发来的邀请码";
+                            horizontal-stretch: 1;
+                            accepted(text) => {
+                                root.space-join(text);
+                            }
+                        }
+                        Button {
+                            height: Metrics.control;
+                            text: "加入";
+                            clicked => {
+                                root.space-join(root.space-join-code);
+                            }
                         }
                     }
                 }
@@ -3265,51 +3224,7 @@ export component AppWindow inherits Window {
                 }
                 if root.space-ctl-error != "": InlineNotice { text: root.space-ctl-error; }
                 if !root.space-ctl-ready: InlineNotice {
-                    text: "共享引擎启动中，稍候片刻即可创建空间";
-                }
-
-                // 空间清单：行 = 名称 + 成员数 + 邀请码/退出。
-                if root.space-rows.length == 0: Text {
-                    text: "还没有共享空间。创建一个，把素材右键「添加到共享空间」，团队的素材库就一致了。";
-                    color: Theme.text-3;
-                    font-size: Typography.label;
-                    wrap: word-wrap;
-                }
-                for space in root.space-rows: Rectangle {
-                    height: Metrics.control;
-                    border-radius: Theme.radius;
-                    background: Theme.bg-raised;
-
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 6px;
-                        spacing: 8px;
-
-                        Text {
-                            text: space.name;
-                            color: Theme.text;
-                            font-size: Typography.body;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: space.sub-label;
-                            color: Theme.text-3;
-                            font-size: Typography.caption;
-                            vertical-alignment: center;
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button {
-                            height: Metrics.row-compact;
-                            text: "邀请码";
-                            clicked => { root.space-invite-copy(space.id); }
-                        }
-                        Button {
-                            height: Metrics.row-compact;
-                            text: "退出";
-                            clicked => { root.space-leave(space.id); }
-                        }
-                    }
+                    text: "共享引擎启动中，稍候片刻即可绑定团队";
                 }
 
                 // 邀请码展示：只读可选中复制 + 重置（旧码即刻失效，拍板③：
@@ -3317,7 +3232,7 @@ export component AppWindow inherits Window {
                 if root.space-ctl-invite != "": VerticalLayout {
                     spacing: 4px;
                     Text {
-                        text: "空间邀请码（发给同事，对方点这里输入即可加入）";
+                        text: "团队邀请码（发给同事，对方贴进来即可加入）";
                         color: Theme.text-2;
                         font-size: Typography.label;
                         font-weight: Typography.semibold;

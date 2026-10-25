@@ -1261,3 +1261,21 @@ if (click_count % 2) == 1 {
 - **UI 语言（与 ux-audit 徽标语系一致）**：分类行三态——**部分** = 裸 14px share 图标（共享紫）；**全** = 18px 胶囊（shared-soft 底 + 1px 共享紫描边 + 10px 图标）；**无** = 不占位（无共享是常态，不为常态制造视觉噪音）。单素材 = 右侧 y46 处 20px share 胶囊徽标（同形态语系）替代旧光点；瓦片右缘线统一 `w−6`（类型徽标/传输点/共享胶囊/一致性点对齐成线）。语义 = D80-M1 控制面标记 ∪ 投影 uuid 集（`spaces::shared_uuids` 统一入口）。
 - **「将分类共享至」**：右键菜单新 action → `category_source_paths` 解析分类下全部活动资产绝对路径 → 复用 space-add 弹窗（提示行「整分类素材会加入所选空间」）→ 沿用既有 add_paths_to_space 管线。**幂等免费**：D65 SHA-256 字节等值唯一拦截使重复共享零副作用。守卫：空间视图下提示回主库；空分类提示无可共享素材；无空间先开空间管理弹窗。
 - **索引支持**：store 新增 `rel_paths_in_category`（`IS ?1` NULL 安全，走 idx_assets_category_id）；ui-viewmodels 新增 `share_projection` / `category_source_paths`（app-ui 依赖白名单不变，store 访问仍经 viewmodels 门面）；`share_projection_spec.rs` 三测锁聚合口径/空成员快路径/路径解析。
+
+### D93 单团队绑定收敛 + 连接失败修复（READY 即 SCAN + 拨号地址补全）（2026-10-25，v0.1.10 真机反馈）
+
+**背景（用户三项）**：① 团队共享语义应只有一个团队——多团队并行增加管理与语义复杂度，一个够用（可换绑，但同时最多绑定一个）；② 侧栏分类列表下的团队列表随之可去除——共享所属只由绑定的团队决定，共享域只由客户端共享标识呈现；③ v0.1.10 双机实测「连接对方主机失败」。
+
+**单团队绑定**：
+
+- **约束放 app-ui 编排层，不动 VM/协议层**：`spaces::bound_space()` = 册首行；`create_space` / `join_by_code` 开头守卫——已绑定即拒绝并指路「先退出再创建/贴码」（换绑 = 退出 + 重新创建/贴码两步，退出是「本地副本已删除」的知情动作，不另设换绑确认框）。SpaceVm 与 share crate 的多空间能力保留（数据面不收窄，将来放开多团队零迁移成本）。
+- **侧栏团队列表 → 单「团队」行**：保留行入口而非整个删除——团队素材必须有浏览入口（进入团队视图 = 换根的库视图）；D92 标识回答的是「**我的**哪些素材被共享」，不是「团队里有什么」，两者不重复。绑定态 = users 图标 + 团队名 + 成员数副文本，点击进团队视图；未绑定 = 「+ 绑定团队」行开管理弹窗。slint 属性从模型（space-rows/space-add-rows/selected-space/SpaceRowData struct）换标量（team-name/team-sub/team-id，空 name = 未绑定）。
+- **「添加到共享空间」选择弹窗整个删除**：单团队下「选择加入哪个空间」是无信息量的选择——资产右键「共享到团队」/分类右键「共享到团队」直达 `add_paths_to_space(bound.id, …)`；未绑定时开管理弹窗引导先绑。`on_space_add_picked/closed` 回调、Esc 链分支、`SHARE_DOMAIN_PENDING` 暂存槽全删。menu-action(7)/cat-menu-action(2) 编号不变，零接线变更。
+- **全量文案团队化**：「共享空间」→「团队」贯穿（管理弹窗、守卫提示、退出通知、加入/补字节通知、右键菜单、作用域头「团队/素材库」）。**勘误 D90**：侧栏「每空间一行」与「右键『添加到共享空间』」的交互描述由本决策取代（模型面 D90 不变）；**勘误 D92**：「将分类共享至」复用 space-add 弹窗一步改为直达绑定团队。
+
+**连接失败修复（用户报障根因链）**：D90 拍板④隐藏 M0 设备选择器后，发 `SCAN` 的 UI 入口退役成死代码 → worker 永不浏览 mDNS → `DEVICE` 行永不产生 → 拨号只剩纯 52 位 id → iroh pkarr 公网 DNS 解析（国内不可达）超时 → `SYNC_SENT failed` → 客户端警告 toast。双修：
+
+- **app-ui**：`handle_worker_ready` 首次落身份时 `SPACE_STATE` 推册后**紧跟发 SCAN**（顺序钉死——册先入 worker，抗熵 Summary 才能用已装好的册）。
+- **worker**：三处拨号 handler（SyncSend/SpaceSync/SpaceJoin）统一先 `EndpointId::from_z32` 预检 + `resolve_dial_addrs` 地址补全——命令行带可用直连地址（SocketAddr 可解析）优先；否则 `mdns::scan_for` 定向浏览目标 id（命中即出，窗口 = SCAN_WINDOW，不扫全网）；纯 id 拨号仍是最后兜底（跨网段将来靠 iroh relay，另行决策）。mdns 解析器抽 `entry_from_info`（`ResolvedService` TXT 属性 id/n/a）供 scan/scan_for 共用，补 `scan_for` 未命中即返的测试。
+
+**打包勘误（顺带）**：D91 的 reindex.exe 未进 `scripts/package.ps1`（v0.1.10 日志可见 `reindex.exe 缺失 WARN` = 对账缺席降级）——build 清单、`$required` 数组、tar 校验数组三处补收录；CI package job 直接跑该脚本自动覆盖。

@@ -78,10 +78,6 @@ thread_local! {
     pub(crate) static SHARE_CONTROL: RefCell<ShareControlVm> = RefCell::new(ShareControlVm::new());
     /// share_registry.json 落盘路径（启动时定，None = 未初始化不落盘）。
     static SHARE_CONTROL_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
-    /// 「共享到域…」弹窗待处理的素材 uuid 文本（uuids_of 产物；关闭即弃）。
-    /// D90：域弹窗已拆，此槽改为「添加到共享空间」弹窗待处理的素材源路径。
-    static SHARE_DOMAIN_PENDING: RefCell<Vec<std::path::PathBuf>> =
-        const { RefCell::new(Vec::new()) };
     /// D90 设备密钥路径（启动时定；spaces.json 同目录，worker --key-file）。
     static SHARE_KEY_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     /// 网格同步句柄（主线程 setup 建，dispatch 的 join/roster 臂取回调
@@ -1293,8 +1289,9 @@ fn collect_asset_paths(
         .collect()
 }
 
-/// 打开「添加到共享空间」弹窗：回收站拒绝（墓碑行），无可用文件明说；
-/// 其余暂存路径待弹窗点选（暂存槽复用 SHARE_DOMAIN_PENDING，类型已改路径）。
+/// 共享到团队（D93：右键/多选共用入口）：回收站拒绝（墓碑行），无可用
+/// 文件明说；已绑定 → 直达 add_paths_to_space（团队唯一，无选择弹窗）；
+/// 未绑定 → 打开团队管理弹窗（创建/贴码即用）。
 fn open_space_add_dialog(crud: &CrudCtx, hit: Option<AssetId>) {
     if crud.is_trash_view() {
         if let Some(ui) = crud.ui.upgrade() {
@@ -1317,23 +1314,20 @@ fn open_space_add_dialog(crud: &CrudCtx, hit: Option<AssetId>) {
         );
         return;
     }
-    if spaces::spaces().is_empty() {
-        // 无空间：直达管理弹窗（创建即用），少一层折返。
-        ui.set_space_ctl_error("".into());
-        spaces::sync_rows(&ui);
-        ui.set_space_ctl_open(true);
-        return;
+    match spaces::bound_space() {
+        Some(bound) => spaces::add_paths_to_space(bound.id, paths, crud.importing.clone()),
+        None => {
+            // 未绑定团队：直达管理弹窗（创建/贴码即用），少一层折返。
+            ui.set_space_ctl_error("".into());
+            spaces::sync_rows(&ui);
+            ui.set_space_ctl_open(true);
+        }
     }
-    SHARE_DOMAIN_PENDING.with(|slot| *slot.borrow_mut() = paths);
-    ui.set_space_add_hint("选择要加入的空间".into());
-    spaces::sync_rows(&ui);
-    ui.set_space_add_open(true);
 }
 
-/// D92「将分类共享至」：整分类源路径 → 复用「添加到共享空间」弹窗链
-/// （SHARE_DOMAIN_PENDING 暂存 → space-add-picked → add_paths_to_space）。
-/// 幂等：已在空间的素材按 SHA-256 字节等值被空间库唯一拦截，重复执行只
-/// 补缺。空间视图不提供（分类菜单里的主库语义；空间内素材本就全员可见）。
+/// D92/D93「分类共享到团队」：整分类源路径 → 直达绑定团队（幂等：已在
+/// 团队的素材按 SHA-256 字节等值被团队库唯一拦截，重复执行只补缺）。
+/// 团队视图不提供（分类菜单里的主库语义；团队内素材本就全员可见）。
 fn open_category_share_dialog(crud: &CrudCtx, name: &str) {
     if spaces::in_space_view() {
         if let Some(ui) = crud.ui.upgrade() {
@@ -1360,16 +1354,14 @@ fn open_category_share_dialog(crud: &CrudCtx, name: &str) {
         );
         return;
     }
-    if spaces::spaces().is_empty() {
-        ui.set_space_ctl_error("".into());
-        spaces::sync_rows(&ui);
-        ui.set_space_ctl_open(true);
-        return;
+    match spaces::bound_space() {
+        Some(bound) => spaces::add_paths_to_space(bound.id, paths, crud.importing.clone()),
+        None => {
+            ui.set_space_ctl_error("".into());
+            spaces::sync_rows(&ui);
+            ui.set_space_ctl_open(true);
+        }
     }
-    SHARE_DOMAIN_PENDING.with(|slot| *slot.borrow_mut() = paths);
-    ui.set_space_add_hint("整分类素材会加入所选空间".into());
-    spaces::sync_rows(&ui);
-    ui.set_space_add_open(true);
 }
 
 /// D80-M1-b uuid → 可得行（ShareOffer）的目录物化闭包：SYNC_STATE 快照与
@@ -2929,16 +2921,11 @@ fn main() {
                 sync_share_ui(&ui);
                 return;
             }
-            // D90 空间两弹窗：Esc 逐层退出，添加弹窗丢弃待处理路径。
+            // D93 团队管理弹窗：Esc 关闭。
             if ui.get_space_ctl_open() {
                 ui.set_space_ctl_open(false);
                 ui.set_space_ctl_invite("".into());
                 ui.set_space_ctl_invite_for("".into());
-                return;
-            }
-            if ui.get_space_add_open() {
-                SHARE_DOMAIN_PENDING.with(|slot| slot.borrow_mut().clear());
-                ui.set_space_add_open(false);
                 return;
             }
             // 归类弹窗是模态最上层，Esc = 取消本次导入。
@@ -3362,7 +3349,7 @@ fn main() {
                     ui.set_space_ctl_invite(code.into());
                     ui.set_space_ctl_invite_for(space_id.clone());
                 }
-                None => ui.set_space_ctl_error("邀请码不可用（空间主侧才可发码）".into()),
+                None => ui.set_space_ctl_error("邀请码不可用（团队主侧才可发码）".into()),
             }
         });
     }
@@ -3384,7 +3371,7 @@ fn main() {
                         "邀请码已重置，旧码立即失效".into(),
                     );
                 }
-                None => ui.set_space_ctl_error("只有空间主可以重置邀请码".into()),
+                None => ui.set_space_ctl_error("只有团队主可以重置邀请码".into()),
             }
         });
     }
@@ -3410,33 +3397,6 @@ fn main() {
         app.on_space_sync_pending(move || {
             if let Some(ui) = ui.upgrade() {
                 spaces::force_pending_fetch(&ui);
-            }
-        });
-    }
-
-    // 「添加到共享空间」弹窗：点行即加（清单子进程换根导入，落空间待分类）。
-    {
-        let crud = crud.clone();
-        app.on_space_add_picked(move |space_id| {
-            let Some(ui) = crud.ui.upgrade() else { return };
-            let Ok(id) = Uuid::parse_str(space_id.as_str()) else {
-                return;
-            };
-            let paths = SHARE_DOMAIN_PENDING.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-            if paths.is_empty() {
-                ui.set_space_add_open(false);
-                return;
-            }
-            ui.set_space_add_open(false);
-            spaces::add_paths_to_space(id, paths, crud.importing.clone());
-        });
-    }
-    {
-        let ui = app.as_weak();
-        app.on_space_add_closed(move || {
-            SHARE_DOMAIN_PENDING.with(|slot| slot.borrow_mut().clear());
-            if let Some(ui) = ui.upgrade() {
-                ui.set_space_add_open(false);
             }
         });
     }
