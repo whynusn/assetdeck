@@ -105,6 +105,9 @@ pub fn generate_library(root: &Path, rows: u64, thumbs: usize) -> Result<()> {
                     // 直接写死方形，让 grid_vm 走真实宽高比而非 fallback 公式。
                     width: Some(64),
                     height: Some(64),
+                    // D91 列：合成行未基线（对账不扫合成库），文件恒在。
+                    mtime: None,
+                    missing: false,
                 }
             })
             .collect();
