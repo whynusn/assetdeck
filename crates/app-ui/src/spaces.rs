@@ -57,6 +57,9 @@ thread_local! {
     static SPACES_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<SpaceScope>> = const { RefCell::new(None) };
     static HOST: RefCell<Option<Rc<SpaceHost>>> = const { RefCell::new(None) };
+    // READY 标记 worker 新会话；身份回填也会被非 READY 事件调用，必须消费
+    // 此标记，不能把持久身份是否变化当作会话是否初始化的依据。
+    static WORKER_SESSION_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 启动装载：读 spaces.json（损坏/缺失按空册起步）+ 记住目录约定。
@@ -75,17 +78,18 @@ pub fn init(spaces_json: &Path, spaces_dir: PathBuf) {
     });
 }
 
-/// worker READY 回填设备身份（变化才落盘）并刷新侧栏行（身份就绪态可显示）。
-/// 身份首落 = 服务册首推（READY 早于一切对端连接，此刻推册最及时）。
+/// 身份变化才落盘；每个 READY 会话都须装载新 worker 的空册再发现设备。
+/// main 的非 READY 事件也会回填身份，因此会话标记必须消费，防止扫描回环。
 pub fn handle_worker_ready(self_id: &str, self_name: &str) {
     let changed = SPACES.with(|vm| vm.borrow_mut().set_identity(self_id, self_name));
     if changed {
         persist();
+    }
+    if WORKER_SESSION_PENDING.with(|pending| pending.replace(false)) {
+        SYNCED_PEERS.with(|peers| peers.borrow_mut().clear());
+        ONLINE_PEERS.with(|peers| peers.borrow_mut().clear());
         push_space_state();
-        // D93 连接修复：身份首落即发一轮 mDNS 发现。D90 退役了发 SCAN 的
-        // 设备选择器 UI 后，同网段对端地址再无人发现——拨号全退 pkarr 公网
-        // DNS（国内常不可达）。顺序钉死：SPACE_STATE 先入 worker（抗熵
-        // Summary 用已装好的册），SCAN 随后 → DEVICE 行 → 每会话一轮抗熵。
+        // 顺序钉死：SPACE_STATE 先入 worker，SCAN 随后；持久身份不变也执行。
         crate::share_write_line("SCAN");
     }
 }
@@ -373,6 +377,7 @@ pub fn create_space(name: &str) {
                 );
             }
             enter_space(id);
+            push_space_state();
         }
         Err(error) => {
             if let Some(ui) = ui_host.ui.upgrade() {
@@ -395,6 +400,7 @@ pub fn leave_space(id: Uuid) {
             let _ = std::fs::remove_dir_all(root);
         }
         persist();
+        push_space_state();
     }
     if let Some(ui) = ui_host.ui.upgrade() {
         if was_active {
@@ -420,6 +426,7 @@ pub fn rotate_invite(id: Uuid) -> Option<String> {
     let rotated = SPACES.with(|vm| vm.borrow_mut().rotate_secret(id));
     if rotated.is_some() {
         persist();
+        push_space_state();
     }
     rotated
 }
@@ -766,7 +773,7 @@ fn append_ops(id: Uuid, ops: &[SpaceOp]) {
 }
 
 /// 组装并整册推送空间服务册（meta + op log + 字节服务索引）。
-/// 触发点：worker READY / SPACE_ADMITTED / op 应用 / 空间根导入完成。
+/// 触发点：worker READY / 创建、退出、换码 / SPACE_ADMITTED / op 应用 / 空间根导入完成。
 pub fn push_space_state() {
     let mut book = SpaceBookState::default();
     for meta in spaces() {
@@ -903,6 +910,11 @@ fn space_asset_kind_of(path: &Path) -> ui_viewmodels::SpaceAssetKind {
 /// worker 行预处理：空间相关行在进 share_vm 之前拦截（true = 已消费）。
 /// DEVICE 不拦截（设备表仍归 share_vm），只挂在线钩子。
 pub fn intercept_worker_line(line: &str) -> bool {
+    if line.starts_with("READY\t") {
+        WORKER_SESSION_PENDING.with(|pending| pending.set(true));
+        // READY 仍交 share_vm 采信身份；main 随后的身份回填消费会话标记。
+        return false;
+    }
     if let Some(rest) = line.strip_prefix("DEVICE\t") {
         on_device_seen(rest);
         return false;
@@ -1475,5 +1487,209 @@ fn spawn_purge(root: &Path, uuids: &[String]) {
     match command.spawn() {
         Ok(_) => logging::info!("空间 Remove 物化：purge {} 项", uuids.len()),
         Err(error) => logging::warn!("空间 purge 子进程启动失败: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slint::{
+        platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        ComponentHandle, VecModel,
+    };
+    use ui_viewmodels::{FacetIndex, ShareVm, Sorter};
+
+    struct TestPlatform;
+
+    impl slint::platform::Platform for TestPlatform {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+            Ok(MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer))
+        }
+    }
+
+    struct Fixture {
+        dir: PathBuf,
+        ui: AppWindow,
+        owner: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+            let dir = std::env::temp_dir().join(format!("space-worker-state-{}", Uuid::new_v4()));
+            let main_root = dir.join("main");
+            std::fs::create_dir_all(&main_root).unwrap();
+            ui_viewmodels::ensure_library_skeleton(&main_root).unwrap();
+            init(&dir.join("spaces.json"), dir.join("spaces"));
+            set_library_root(Some(main_root.to_string_lossy().into_owned()));
+            let owner = "a".repeat(52);
+            SPACES.with(|slot| {
+                let mut vm = slot.borrow_mut();
+                vm.set_identity(&owner, "owner");
+                vm.take_dirty();
+            });
+            let ui = AppWindow::new().unwrap();
+            let vm = Rc::new(RefCell::new(LibraryGridVm::new(
+                FacetIndex::new(),
+                Sorter::default(),
+                1,
+            )));
+            let resolver = Rc::new(RefCell::new(None));
+            let thumb_cache = Rc::new(RefCell::new(ThumbCache::new(1)));
+            let grid = Rc::new(GridCtx::new(
+                ui.as_weak(),
+                vm.clone(),
+                Rc::new(VecModel::default()),
+                resolver.clone(),
+                thumb_cache.clone(),
+                Rc::new(RefCell::new(ShareVm::new())),
+            ));
+            install_host(Rc::new(SpaceHost {
+                ui: ui.as_weak(),
+                vm,
+                resolver,
+                grid,
+                filter_categories: Rc::new(RefCell::new(Vec::new())),
+                filter_category_ids: Rc::new(RefCell::new(CategoryRows::default())),
+                current_filter: Rc::new(RefCell::new(Filter::All)),
+                filter_label: Rc::new(RefCell::new("".into())),
+                thumb_cache,
+                importing: Arc::new(AtomicBool::new(false)),
+            }));
+            Self { dir, ui, owner }
+        }
+
+        // Match main.rs: READY is observed without being swallowed, then identity
+        // is filled back after every event. No worker or network is started.
+        fn event(&self, line: &str) {
+            assert!(!intercept_worker_line(line));
+            handle_worker_ready(&self.owner, "owner");
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            HOST.with(|slot| *slot.borrow_mut() = None);
+            ACTIVE.with(|slot| *slot.borrow_mut() = None);
+            SPACES.with(|slot| *slot.borrow_mut() = SpaceVm::new());
+            SPACES_PATH.with(|slot| *slot.borrow_mut() = None);
+            SPACES_DIR.with(|slot| *slot.borrow_mut() = None);
+            LIBRARY_ROOT.with(|slot| *slot.borrow_mut() = None);
+            WORKER_SESSION_PENDING.with(|pending| pending.set(false));
+            ONLINE_PEERS.with(|peers| peers.borrow_mut().clear());
+            SYNCED_PEERS.with(|peers| peers.borrow_mut().clear());
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    // Restores the real stdin slot and reaps the fake child even on assertion
+    // panic, so a regression cannot leak a pipe/process into another test.
+    struct PipeCapture {
+        child: Option<std::process::Child>,
+        previous: Option<std::process::ChildStdin>,
+    }
+
+    impl Drop for PipeCapture {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                crate::SHARE_STDIN.with(|slot| *slot.borrow_mut() = self.previous.take());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    // A local pass-through child supplies a real ChildStdin to the production
+    // share_write_line boundary. Only synthetic state from Fixture is sent.
+    fn sent_lines(action: impl FnOnce()) -> Vec<String> {
+        let exe =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/findstr.exe");
+        let mut child = std::process::Command::new(exe)
+            .arg("^")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let previous = crate::SHARE_STDIN.with(|slot| slot.replace(child.stdin.take()));
+        let mut capture = PipeCapture {
+            child: Some(child),
+            previous,
+        };
+        action();
+        crate::SHARE_STDIN.with(|slot| *slot.borrow_mut() = capture.previous.take());
+        let output = capture.child.take().unwrap().wait_with_output().unwrap();
+        assert!(output.status.success() || output.status.code() == Some(1));
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn only_book(lines: &[String]) -> SpaceBookState {
+        assert_eq!(
+            lines.len(),
+            1,
+            "one registry mutation must send exactly one state"
+        );
+        let json = lines[0]
+            .strip_prefix("SPACE_STATE\t")
+            .expect("expected a space state command");
+        serde_json::from_str(json).expect("sent state must be valid JSON")
+    }
+
+    #[test]
+    fn worker_session_republishes_unchanged_identity_before_one_scan() {
+        let fixture = Fixture::new();
+        // Model a persisted registry reloaded before READY, not a new identity.
+        let id = SPACES.with(|slot| slot.borrow_mut().create_space("team", 1).unwrap());
+        persist();
+        init(&fixture.dir.join("spaces.json"), fixture.dir.join("spaces"));
+        let ready = format!("READY\t{}\towner", fixture.owner);
+        let lines = sent_lines(|| {
+            fixture.event(&ready);
+            fixture.event("SCAN_DONE");
+        });
+        assert_eq!(
+            lines.len(),
+            2,
+            "each READY must publish state then scan even with unchanged identity"
+        );
+        let book = only_book(&lines[..1]);
+        assert!(book.spaces.contains_key(&id));
+        assert_eq!(lines[1], "SCAN");
+        assert!(fixture.ui.get_space_ctl_error().is_empty());
+        assert!(sent_lines(|| fixture.event("SCAN_DONE")).is_empty());
+
+        // A fresh READY means a fresh worker session even with the same identity.
+        let restarted = sent_lines(|| fixture.event(&ready));
+        assert_eq!(restarted.len(), 2);
+        assert!(only_book(&restarted[..1]).spaces.contains_key(&id));
+        assert_eq!(restarted[1], "SCAN");
+    }
+
+    #[test]
+    fn registry_mutations_publish_current_book_without_extra_scans() {
+        let fixture = Fixture::new();
+        let created = sent_lines(|| create_space("team"));
+        let id = bound_space().expect("team created").id;
+        let created_book = only_book(&created);
+        assert!(created_book.spaces.contains_key(&id));
+        assert!(fixture.ui.get_space_ctl_error().is_empty());
+
+        // Compare the real outgoing state against live state without printing
+        // either synthetic invitation secret in an assertion failure.
+        let before = created_book.spaces[&id].meta.invite_secret.clone();
+        let rotated = sent_lines(|| assert!(rotate_invite(id).is_some()));
+        let rotated_book = only_book(&rotated);
+        let current = space_by_id(id).unwrap();
+        assert!(rotated_book.spaces[&id].meta.invite_secret == current.invite_secret);
+        assert!(rotated_book.spaces[&id].meta.invite_secret != before);
+        assert_eq!(rotated_book.spaces[&id].meta.secret_gen, 2);
+        assert!(only_book(&sent_lines(|| leave_space(id))).spaces.is_empty());
+        assert!(bound_space().is_none());
+        assert!(sent_lines(|| leave_space(id)).is_empty());
     }
 }

@@ -277,6 +277,69 @@ async fn loopback_space_summary_returns_missing_ops() {
 }
 
 #[tokio::test]
+async fn loopback_space_join_recovers_after_service_book_is_republished() {
+    let server = bind_endpoint().await;
+    let client = bind_endpoint().await;
+    let target = loopback_target(&server);
+    let (_loaded, meta, ops) = owner_space_book();
+    let empty = SpaceBook::new();
+    let join = || SyncMessage::Space {
+        message: SpaceMessage::Join {
+            code: share::space_invite_code(&meta),
+            joiner_name: "客服小美".into(),
+        },
+    };
+
+    let serve_one = |spaces: std::sync::Arc<SpaceBook>| {
+        let server = server.clone();
+        tokio::spawn(async move {
+            let conn = server.accept().await.expect("accept").await.expect("conn");
+            handle_sync_connection(conn, &SyncBook::new(), &spaces, |_| {})
+                .await
+                .expect("服务端报错");
+        })
+    };
+    let serve = serve_one(empty.clone());
+    let reply = with_timeout(
+        "missing-book",
+        send_sync_message(&client, target.clone(), join()),
+    )
+    .await
+    .expect("传输不应失败");
+    assert!(
+        matches!(
+            reply,
+            Some(SyncMessage::Space {
+                message: SpaceMessage::JoinErr { .. },
+            })
+        ),
+        "有连接但服务册为空时必须是业务拒绝"
+    );
+    serve.await.expect("serve panic");
+
+    empty.replace(SpaceBookState {
+        spaces: [(
+            meta.id,
+            SpaceBookEntry {
+                meta: meta.clone(),
+                ops,
+                serve: Vec::new(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    });
+    let serve = serve_one(empty);
+    let reply = with_timeout("loaded-book", send_sync_message(&client, target, join()))
+        .await
+        .expect("传输不应失败");
+    assert!(matches!(reply, Some(SyncMessage::Space {
+        message: SpaceMessage::JoinOk { meta: joined, .. },
+    }) if joined.is_member(&client.id().to_z32())));
+    serve.await.expect("serve panic");
+}
+
+#[tokio::test]
 async fn loopback_space_join_admits_member_and_replies_full_state() {
     let server = bind_endpoint().await;
     let client = bind_endpoint().await;

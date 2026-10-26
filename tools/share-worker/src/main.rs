@@ -7,18 +7,10 @@
 //! M0 局域网闭环（D80 分期）：mDNS 发现 → 显式推送 → iroh 直连 →
 //! 清单先行 → 双重确认 → 导入管线。
 //!
-//! M1-c 远程直连（D80 分期；钉子 1/2 的 M1 形态；D95 修正发布器过滤）：
-//! - 手工装配 pkarr 第三方信令（PkarrPublisher(unfiltered)/PkarrResolver/
-//!   DnsAddressLookup → n0 公共 `iroh.link`，记录按本机密钥签名=指纹绑定）
-//!   + `RelayMode::Disabled`（无中继，连接只走直连——红线不变）。
-//! - portmapper 保持 Builder 默认 `Enabled`（UPnP/PCP/NAT-PMP 网关映射，
-//!   映射地址被当作可拨直连地址发布；SSDP 组播探测可能触发防火墙提示，
-//!   D94 installer 防火墙规则已收口）。
-//!
-//! 不能用 `presets::N0DisableRelay`：其发布器沿用默认 `AddrFilter::relay_only`
-//! （只发布 relay 地址），relay 关闭后恒发布零资源记录的空包，对端解析不到
-//! 任何直连地址——D95 双机取证实锤（两台机器的 pkarr 记录都是 84 字节空包
-//! 且实时更新），本文件因此从 Minimal 起步手工装配并改 unfiltered 过滤。
+//! 地址发现使用签名 pkarr 记录和 mDNS；发布器保留 IP 与中继地址，避免
+//! relay_only 过滤器在禁用中继时发空记录。iroh 自选可达路径，中继可先建立
+//! 连接并在直连就绪后切换；n0 公共中继只转发端到端加密流量。
+//! portmapper 保持默认启用；中继出站连接不依赖本机入站 UDP 放行。
 //!
 //! 协议见 [`proto`]；引擎见 [`engine`]。
 
@@ -180,15 +172,8 @@ async fn main() {
         std::process::exit(2);
     }
 
-    // D80 钉子 1/2 的 M1-c 形态 + D95 修正：pkarr 第三方信令 + relay disabled
-    // （连接只走直连——红线不变）。不能直接用 presets::N0DisableRelay：其
-    // PkarrPublisher 沿用默认 AddrFilter::relay_only（只发布 relay 地址），
-    // relay 一关就恒发布零资源记录的空包，对端解析永远拿不到直连地址（D95
-    // 取证实锤：两台机器的 pkarr 记录都是 84 字节空包且实时更新）。这里从
-    // Minimal 起步手工装配同一套信令，发布器改 unfiltered：直连 IP 进公共
-    // pkarr 记录，查询前提是知道 52 位 id（= 邀请码的信任凭据），泄露面可接受。
-    // portmapper 保持 Builder 默认 Enabled，网关映射地址照旧进发布列表。
-    // D90：secret_key 显式注入（--key-file 持久化，身份跨重启稳定）。
+    // 发布器默认仅保留中继地址；显式保留 IP，才能在中继不可用时继续直连。
+    // 公共 pkarr 记录可凭设备公钥查询；设备公钥不是加入团队的授权秘密。
     let secret_key = load_or_create_secret_key(parse_key_file(&args).as_deref());
     let relay_url: url::Url = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD
         .parse()
@@ -202,7 +187,7 @@ async fn main() {
         .address_lookup(PkarrPublisher::builder(relay_url).addr_filter(AddrFilter::unfiltered()))
         .address_lookup(PkarrResolver::n0_dns())
         .address_lookup(DnsAddressLookup::n0_dns())
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(RelayMode::Default)
         .bind()
         .await
     {
@@ -380,6 +365,7 @@ async fn run(
                         });
                     }
                     Some(proto::Command::SpaceState(book)) => {
+                        logging::info!("团队服务册已装载 teams={}", book.spaces.len());
                         books.spaces.replace(book);
                     }
                     Some(proto::Command::SpaceSync { peer_id, addrs }) => {
@@ -571,6 +557,15 @@ async fn report_sync_send(
     match sync::send_sync_message(&endpoint, target, message).await {
         Ok(None) => emit(proto::out::sync_sent(&peer_id, true, "")),
         Ok(Some(reply)) => {
+            match &reply {
+                SyncMessage::Space {
+                    message: SpaceMessage::JoinErr { reason },
+                } => logging::warn!("团队加入被拒绝 peer={peer_id}: {reason}"),
+                SyncMessage::Space {
+                    message: SpaceMessage::JoinOk { meta, .. },
+                } => logging::info!("团队加入已获准 peer={peer_id} team={}", meta.id),
+                _ => {}
+            }
             match serde_json::to_string(&reply) {
                 Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
                 Err(error) => logging::error!("同步应答序列化失败: {error}"),
