@@ -20,7 +20,7 @@ use ui_viewmodels::uuid::Uuid;
 use ui_viewmodels::{
     CategoryRows, Filter, LibraryGridVm, RealAssetResolver, SpaceAssetMeta, SpaceBookEntry,
     SpaceBookState, SpaceMessage, SpaceMeta, SpaceOp, SpaceOpKind, SpaceVm, TargetNoticeTone,
-    MAX_FETCH_ITEMS,
+    MAX_FETCH_ITEMS, MAX_OPS_PER_MESSAGE,
 };
 
 use crate::thumbs::{GridCtx, ThumbCache};
@@ -57,9 +57,10 @@ thread_local! {
     static SPACES_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<SpaceScope>> = const { RefCell::new(None) };
     static HOST: RefCell<Option<Rc<SpaceHost>>> = const { RefCell::new(None) };
-    // READY 标记 worker 新会话；身份回填也会被非 READY 事件调用，必须消费
-    // 此标记，不能把持久身份是否变化当作会话是否初始化的依据。
+    // READY marks a new worker session. Identity callbacks for other worker lines
+    // consume this flag, so the session setup cannot accidentally rescan in a loop.
     static WORKER_SESSION_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SPACE_JOIN_PENDING: RefCell<Option<(Uuid, String)>> = const { RefCell::new(None) };
 }
 
 /// 启动装载：读 spaces.json（损坏/缺失按空册起步）+ 记住目录约定。
@@ -88,10 +89,31 @@ pub fn handle_worker_ready(self_id: &str, self_name: &str) {
     if WORKER_SESSION_PENDING.with(|pending| pending.replace(false)) {
         SYNCED_PEERS.with(|peers| peers.borrow_mut().clear());
         ONLINE_PEERS.with(|peers| peers.borrow_mut().clear());
+        PUBLISHED_OPS.with(|ops| ops.borrow_mut().clear());
+        PULL_CURSORS.with(|cursors| cursors.borrow_mut().clear());
+        FETCHING_HASHES.with(|fetching| fetching.borrow_mut().clear());
         push_space_state();
-        // 顺序钉死：SPACE_STATE 先入 worker，SCAN 随后；持久身份不变也执行。
+        for peer in authorized_members() {
+            SYNCED_PEERS.with(|peers| {
+                peers.borrow_mut().insert(peer.clone());
+            });
+            start_peer_sync(&peer);
+        }
         crate::share_write_line("SCAN");
     }
+}
+
+fn authorized_members() -> Vec<String> {
+    let self_id = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()));
+    let mut members = std::collections::BTreeSet::new();
+    for space in spaces() {
+        for member in space.members {
+            if Some(member.id.clone()) != self_id {
+                members.insert(member.id);
+            }
+        }
+    }
+    members.into_iter().collect()
 }
 
 /// dirty 则原子落盘（事件驱动，零定时器）。失败只留日志：下次动作再写，
@@ -224,7 +246,7 @@ pub fn enter_space(id: Uuid) {
             });
             // 进入即对账：库里有、op log 没记的素材补 Add op（导入半途/
             // 崩溃残留由下一次进入收敛）。
-            emit_missing_add_ops(id);
+            emit_missing_add_ops(id, false);
             // 作用域切换清过滤器：主库的分类 id 在空间分面表里无意义，
             // 残留旧过滤器会让后续 apply_filter/库写收尾把视图钉到空集。
             *scope_host.current_filter.borrow_mut() = Filter::All;
@@ -431,18 +453,81 @@ pub fn rotate_invite(id: Uuid) -> Option<String> {
     rotated
 }
 
-/// 把一组文件路径添加进空间（右键「添加到共享空间」/多选操作条）：
-/// 清单子进程导入 = 既有管线换根，落空间的「待分类」，空间主归类。
+/// 把一组文件路径添加进空间（右键「共享到团队」/多选操作条）。
 pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBool>) {
-    let Some(space) = space_by_id(id) else { return };
-    let Some(root) = space_root_of(id) else {
+    add_paths_to_space_for_batch(id, None, paths, importing);
+}
+
+fn add_paths_to_space_for_batch(
+    id: Uuid,
+    batch: Option<(Uuid, Vec<String>)>,
+    paths: Vec<PathBuf>,
+    importing: Arc<AtomicBool>,
+) {
+    let has_batch = batch.is_some();
+    let callback = batch.map(|(batch, hashes)| {
+        Arc::new(move |result: Result<(), String>| {
+            let result = result.and_then(|()| verify_received_hashes(id, &hashes));
+            let line = match result {
+                Ok(()) => {
+                    let delivered = |space: &Uuid, hash: &Vec<u8>| {
+                        *space == id
+                            && hashes.contains(
+                                &hash
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<String>(),
+                            )
+                    };
+                    FETCHING_HASHES.with(|fetching| {
+                        fetching
+                            .borrow_mut()
+                            .retain(|(space, hash)| !delivered(space, hash))
+                    });
+                    FETCH_SOURCES.with(|sources| {
+                        sources
+                            .borrow_mut()
+                            .retain(|(space, hash), _| !delivered(space, hash))
+                    });
+                    FETCH_ATTEMPTS.with(|attempts| {
+                        attempts
+                            .borrow_mut()
+                            .retain(|(space, hash), _| !delivered(space, hash))
+                    });
+                    format!("ACK\t{batch}")
+                }
+                Err(reason) => {
+                    defer_failed_fetch(id);
+                    format!("NACK\t{batch}\t{}", reason.replace(['\r', '\n', '\t'], " "))
+                }
+            };
+            crate::share_write_line(&line);
+        }) as crate::import_completion::Phase1Callback
+    });
+    let target = space_root_of(id).unwrap_or_default();
+    let completion = crate::import_completion::ImportCompletion::new(target, callback);
+    let reject = |reason: &str| {
+        completion.complete(Err(reason.to_string()));
+    };
+    let Some(space) = space_by_id(id) else {
+        reject("目标团队不存在");
         return;
     };
-    let Some(ui_host) = host() else { return };
+    let root = completion.target().to_path_buf();
+    if root.as_os_str().is_empty() {
+        reject("无法解析团队库目录");
+        return;
+    }
+    let Some(ui_host) = host() else {
+        reject("导入服务不可用");
+        return;
+    };
     let Some(ui) = ui_host.ui.upgrade() else {
+        reject("导入界面已关闭");
         return;
     };
     if paths.is_empty() {
+        reject("接收批次不含素材");
         return;
     }
     if importing.load(Ordering::SeqCst) {
@@ -451,6 +536,7 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
             TargetNoticeTone::Warning,
             "正在导入中，请等进度条结束后再操作".to_string(),
         );
+        reject("另一个导入任务仍在进行");
         return;
     }
     let Some(list) = write_import_list(&paths) else {
@@ -459,6 +545,7 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
             TargetNoticeTone::Error,
             "无法写入导入清单（临时目录不可用）".to_string(),
         );
+        reject("无法写入导入清单");
         return;
     };
     let args = vec![
@@ -466,15 +553,14 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
         list.to_string_lossy().into_owned(),
         "--library".to_string(),
         root.to_string_lossy().into_owned(),
-        // 与下方 spawn_import_pipeline 的 fast_import_mode=false 配对：
-        // 档位只能是 fast|background（sample-library 的 inbox 是清单归类指令，
-        // 不是 --mode 值——首版传 "inbox" 令子进程直接 exit=1）。
         "--mode".to_string(),
         "background".to_string(),
     ];
-    // 进度反馈交给导入管线的进度条（Info 级瞬时信息不弹窗，落日志）。
     logging::info!("向团队「{}」加入 {} 项素材", space.name, paths.len());
-    IMPORT_TARGET.with(|slot| *slot.borrow_mut() = Some(root.clone()));
+    let callback: crate::import_completion::Phase1Callback = Arc::new(move |result| {
+        let _ = std::fs::remove_file(&list);
+        completion.complete(result);
+    });
     spawn_import_pipeline(
         ui_host.ui.clone(),
         args,
@@ -482,8 +568,27 @@ pub fn add_paths_to_space(id: Uuid, paths: Vec<PathBuf>, importing: Arc<AtomicBo
         importing,
         format!("加入「{}」", space.name),
         false,
-        None,
+        // 显式本地共享允许把已 Remove 的内容作为新贡献重新 Add；
+        // 远端批次回执（batch = Some）不得自发替代 Add。
+        crate::import_completion::ReconcileTail {
+            callback: Some(callback),
+            allow_space_readd: !has_batch,
+        },
     );
+}
+
+fn verify_received_hashes(id: Uuid, expected: &[String]) -> Result<(), String> {
+    space_by_id(id).ok_or("目标团队已变化")?;
+    let root = space_root_of(id).ok_or("团队目录不可用")?;
+    let have: std::collections::HashSet<String> = ui_viewmodels::content_paths(&root)
+        .into_iter()
+        .filter(|(_, _, path)| path.is_file())
+        .map(|(hash, _, _)| hash.iter().map(|byte| format!("{byte:02x}")).collect())
+        .collect();
+    if expected.is_empty() || expected.iter().any(|hash| !have.contains(hash)) {
+        return Err("接收批次尚未完整入库，未确认送达".into());
+    }
+    Ok(())
 }
 
 /// 空间素材「保存到我的素材」：同一管线的反向（空间文件 → 主库根）。
@@ -532,7 +637,10 @@ pub fn save_paths_to_library(paths: Vec<PathBuf>, importing: Arc<AtomicBool>) {
         importing,
         "保存到我的素材".to_string(),
         false,
-        None,
+        crate::import_completion::ReconcileTail {
+            callback: None,
+            allow_space_readd: false,
+        },
     );
 }
 
@@ -567,29 +675,33 @@ thread_local! {
         RefCell::new(ui_viewmodels::ShareProjection::default());
 }
 
-/// 全空间成员内容哈希集：逐空间折叠 op log——Add 记哈希，Remove 经
-/// op uuid → 哈希映射抵扣（与 apply 侧同款两段解析，对跨设备 uuid 命名
-/// 空间无关）。op log 只有小册子量级，现算不缓存。
-fn member_hashes() -> std::collections::HashSet<Vec<u8>> {
-    let mut out = std::collections::HashSet::new();
-    for meta in spaces() {
-        let ops = load_ops(meta.id);
-        let mut hash_by_op_uuid = std::collections::HashMap::new();
-        for op in &ops {
-            if let SpaceOpKind::Add { asset } = &op.op {
-                hash_by_op_uuid.insert(asset.uuid, asset.content_hash.clone());
-                out.insert(asset.content_hash.clone());
+fn active_space_assets(ops: &[SpaceOp]) -> std::collections::HashMap<Vec<u8>, SpaceAssetMeta> {
+    let mut ordered = ops.to_vec();
+    ui_viewmodels::sort_and_dedupe_ops(&mut ordered);
+    let mut by_uuid = std::collections::HashMap::<Uuid, SpaceAssetMeta>::new();
+    for op in ordered {
+        match op.op {
+            SpaceOpKind::Add { asset } => {
+                by_uuid.insert(asset.uuid, asset);
             }
-        }
-        for op in &ops {
-            if let SpaceOpKind::Remove { asset_uuid } = &op.op {
-                if let Some(hash) = hash_by_op_uuid.get(asset_uuid) {
-                    out.remove(hash);
-                }
+            SpaceOpKind::Remove { asset_uuid } => {
+                by_uuid.remove(&asset_uuid);
             }
+            _ => {}
         }
     }
-    out
+    by_uuid
+        .into_values()
+        .map(|asset| (asset.content_hash.clone(), asset))
+        .collect()
+}
+
+/// 全空间成员内容哈希集：Add/Remove 按 op 全序折叠到最终活动集合。
+fn member_hashes() -> std::collections::HashSet<Vec<u8>> {
+    spaces()
+        .into_iter()
+        .flat_map(|meta| active_space_assets(&load_ops(meta.id)).into_keys())
+        .collect()
 }
 
 /// (总数, 已共享数) → 侧栏态：0 无 / 1 部分 / 2 全。空分类与零共享同 0
@@ -689,6 +801,15 @@ pub fn shared_uuids() -> std::collections::HashSet<Uuid> {
     out
 }
 
+#[derive(Clone)]
+struct ReceivedBatch {
+    space_id: Uuid,
+    hashes: Vec<String>,
+}
+
+type StagedImport = (Uuid, ReceivedBatch, PathBuf, Vec<PathBuf>);
+type FetchAttempts = std::collections::HashMap<(Uuid, Vec<u8>), std::collections::HashSet<String>>;
+
 // —— D90-P2 网格半场：op log 持久化、抗熵接线、贴码加入与字节索取 ——
 //
 // 同步语义：op log（每空间 ops.jsonl，(lamport, author) 全序）是空间的事实
@@ -705,16 +826,25 @@ thread_local! {
     static SYNCED_PEERS: RefCell<std::collections::HashSet<String>> =
         RefCell::new(std::collections::HashSet::new());
     /// 已自动受理的空间投递批次（batch → space；STAGED 路由回空间根）。
-    static SPACE_BATCHES: RefCell<std::collections::HashMap<Uuid, Uuid>> =
+    static SPACE_BATCHES: RefCell<std::collections::HashMap<Uuid, ReceivedBatch>> =
         RefCell::new(std::collections::HashMap::new());
+    /// 已向特定远端发布过的本地 op 键；只用于避免重复广播，不是事实源。
+    static PUBLISHED_OPS: RefCell<std::collections::HashSet<(String, Uuid, u64, String)>> =
+        RefCell::new(std::collections::HashSet::new());
     /// 大小闸（设置装载时回填）：(启用, MB 上限)。拍板②：默认 500MB 可调。
     static GATE: RefCell<(bool, u32)> = const { RefCell::new((true, 500)) };
     /// 挂起的字节索取。gated = 被大小闸挡下（等用户手动放行，对端上线
     /// 不自动重试）；否则 = 无人在线（对端上线自动续传）。
     static PENDING_FETCH: RefCell<Vec<PendingFetch>> = const { RefCell::new(Vec::new()) };
-    /// 导入管线的目标根（主视图里向空间投放时活动根 ≠ 目标根，收尾回调
-    /// 据此归位）。导入由 importing 旗标串行，单槽即可。
-    static IMPORT_TARGET: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static STAGED_IMPORTS: RefCell<std::collections::VecDeque<StagedImport>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+    static PENDING_PURGES: RefCell<std::collections::BTreeSet<Uuid>> = const { RefCell::new(std::collections::BTreeSet::new()) };
+    static FETCHING_HASHES: RefCell<std::collections::HashSet<(Uuid, Vec<u8>)>> =
+        RefCell::new(std::collections::HashSet::new());
+    static FETCH_SOURCES: RefCell<std::collections::HashMap<(Uuid, Vec<u8>), String>> = RefCell::new(std::collections::HashMap::new());
+    static FETCH_ATTEMPTS: RefCell<FetchAttempts> = RefCell::new(std::collections::HashMap::new());
+    static PULL_CURSORS: RefCell<std::collections::HashMap<(String, Uuid), Option<ui_viewmodels::OpKey>>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// 设置装载后回填大小闸。
@@ -747,29 +877,38 @@ pub fn load_ops(id: Uuid) -> Vec<SpaceOp> {
     ui_viewmodels::space_ops_from_lines(&text, id)
 }
 
-fn append_ops(id: Uuid, ops: &[SpaceOp]) {
+fn append_ops(id: Uuid, ops: &[SpaceOp]) -> bool {
     if ops.is_empty() {
-        return;
+        return true;
     }
     let Some(path) = ops_path(id) else {
-        return;
+        return false;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let text = ui_viewmodels::space_ops_to_lines(ops);
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            if let Err(error) = std::io::Write::write_all(&mut file, text.as_bytes()) {
-                logging::warn!("空间 op log 追加失败: {error}");
-            }
+    let result = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
-        Err(error) => logging::warn!("空间 op log 打开失败: {error}"),
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        let previous_len = file.metadata()?.len();
+        if let Err(error) =
+            std::io::Write::write_all(&mut file, text.as_bytes()).and_then(|()| file.sync_data())
+        {
+            if let Err(rollback) = file.set_len(previous_len).and_then(|()| file.sync_data()) {
+                logging::warn!("空间 op log 失败回滚未完成: {rollback}");
+            }
+            return Err(error);
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        logging::warn!("空间 op log 追加失败 team={id}: {error}");
+        return false;
     }
+    true
 }
 
 /// 组装并整册推送空间服务册（meta + op log + 字节服务索引）。
@@ -796,32 +935,113 @@ pub fn push_space_state() {
     ));
 }
 
-/// 空间根导入完成（导入管线收尾回调点名空间根时调用）：补记 Add op
-/// （库行反推——哈希/uuid/文件名/大小都在行里）+ serve 索引重推。
-pub fn on_space_import_finished(_active_root: &Path) {
-    // 导入目标根以登记为准（主视图里向空间投放时，活动根 ≠ 目标根）。
-    let target = IMPORT_TARGET.with(|slot| slot.borrow_mut().take());
-    if let Some(root) = target {
-        if let Some(id) = space_id_of_root(&root) {
-            emit_missing_add_ops(id);
-            push_space_state();
-            // op log 长了（补 Add）：主库侧共享态与瓦片角标随之翻新。
-            refresh_share_projection(true);
+/// 导入完成后按明确目标根补记 Add，并主动把新增操作分批发布给已授权成员。
+pub fn on_space_import_finished(target_root: &Path, allow_readd: bool) -> Result<(), String> {
+    let Some(id) = space_id_of_root(target_root) else {
+        return Ok(());
+    };
+    if !emit_missing_add_ops(id, allow_readd) {
+        return Err("团队操作记录写入失败，未确认送达".into());
+    }
+    let after = load_ops(id);
+    push_space_state();
+    if !after.is_empty() {
+        broadcast_ops(id, &after);
+        if let Some((space, ui)) = space_by_id(id).zip(host().and_then(|host| host.ui.upgrade())) {
+            materialize_space_ops(&ui, &space, &after);
         }
+    }
+    refresh_share_projection(true);
+    Ok(())
+}
+
+/// 向已授权且已认证的成员发布有限大小的 op 增量。
+/// 认证会话即使没有 DEVICE 行也可用；地址为空交给 worker 走生产发现。
+fn broadcast_ops(id: Uuid, ops: &[SpaceOp]) {
+    if ops.is_empty() {
         return;
     }
-    let touches_space = SPACES_DIR.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .is_some_and(|dir| _active_root.starts_with(dir))
-    });
-    if touches_space {
-        if let Some(id) = space_id_of_root(_active_root) {
-            emit_missing_add_ops(id);
+    let members = space_by_id(id)
+        .map(|space| {
+            space
+                .members
+                .into_iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let self_id = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()));
+    for peer in members {
+        if Some(peer.clone()) == self_id {
+            continue;
         }
-        push_space_state();
-        refresh_share_projection(true);
+        broadcast_ops_to(id, &peer, ops);
     }
+}
+
+/// 向单个成员发布 `ops` 里它未见过的部分（分批 ≤ MAX_OPS_PER_MESSAGE）。
+fn broadcast_ops_to(id: Uuid, peer: &str, ops: &[SpaceOp]) {
+    for chunk in ops.chunks(MAX_OPS_PER_MESSAGE) {
+        let unseen: Vec<SpaceOp> = chunk
+            .iter()
+            .filter(|op| {
+                PUBLISHED_OPS.with(|seen| {
+                    !seen
+                        .borrow()
+                        .contains(&(peer.to_string(), id, op.lamport, op.author.clone()))
+                })
+            })
+            .cloned()
+            .collect();
+        if unseen.is_empty() {
+            continue;
+        }
+        let Some(line) = ui_viewmodels::space_send_line(
+            peer,
+            &peer_addrs(peer),
+            SpaceMessage::Ops {
+                ops: unseen.clone(),
+            },
+        ) else {
+            continue;
+        };
+        if crate::share_write_line(&line) {
+            PUBLISHED_OPS.with(|seen| {
+                let mut seen = seen.borrow_mut();
+                for op in unseen {
+                    seen.insert((peer.to_string(), id, op.lamport, op.author));
+                }
+            });
+        }
+    }
+}
+
+/// 向一个已认证成员补发其未见过的本地 op（一次调用一轮，不重试）。
+/// 错峰启动的另一半：对端上线拉走我们的册子时，我们的增量也必须主动
+/// 推给它——只靠 PullOps 应答收敛不了双方各自的离线写入。
+fn broadcast_unpublished_ops(peer_id: &str) {
+    for space in spaces() {
+        let ops = load_ops(space.id);
+        let unseen: Vec<SpaceOp> = ops
+            .iter()
+            .filter(|op| {
+                PUBLISHED_OPS.with(|seen| {
+                    !seen.borrow().contains(&(
+                        peer_id.to_string(),
+                        space.id,
+                        op.lamport,
+                        op.author.clone(),
+                    ))
+                })
+            })
+            .cloned()
+            .collect();
+        broadcast_ops_to(space.id, peer_id, &unseen);
+    }
+}
+
+fn peer_addrs(peer: &str) -> Vec<String> {
+    ONLINE_PEERS.with(|slot| slot.borrow().get(peer).cloned().unwrap_or_default())
 }
 
 /// 目录名（uuid 连字符形态）反查空间 id。
@@ -834,22 +1054,26 @@ fn space_id_of_root(root: &Path) -> Option<Uuid> {
 /// 库里有行、op log 还没记的素材 → 补 Add op（作者 = 本机，uuid = 本地行
 /// uuid——「op 域 uuid = 添加者库内 uuid」的自洽形态）。进入空间视图时也
 /// 跑一遍（对账式补偿：导入失败半途、崩溃残留都能被下一次进入收敛）。
-fn emit_missing_add_ops(id: Uuid) {
+fn emit_missing_add_ops(id: Uuid, allow_readd: bool) -> bool {
     let Some(root) = space_root_of(id) else {
-        return;
+        return false;
     };
     let Some(self_id) = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()))
     else {
-        return;
+        return false;
     };
     let ops = load_ops(id);
-    let covered: std::collections::HashSet<Vec<u8>> = ops
-        .iter()
-        .filter_map(|op| match &op.op {
-            SpaceOpKind::Add { asset } => Some(asset.content_hash.clone()),
-            _ => None,
-        })
-        .collect();
+    let active = active_space_assets(&ops);
+    let covered: std::collections::HashSet<Vec<u8>> = if allow_readd {
+        active.keys().cloned().collect()
+    } else {
+        ops.iter()
+            .filter_map(|op| match &op.op {
+                SpaceOpKind::Add { asset } => Some(asset.content_hash.clone()),
+                _ => None,
+            })
+            .collect()
+    };
     let rows = ui_viewmodels::content_paths(&root);
     let mut lamport = ops.iter().map(|op| op.lamport).max().unwrap_or(0);
     let mut fresh: Vec<SpaceOp> = Vec::new();
@@ -889,8 +1113,8 @@ fn emit_missing_add_ops(id: Uuid) {
     }
     if !fresh.is_empty() {
         logging::info!("空间 {id} 补记 {} 条 Add op（库行反推）", fresh.len());
-        append_ops(id, &fresh);
     }
+    append_ops(id, &fresh)
 }
 
 /// 展示层扩展名分类（store 行不带类别；只影响清单展示与占位图标）。
@@ -914,6 +1138,66 @@ pub fn intercept_worker_line(line: &str) -> bool {
         WORKER_SESSION_PENDING.with(|pending| pending.set(true));
         // READY 仍交 share_vm 采信身份；main 随后的身份回填消费会话标记。
         return false;
+    }
+    if line == "NETWORK_READY" {
+        push_space_state();
+        for peer in authorized_members() {
+            start_peer_sync(&peer);
+        }
+        try_pending_fetch();
+        return true;
+    }
+    if let Some(peer) = line.strip_prefix("SPACE_SYNC_FAILED\t") {
+        PULL_CURSORS.with(|cursors| cursors.borrow_mut().retain(|(id, _), _| id != peer));
+        PUBLISHED_OPS.with(|ops| ops.borrow_mut().retain(|(id, _, _, _)| id != peer));
+        return true;
+    }
+    if let Some(peer) = line.strip_prefix("SPACE_PEER_ACTIVE\t") {
+        // 对端发起的认证拉取会话 = 它在线且可拨。错峰启动时双向收敛的
+        // 触发源：对端先拉了我们，我们的离线增量也要广播给它（一次有界，
+        // 无 Timer、无回声—— SYNCED_PEERS 语义仍是不重复发起）。
+        if spaces().iter().any(|space| space.is_member(peer)) {
+            let first = SYNCED_PEERS.with(|slot| slot.borrow_mut().insert(peer.to_string()));
+            ONLINE_PEERS.with(|slot| {
+                slot.borrow_mut().entry(peer.to_string()).or_default();
+            });
+            if first {
+                start_peer_sync(peer);
+            }
+            broadcast_unpublished_ops(peer);
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("SPACE_FETCH_FAILED\t") {
+        if let Some((peer, id)) = rest.split_once('\t') {
+            if let Ok(id) = id.parse::<Uuid>() {
+                if space_by_id(id).is_some_and(|space| space.is_member(peer)) {
+                    let hashes = FETCH_SOURCES.with(|sources| {
+                        sources
+                            .borrow()
+                            .iter()
+                            .filter(|((space_id, _), source)| {
+                                *space_id == id && source.as_str() == peer
+                            })
+                            .map(|((_, hash), _)| hash.clone())
+                            .collect()
+                    });
+                    handle_unavailable_fetch(id, peer, hashes);
+                }
+            }
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("done\t") {
+        let mut fields = rest.split('\t');
+        if let (Some(batch), Some("failed" | "rejected")) = (fields.next(), fields.next()) {
+            if let Ok(batch) = batch.parse::<Uuid>() {
+                if let Some(id) = SPACE_BATCHES.with(|batches| batches.borrow_mut().remove(&batch))
+                {
+                    defer_failed_fetch(id.space_id);
+                }
+            }
+        }
     }
     if let Some(rest) = line.strip_prefix("DEVICE\t") {
         on_device_seen(rest);
@@ -949,7 +1233,7 @@ fn on_device_seen(rest: &str) {
         return;
     };
     let addrs: Vec<String> = parts
-        .get(3)
+        .get(2)
         .map(|text| {
             text.split(';')
                 .filter(|s| !s.is_empty())
@@ -957,14 +1241,17 @@ fn on_device_seen(rest: &str) {
                 .collect()
         })
         .unwrap_or_default();
-    ONLINE_PEERS.with(|slot| {
-        slot.borrow_mut().insert(id.to_string(), addrs.clone());
+    let addresses_changed = ONLINE_PEERS.with(|slot| {
+        slot.borrow_mut()
+            .insert(id.to_string(), addrs.clone())
+            .as_ref()
+            != Some(&addrs)
     });
     let is_member = spaces().iter().any(|space| space.is_member(id));
     if is_member {
         let first_time = SYNCED_PEERS.with(|slot| slot.borrow_mut().insert(id.to_string()));
-        if first_time {
-            crate::share_write_line(&format!("SPACE_SYNC\t{id}\t{}", addrs.join(";")));
+        if first_time || addresses_changed {
+            start_peer_sync(id);
         }
         try_pending_fetch();
     }
@@ -987,23 +1274,39 @@ fn handle_admitted(ui: &AppWindow, space_id: Uuid, peer_id: &str, joiner_name: &
     else {
         return;
     };
-    let applied = SPACES.with(|vm| vm.borrow_mut().apply_join(space.clone(), now_secs()));
-    if applied.is_ok() {
+    if self_id != space.owner_id || space.validate().is_err() {
+        return;
+    }
+    let lamport = load_ops(space_id)
+        .iter()
+        .map(|op| op.lamport)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let roster = SpaceOp {
+        space_id,
+        lamport,
+        author: self_id,
+        ts: now_secs(),
+        op: SpaceOpKind::Roster {
+            space: space.clone(),
+        },
+    };
+    if !append_ops(space_id, std::slice::from_ref(&roster)) {
+        push_space_state();
+        notice(
+            ui,
+            ui_viewmodels::notifications::Severity::Warning,
+            "成员记录写入失败，未确认加入；请重新加入".into(),
+        );
+        return;
+    }
+    if SPACES
+        .with(|vm| vm.borrow_mut().apply_join(space, now_secs()))
+        .is_ok()
+    {
         persist();
-        let lamport = load_ops(space_id)
-            .iter()
-            .map(|op| op.lamport)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let roster = SpaceOp {
-            space_id,
-            lamport,
-            author: self_id,
-            ts: now_secs(),
-            op: SpaceOpKind::Roster { space },
-        };
-        append_ops(space_id, std::slice::from_ref(&roster));
+        broadcast_ops(space_id, std::slice::from_ref(&roster));
         push_space_state();
         sync_rows(ui);
         notice(
@@ -1016,129 +1319,301 @@ fn handle_admitted(ui: &AppWindow, space_id: Uuid, peer_id: &str, joiner_name: &
 
 /// 空间报文消费面（ShareAction::SpaceMessage 的落点）。
 pub fn handle_space_message(ui: &AppWindow, peer_id: &str, message: SpaceMessage) {
+    if !peer_id.is_empty() {
+        ONLINE_PEERS.with(|slot| {
+            slot.borrow_mut().entry(peer_id.to_string()).or_default();
+        });
+    }
     match message {
-        SpaceMessage::Ops { ops } => merge_and_apply_ops(ui, ops),
-        SpaceMessage::JoinOk { meta, ops } => apply_join_ok(ui, meta, ops),
-        SpaceMessage::JoinErr { reason } => {
-            ui.set_space_ctl_error(reason.clone().into());
-            notice(ui, ui_viewmodels::notifications::Severity::Warning, reason);
+        SpaceMessage::Ops { ops } => merge_and_apply_ops(ui, peer_id, ops),
+        SpaceMessage::OpsPage {
+            space_id,
+            after,
+            next,
+            ops,
+        } => {
+            let valid = SpaceMessage::OpsPage {
+                space_id,
+                after: after.clone(),
+                next: next.clone(),
+                ops: ops.clone(),
+            }
+            .validate()
+            .is_ok();
+            let expected = PULL_CURSORS.with(|cursors| {
+                cursors
+                    .borrow()
+                    .get(&(peer_id.to_string(), space_id))
+                    .cloned()
+            });
+            if !valid
+                || expected != Some(after)
+                || !space_by_id(space_id).is_some_and(|space| space.is_member(peer_id))
+            {
+                return;
+            }
+            if !merge_ops(ui, peer_id, ops, false) {
+                return;
+            }
+            PULL_CURSORS.with(|cursors| {
+                cursors
+                    .borrow_mut()
+                    .remove(&(peer_id.to_string(), space_id));
+            });
+            if let Some(next) = next {
+                request_ops_page(peer_id, space_id, Some(next));
+            } else if let Some(space) = space_by_id(space_id) {
+                materialize_space_ops(ui, &space, &load_ops(space_id));
+                push_space_state();
+            }
         }
-        // Summary/Fetch/Join 由 worker 在通道内应答/处置，到达 UI 即异常形态。
-        other => logging::warn!("忽略异常到达 UI 的空间报文（peer={peer_id}）: {other:?}"),
+        SpaceMessage::FetchUnavailable { space_id, hashes } => {
+            if space_by_id(space_id).is_some_and(|space| space.is_member(peer_id)) {
+                handle_unavailable_fetch(space_id, peer_id, hashes);
+            }
+        }
+        SpaceMessage::JoinOk { meta, ops } => apply_join_ok(ui, peer_id, meta, ops),
+        SpaceMessage::JoinErr { reason } => {
+            let expected = SPACE_JOIN_PENDING.with(|pending| {
+                let mut pending = pending.borrow_mut();
+                if pending.as_ref().is_some_and(|(_, owner)| owner == peer_id) {
+                    pending.take();
+                    true
+                } else {
+                    false
+                }
+            });
+            if expected {
+                ui.set_space_ctl_error(reason.clone().into());
+                notice(ui, ui_viewmodels::notifications::Severity::Warning, reason);
+            }
+        }
+        // 协议对象可能包含邀请码或名册 secret，异常路径也只记事件类型。
+        _ => logging::warn!("忽略异常到达 UI 的空间报文 peer={peer_id}"),
     }
 }
 
 /// Ops 差量应用：验权（permits 按 op 域作者索引）→ 追加 log → 物化本地
 /// （Add 缺字节挂索取、Remove 按摘要反查本地行发 purge、Roster 落册）。
-fn merge_and_apply_ops(ui: &AppWindow, incoming: Vec<SpaceOp>) {
+fn merge_and_apply_ops(ui: &AppWindow, peer_id: &str, incoming: Vec<SpaceOp>) {
+    merge_ops(ui, peer_id, incoming, true);
+}
+
+fn merge_ops(ui: &AppWindow, peer_id: &str, incoming: Vec<SpaceOp>, legacy_push: bool) -> bool {
+    if incoming.len() > MAX_OPS_PER_MESSAGE {
+        return false;
+    }
     let mut by_space: std::collections::BTreeMap<Uuid, Vec<SpaceOp>> = Default::default();
     for op in incoming {
         if op.validate().is_ok() {
             by_space.entry(op.space_id).or_default().push(op);
         }
     }
+    let mut progressed = false;
     let mut roster_changed = false;
-    for (id, batch) in by_space {
-        let Some(space) = space_by_id(id) else {
-            logging::info!("收到未知空间 {id} 的 op，丢弃（不泄漏存在性）");
+    for (id, mut batch) in by_space {
+        let Some(mut space) = space_by_id(id) else {
             continue;
         };
+        if !space.is_member(peer_id) {
+            logging::warn!("忽略非团队成员空间操作 peer={peer_id} space={id}");
+            continue;
+        }
         let mut ops = load_ops(id);
-        let known: std::collections::HashSet<(u64, String)> = ops
+        let mut known: std::collections::HashSet<(u64, String)> = ops
             .iter()
             .map(|op| (op.lamport, op.author.clone()))
             .collect();
-        // op 域的 uuid → 添加者索引（Remove 的「添加者本人」判定）。
-        let mut added_by: std::collections::HashMap<Uuid, String> = Default::default();
+        let mut added_by = std::collections::HashMap::<Uuid, String>::new();
         for op in &ops {
             if let SpaceOpKind::Add { asset } = &op.op {
                 added_by.insert(asset.uuid, op.author.clone());
             }
         }
-        let mut fresh: Vec<SpaceOp> = Vec::new();
+        ui_viewmodels::sort_and_dedupe_ops(&mut batch);
+        let previous_latest_roster = ops
+            .iter()
+            .filter_map(|op| match &op.op {
+                SpaceOpKind::Roster { .. } => Some((op.lamport, op.author.clone())),
+                _ => None,
+            })
+            .max();
+        let mut latest_roster = previous_latest_roster.clone();
+        let mut fresh = Vec::new();
         for op in batch {
             let key = (op.lamport, op.author.clone());
             if known.contains(&key) || !op.permits(&space, &added_by) {
                 continue;
             }
+            if let SpaceOpKind::Roster { space: next } = &op.op {
+                if next.id != id || next.owner_id != space.owner_id {
+                    continue;
+                }
+                // Roster snapshots participate in authorization in total order.
+                // An older snapshot is retained in the log but cannot roll back
+                // the working membership used by later operations in this page.
+                if latest_roster
+                    .as_ref()
+                    .is_none_or(|previous| key > *previous)
+                {
+                    space = next.clone();
+                    latest_roster = Some(key.clone());
+                }
+            }
             if let SpaceOpKind::Add { asset } = &op.op {
                 added_by.insert(asset.uuid, op.author.clone());
             }
+            known.insert(key);
             fresh.push(op);
         }
         if fresh.is_empty() {
             continue;
         }
-        append_ops(id, &fresh);
+        if !append_ops(id, &fresh) {
+            return false;
+        }
+        progressed = true;
         ops.extend(fresh.iter().cloned());
         ui_viewmodels::sort_and_dedupe_ops(&mut ops);
-
-        // 物化：内容索引一份扫全（持有判定 + Remove 反查）。
-        let Some(root) = space_root_of(id) else {
-            continue;
-        };
-        let rows = ui_viewmodels::content_paths(&root);
-        let mut have: std::collections::HashSet<Vec<u8>> = Default::default();
-        let mut uuid_by_hash: std::collections::HashMap<Vec<u8>, String> = Default::default();
-        for (hash, uuid, _path) in rows {
-            have.insert(hash.clone());
-            uuid_by_hash.insert(hash, uuid);
-        }
-        let mut hash_by_op_uuid: std::collections::HashMap<Uuid, Vec<u8>> = Default::default();
-        for op in &ops {
-            if let SpaceOpKind::Add { asset } = &op.op {
-                hash_by_op_uuid.insert(asset.uuid, asset.content_hash.clone());
+        if let Some((key, next)) = ops
+            .iter()
+            .filter_map(|op| match &op.op {
+                SpaceOpKind::Roster { space: next } => {
+                    Some(((op.lamport, op.author.clone()), next))
+                }
+                _ => None,
+            })
+            .max_by(|(left, _), (right, _)| left.cmp(right))
+        {
+            if previous_latest_roster
+                .as_ref()
+                .is_none_or(|previous| key > *previous)
+                && SPACES
+                    .with(|vm| vm.borrow_mut().apply_join(next.clone(), now_secs()))
+                    .is_ok()
+            {
+                space = next.clone();
+                roster_changed = true;
             }
         }
-        let mut missing: Vec<SpaceAssetMeta> = Vec::new();
-        let mut purge_uuids: Vec<String> = Vec::new();
-        for op in &fresh {
-            match &op.op {
-                SpaceOpKind::Add { asset } => {
-                    if !have.contains(&asset.content_hash) {
-                        missing.push(asset.clone());
-                    }
-                }
-                SpaceOpKind::Remove { asset_uuid } => {
-                    if let Some(hash) = hash_by_op_uuid.get(asset_uuid) {
-                        if let Some(local) = uuid_by_hash.get(hash) {
-                            purge_uuids.push(local.clone());
-                        }
-                    }
-                }
-                SpaceOpKind::Roster { space: meta } => {
-                    let _ = SPACES.with(|vm| vm.borrow_mut().apply_join(meta.clone(), now_secs()));
-                    roster_changed = true;
-                }
-                // 结构 op（分类/改名/归类）应用面留 P3：log 已收，物化待接。
-                other => logging::info!("空间结构 op 待 P3 物化: {other:?}"),
-            }
+        if legacy_push {
+            materialize_space_ops(ui, &space, &ops);
         }
-        if !purge_uuids.is_empty() {
-            spawn_purge(&root, &purge_uuids);
-        }
-        if !missing.is_empty() {
-            fetch_missing(ui, &space, missing);
-        }
-        if active().is_some_and(|scope| scope.id == id) {
-            enter_space(id);
-        }
+    }
+    if !progressed {
+        return true;
     }
     if roster_changed {
         persist();
+        sync_rows(ui);
     }
     push_space_state();
-    if roster_changed {
-        sync_rows(ui);
+    if legacy_push {
+        start_peer_sync(peer_id);
+    }
+    true
+}
+
+fn materialize_space_ops(ui: &AppWindow, space: &SpaceMeta, ops: &[SpaceOp]) {
+    let Some(root) = space_root_of(space.id) else {
+        return;
+    };
+    let active_assets = active_space_assets(ops);
+    let known_hashes: std::collections::HashSet<_> = ops
+        .iter()
+        .filter_map(|op| match &op.op {
+            SpaceOpKind::Add { asset } => Some(asset.content_hash.clone()),
+            _ => None,
+        })
+        .collect();
+    let rows = ui_viewmodels::content_paths(&root);
+    let have: std::collections::HashSet<_> = rows.iter().map(|(hash, _, _)| hash.clone()).collect();
+    let purge: Vec<_> = rows
+        .into_iter()
+        .filter(|(hash, _, _)| known_hashes.contains(hash) && !active_assets.contains_key(hash))
+        .map(|(_, uuid, _)| uuid)
+        .collect();
+    prune_pending_fetch(space.id, &active_assets);
+    FETCH_SOURCES.with(|sources| {
+        sources.borrow_mut().retain(|(id, hash), _| {
+            *id != space.id || (!have.contains(hash) && active_assets.contains_key(hash))
+        })
+    });
+    FETCH_ATTEMPTS.with(|attempts| {
+        attempts.borrow_mut().retain(|(id, hash), _| {
+            *id != space.id || (!have.contains(hash) && active_assets.contains_key(hash))
+        })
+    });
+    FETCHING_HASHES.with(|fetching| {
+        fetching.borrow_mut().retain(|(id, hash)| {
+            *id != space.id || (!have.contains(hash) && active_assets.contains_key(hash))
+        })
+    });
+    if !purge.is_empty() {
+        PENDING_PURGES.with(|pending| pending.borrow_mut().insert(space.id));
+        resume_pending_imports();
+    }
+    let missing = active_assets
+        .into_iter()
+        .filter_map(|(hash, asset)| (!have.contains(&hash)).then_some(asset))
+        .collect();
+    fetch_missing(ui, space, missing);
+}
+
+fn start_peer_sync(peer_id: &str) {
+    for space in spaces()
+        .into_iter()
+        .filter(|space| space.is_member(peer_id))
+    {
+        PULL_CURSORS.with(|cursors| {
+            cursors
+                .borrow_mut()
+                .insert((peer_id.to_string(), space.id), None);
+        });
+    }
+    crate::share_write_line(&format!(
+        "SPACE_SYNC\t{peer_id}\t{}",
+        peer_addrs(peer_id).join(";")
+    ));
+}
+
+fn request_ops_page(peer_id: &str, space_id: Uuid, after: Option<ui_viewmodels::OpKey>) {
+    let message = SpaceMessage::PullOps {
+        space_id,
+        after: after.clone(),
+    };
+    if let Some(line) = ui_viewmodels::space_send_line(peer_id, &peer_addrs(peer_id), message) {
+        PULL_CURSORS.with(|cursors| {
+            cursors
+                .borrow_mut()
+                .insert((peer_id.to_string(), space_id), after);
+        });
+        crate::share_write_line(&line);
     }
 }
 
-/// JoinOk 应用（加入侧冷启动）：建根 + 落册 + 整写 op log + 进入 + 补字节。
-fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceOp>) {
+/// JoinOk 应用（加入侧冷启动）：建根 + 落册 + 合并 op log + 进入 + 补字节。
+fn apply_join_ok(ui: &AppWindow, peer_id: &str, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceOp>) {
     let id = meta.id;
-    let root = match space_root_of(id) {
-        Some(root) => root,
-        None => return,
+    let expected = SPACE_JOIN_PENDING.with(|pending| pending.borrow().clone());
+    let self_id = SPACES.with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()));
+    if !expected
+        .as_ref()
+        .is_some_and(|(expected_id, owner)| *expected_id == id && owner == peer_id)
+        || meta.owner_id != peer_id
+        || meta.validate().is_err()
+        || !self_id.as_ref().is_some_and(|id| meta.is_member(id))
+        || ops.len() > MAX_OPS_PER_MESSAGE
+        || ops
+            .iter()
+            .any(|op| op.space_id != id || op.validate().is_err())
+    {
+        logging::warn!("丢弃非预期团队加入应答 peer={peer_id} team={id}");
+        return;
+    }
+    SPACE_JOIN_PENDING.with(|pending| pending.borrow_mut().take());
+    let Some(root) = space_root_of(id) else {
+        return;
     };
     if let Err(error) = std::fs::create_dir_all(&root) {
         notice(
@@ -1158,30 +1633,54 @@ fn apply_join_ok(ui: &AppWindow, meta: ui_viewmodels::SpaceMeta, ops: Vec<SpaceO
     }
     let mut sorted = ops;
     ui_viewmodels::sort_and_dedupe_ops(&mut sorted);
-    if let Some(path) = ops_path(id) {
-        let _ = crate::atomic_write(&path, &ui_viewmodels::space_ops_to_lines(&sorted));
+    let existing = load_ops(id);
+    let known: std::collections::HashSet<(u64, String)> = existing
+        .iter()
+        .map(|op| (op.lamport, op.author.clone()))
+        .collect();
+    let fresh: Vec<SpaceOp> = sorted
+        .iter()
+        .filter(|op| !known.contains(&(op.lamport, op.author.clone())))
+        .cloned()
+        .collect();
+    if !append_ops(id, &fresh) {
+        ui.set_space_ctl_error("团队操作记录写入失败，请重新加入".into());
+        return;
     }
-    let missing = missing_from_ops(&root, &sorted);
+    let mut merged = existing;
+    merged.extend(sorted.iter().cloned());
+    ui_viewmodels::sort_and_dedupe_ops(&mut merged);
+    let missing = missing_from_ops(&root, &merged);
     let name = meta.name.clone();
     if SPACES
         .with(|vm| vm.borrow_mut().apply_join(meta, now_secs()))
-        .is_ok()
+        .is_err()
     {
-        persist();
-        sync_rows(ui);
-        notice(
-            ui,
-            ui_viewmodels::notifications::Severity::Success,
-            format!("已加入团队「{name}」，素材会自动同步到本机"),
-        );
-        enter_space(id);
-        if !missing.is_empty() {
-            if let Some(space) = space_by_id(id) {
-                fetch_missing(ui, &space, missing);
-            }
-        }
-        push_space_state();
+        return;
     }
+    ONLINE_PEERS.with(|online| {
+        online.borrow_mut().entry(peer_id.to_string()).or_default();
+    });
+    SYNCED_PEERS.with(|synced| {
+        synced.borrow_mut().insert(peer_id.to_string());
+    });
+    persist();
+    push_space_state();
+    sync_rows(ui);
+    notice(
+        ui,
+        ui_viewmodels::notifications::Severity::Success,
+        format!("已加入团队「{name}」，素材会自动同步到本机"),
+    );
+    enter_space(id);
+    if sorted.len() >= MAX_OPS_PER_MESSAGE {
+        request_ops_page(peer_id, id, None);
+    } else if !missing.is_empty() {
+        if let Some(space) = space_by_id(id) {
+            fetch_missing(ui, &space, missing);
+        }
+    }
+    push_space_state();
 }
 
 /// op log 里 Add 了、本地库还没有字节的素材集（join 冷启动/对账共用）。
@@ -1190,14 +1689,25 @@ fn missing_from_ops(root: &Path, ops: &[SpaceOp]) -> Vec<SpaceAssetMeta> {
         .into_iter()
         .map(|(hash, _uuid, _path)| hash)
         .collect();
-    ops.iter()
-        .filter_map(|op| match &op.op {
-            SpaceOpKind::Add { asset } => Some(asset),
-            _ => None,
-        })
-        .filter(|asset| !have.contains(&asset.content_hash))
-        .cloned()
+    active_space_assets(ops)
+        .into_iter()
+        .filter_map(|(hash, asset)| (!have.contains(&hash)).then_some(asset))
         .collect()
+}
+
+fn prune_pending_fetch(
+    id: Uuid,
+    active_assets: &std::collections::HashMap<Vec<u8>, SpaceAssetMeta>,
+) {
+    PENDING_FETCH.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        for entry in pending.iter_mut().filter(|entry| entry.space_id == id) {
+            entry
+                .items
+                .retain(|asset| active_assets.contains_key(&asset.content_hash));
+        }
+        pending.retain(|entry| !entry.items.is_empty());
+    });
 }
 
 /// 挂起的字节索取条目（空间 + 素材 + 是否被大小闸挡下）。
@@ -1209,12 +1719,41 @@ struct PendingFetch {
 
 fn push_pending(space_id: Uuid, items: Vec<SpaceAssetMeta>, gated: bool) {
     PENDING_FETCH.with(|slot| {
-        slot.borrow_mut().push(PendingFetch {
-            space_id,
-            items,
-            gated,
-        })
+        let mut pending = slot.borrow_mut();
+        let mut known: std::collections::HashSet<_> = pending
+            .iter()
+            .filter(|entry| entry.space_id == space_id)
+            .flat_map(|entry| entry.items.iter().map(|asset| asset.content_hash.clone()))
+            .collect();
+        let items: Vec<_> = items
+            .into_iter()
+            .filter(|asset| known.insert(asset.content_hash.clone()))
+            .collect();
+        if !items.is_empty() {
+            pending.push(PendingFetch {
+                space_id,
+                items,
+                gated,
+            });
+        }
     });
+}
+
+fn defer_failed_fetch(space_id: Uuid) {
+    FETCHING_HASHES.with(|fetching| {
+        fetching.borrow_mut().retain(|(id, _)| *id != space_id);
+    });
+    if space_by_id(space_id).is_none() {
+        return;
+    }
+    let Some(root) = space_root_of(space_id) else {
+        return;
+    };
+    let items = missing_from_ops(&root, &load_ops(space_id));
+    push_pending(space_id, items, false);
+    if let Some(ui) = host().and_then(|host| host.ui.upgrade()) {
+        refresh_pending(&ui);
+    }
 }
 
 /// 大小闸挡下待手动放行的素材总数（管理弹窗的「待下载」入口据此显隐）。
@@ -1268,6 +1807,13 @@ pub fn force_pending_fetch(ui: &AppWindow) {
 /// 对端上线重试（事件驱动，零 Timer）。闸门挡下的挂起转手动（管理弹窗
 /// 「待下载」入口放行）。
 fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) {
+    let items: Vec<_> = FETCHING_HASHES.with(|fetching| {
+        let mut fetching = fetching.borrow_mut();
+        items
+            .into_iter()
+            .filter(|asset| fetching.insert((space.id, asset.content_hash.clone())))
+            .collect()
+    });
     if items.is_empty() {
         return;
     }
@@ -1303,6 +1849,7 @@ fn fetch_missing(ui: &AppWindow, space: &SpaceMeta, items: Vec<SpaceAssetMeta>) 
 }
 
 fn try_pending_fetch() {
+    FETCH_ATTEMPTS.with(|attempts| attempts.borrow_mut().clear());
     let pending: Vec<PendingFetch> =
         PENDING_FETCH.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
     let mut kept = Vec::new();
@@ -1328,10 +1875,74 @@ fn try_pending_fetch() {
             kept.push(entry);
         }
     }
-    PENDING_FETCH.with(|slot| *slot.borrow_mut() = kept);
+    PENDING_FETCH.with(|slot| slot.borrow_mut().extend(kept));
+}
+
+fn handle_unavailable_fetch(space_id: Uuid, peer: &str, hashes: Vec<Vec<u8>>) {
+    let Some(space) = space_by_id(space_id) else {
+        return;
+    };
+    let Some(root) = space_root_of(space_id) else {
+        return;
+    };
+    let missing = missing_from_ops(&root, &load_ops(space_id));
+    for hash in hashes {
+        let was_requested = FETCH_SOURCES.with(|sources| {
+            sources
+                .borrow()
+                .get(&(space_id, hash.clone()))
+                .is_some_and(|source| source == peer)
+        });
+        if !was_requested {
+            continue;
+        }
+        FETCH_SOURCES.with(|sources| sources.borrow_mut().remove(&(space_id, hash.clone())));
+        FETCHING_HASHES.with(|fetching| fetching.borrow_mut().remove(&(space_id, hash.clone())));
+        let Some(asset) = missing.iter().find(|asset| asset.content_hash == hash) else {
+            continue;
+        };
+        let next = space.members.iter().find(|member| {
+            Some(member.id.as_str())
+                != SPACES
+                    .with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()))
+                    .as_deref()
+                && ONLINE_PEERS.with(|peers| peers.borrow().contains_key(&member.id))
+                && FETCH_ATTEMPTS.with(|attempts| {
+                    !attempts
+                        .borrow()
+                        .get(&(space_id, hash.clone()))
+                        .is_some_and(|peers| peers.contains(&member.id))
+                })
+        });
+        if let Some(next) = next {
+            send_fetch(
+                space_id,
+                vec![asset.clone()],
+                &next.id,
+                &peer_addrs(&next.id),
+            );
+        } else {
+            push_pending(space_id, vec![asset.clone()], false);
+        }
+    }
 }
 
 fn send_fetch(space_id: Uuid, items: Vec<SpaceAssetMeta>, peer: &str, addrs: &[String]) {
+    FETCH_SOURCES.with(|sources| {
+        let mut sources = sources.borrow_mut();
+        for asset in &items {
+            sources.insert((space_id, asset.content_hash.clone()), peer.to_string());
+        }
+    });
+    FETCH_ATTEMPTS.with(|attempts| {
+        let mut attempts = attempts.borrow_mut();
+        for asset in &items {
+            attempts
+                .entry((space_id, asset.content_hash.clone()))
+                .or_default()
+                .insert(peer.to_string());
+        }
+    });
     for chunk in items.chunks(MAX_FETCH_ITEMS) {
         let Some(line) = ui_viewmodels::space_send_line(
             peer,
@@ -1341,9 +1952,30 @@ fn send_fetch(space_id: Uuid, items: Vec<SpaceAssetMeta>, peer: &str, addrs: &[S
                 items: chunk.to_vec(),
             },
         ) else {
-            return;
+            FETCHING_HASHES.with(|fetching| {
+                let mut fetching = fetching.borrow_mut();
+                for asset in chunk {
+                    fetching.remove(&(space_id, asset.content_hash.clone()));
+                }
+            });
+            push_pending(space_id, chunk.to_vec(), false);
+            continue;
         };
-        crate::share_write_line(&line);
+        FETCHING_HASHES.with(|fetching| {
+            let mut fetching = fetching.borrow_mut();
+            for asset in chunk {
+                fetching.insert((space_id, asset.content_hash.clone()));
+            }
+        });
+        if !crate::share_write_line(&line) {
+            FETCHING_HASHES.with(|fetching| {
+                let mut fetching = fetching.borrow_mut();
+                for asset in chunk {
+                    fetching.remove(&(space_id, asset.content_hash.clone()));
+                }
+            });
+            push_pending(space_id, chunk.to_vec(), false);
+        }
     }
 }
 
@@ -1397,6 +2029,9 @@ pub fn join_by_code(ui: &AppWindow, code: &str) {
         return;
     }
     let _ = self_id;
+    SPACE_JOIN_PENDING.with(|pending| {
+        *pending.borrow_mut() = Some((parsed.space_id, parsed.owner_id.clone()));
+    });
     crate::share_write_line(&format!(
         "SPACE_JOIN\t{}\t{}\t{self_name}",
         parsed.owner_id, code
@@ -1418,18 +2053,33 @@ fn try_auto_accept(payload: &str) -> bool {
         return false;
     };
     let Some(ui) = host().and_then(|h| h.ui.upgrade()) else {
-        return false;
+        crate::share_write_line(&format!("REJECT\t{}\t导入服务不可用", manifest.batch_id));
+        return true;
     };
+    let authenticated_sender = ui_viewmodels::authenticated_transfer_sender(payload);
     let known = space_by_id(space_id).is_some_and(|space| {
-        SPACES.with(|vm| {
-            vm.borrow()
-                .identity()
-                .is_some_and(|(id, _)| space.is_member(id))
-        })
+        authenticated_sender
+            .as_ref()
+            .is_some_and(|id| space.is_member(id))
+            && SPACES.with(|vm| {
+                vm.borrow()
+                    .identity()
+                    .is_some_and(|(id, _)| space.is_member(id))
+            })
     });
     if known {
         SPACE_BATCHES.with(|slot| {
-            slot.borrow_mut().insert(manifest.batch_id, space_id);
+            slot.borrow_mut().insert(
+                manifest.batch_id,
+                ReceivedBatch {
+                    space_id,
+                    hashes: manifest
+                        .items
+                        .iter()
+                        .map(|item| item.sha256_lower())
+                        .collect(),
+                },
+            );
         });
         crate::share_write_line(&format!("ACCEPT\t{}", manifest.batch_id));
         notice(
@@ -1443,51 +2093,193 @@ fn try_auto_accept(payload: &str) -> bool {
     true
 }
 
-/// STAGED 拦截：空间批次落空间根导入（同一导入管线，收件箱语义），乐观
-/// ACK——本地导入若失败，下次抗熵发现字节仍缺会自愈重取。
+/// 暂存成功不代表入库成功；回执只由本批次的导入终态发出。
 fn try_space_staged(payload: &str) -> bool {
     let Some((batch, paths)) = ui_viewmodels::parse_staged_payload(payload) else {
         return false;
     };
-    let Some(space_id) = SPACE_BATCHES.with(|slot| slot.borrow_mut().remove(&batch)) else {
+    let Some(received) = SPACE_BATCHES.with(|slot| slot.borrow_mut().remove(&batch)) else {
         return false;
     };
-    let Some(scope_host) = host() else {
+    let Some(root) = space_root_of(received.space_id) else {
+        crate::share_write_line(&format!("NACK\t{batch}\t团队目录不可用"));
         return true;
     };
-    let Some(ui) = scope_host.ui.upgrade() else {
+    if host().is_none() {
+        crate::share_write_line(&format!("NACK\t{batch}\t导入服务不可用"));
         return true;
-    };
-    add_paths_to_space(space_id, paths, scope_host.importing.clone());
-    crate::share_write_line(&format!("ACK\t{batch}"));
-    notice(
-        &ui,
-        ui_viewmodels::notifications::Severity::Info,
-        "空间素材已接收，正在导入本机副本…".to_string(),
-    );
+    }
+    let queued = STAGED_IMPORTS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        if pending.len() >= 64 {
+            return false;
+        }
+        pending.push_back((batch, received, root, paths));
+        true
+    });
+    if queued {
+        resume_pending_imports();
+    } else {
+        crate::share_write_line(&format!("NACK\t{batch}\t接收队列已满"));
+    }
     true
 }
 
+pub fn resume_pending_imports() {
+    let Some(scope_host) = host() else { return };
+    while !scope_host.importing.load(Ordering::SeqCst) {
+        if let Some(id) = PENDING_PURGES.with(|pending| pending.borrow_mut().pop_first()) {
+            if let Some(root) = space_root_of(id).filter(|_| space_by_id(id).is_some()) {
+                let ops = load_ops(id);
+                let active = active_space_assets(&ops);
+                let known: std::collections::HashSet<_> = ops
+                    .iter()
+                    .filter_map(|op| match &op.op {
+                        SpaceOpKind::Add { asset } => Some(asset.content_hash.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let uuids: Vec<_> = ui_viewmodels::content_paths(&root)
+                    .into_iter()
+                    .filter(|(hash, _, _)| known.contains(hash) && !active.contains_key(hash))
+                    .map(|(_, uuid, _)| uuid)
+                    .collect();
+                if !uuids.is_empty() {
+                    spawn_purge(root, uuids, scope_host.importing.clone());
+                }
+            }
+            continue;
+        }
+        let next = STAGED_IMPORTS.with(|pending| pending.borrow_mut().pop_front());
+        let Some((batch, received, root, paths)) = next else {
+            break;
+        };
+        let space_id = received.space_id;
+        if space_by_id(space_id).is_none() || space_root_of(space_id).as_ref() != Some(&root) {
+            crate::share_write_line(&format!("NACK\t{batch}\t目标团队已变化"));
+            continue;
+        }
+        add_paths_to_space_for_batch(
+            space_id,
+            Some((batch, received.hashes)),
+            paths,
+            scope_host.importing.clone(),
+        );
+    }
+}
+
+pub fn remove_assets(id: Uuid, local_uuids: &[String]) -> Result<(), String> {
+    let space = space_by_id(id).ok_or("目标团队不存在")?;
+    let root = space_root_of(id).ok_or("团队目录不可用")?;
+    let author = SPACES
+        .with(|vm| vm.borrow().identity().map(|(id, _)| id.to_string()))
+        .ok_or("共享引擎尚未就绪")?;
+    if !emit_missing_add_ops(id, false) {
+        return Err("团队操作记录写入失败".into());
+    }
+    let ops = load_ops(id);
+    let chosen: std::collections::HashSet<_> = local_uuids.iter().collect();
+    let hashes: std::collections::HashSet<_> = ui_viewmodels::content_paths(&root)
+        .into_iter()
+        .filter(|(_, uuid, _)| chosen.contains(uuid))
+        .map(|(hash, _, _)| hash)
+        .collect();
+    let mut active = std::collections::BTreeMap::new();
+    let mut added_by = std::collections::HashMap::new();
+    for op in &ops {
+        match &op.op {
+            SpaceOpKind::Add { asset } => {
+                active.insert(asset.uuid, asset.clone());
+                added_by.insert(asset.uuid, op.author.clone());
+            }
+            SpaceOpKind::Remove { asset_uuid } => {
+                active.remove(asset_uuid);
+            }
+            _ => {}
+        }
+    }
+    let lamport = ops.iter().map(|op| op.lamport).max().unwrap_or(0);
+    let mut fresh = Vec::new();
+    for (offset, asset) in active
+        .into_values()
+        .filter(|asset| hashes.contains(&asset.content_hash))
+        .enumerate()
+    {
+        let lamport = lamport
+            .checked_add(offset as u64 + 1)
+            .ok_or("团队操作序号已达上限")?;
+        let op = SpaceOp {
+            space_id: id,
+            lamport,
+            author: author.clone(),
+            ts: now_secs(),
+            op: SpaceOpKind::Remove {
+                asset_uuid: asset.uuid,
+            },
+        };
+        if !op.permits(&space, &added_by) {
+            return Err("只有团队主或素材添加者可以移除该素材".into());
+        }
+        fresh.push(op);
+    }
+    if !append_ops(id, &fresh) {
+        return Err("团队操作记录写入失败".into());
+    }
+    push_space_state();
+    broadcast_ops(id, &fresh);
+    if let Some(ui) = host().and_then(|host| host.ui.upgrade()) {
+        materialize_space_ops(&ui, &space, &load_ops(id));
+    }
+    refresh_share_projection(true);
+    Ok(())
+}
+
 /// 空间库 purge（Remove op 物化）：单写者纪律，子进程执行。
-fn spawn_purge(root: &Path, uuids: &[String]) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = std::process::Command::new(crate::helper_exe("sample-library"));
-    command
-        .arg("--cmd")
-        .arg("purge")
-        .arg("--library")
-        .arg(root)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+fn spawn_purge(root: PathBuf, uuids: Vec<String>, importing: Arc<AtomicBool>) {
+    if importing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        if let Some(id) = space_id_of_root(&root) {
+            PENDING_PURGES.with(|pending| pending.borrow_mut().insert(id));
+        }
+        return;
+    }
+    let mut args = vec![
+        "--cmd".into(),
+        "purge".into(),
+        "--library".into(),
+        root.to_string_lossy().into_owned(),
+    ];
     for uuid in uuids {
-        command.arg("--uuid").arg(uuid);
+        args.extend(["--uuid".into(), uuid]);
     }
-    command.creation_flags(CREATE_NO_WINDOW);
-    match command.spawn() {
-        Ok(_) => logging::info!("空间 Remove 物化：purge {} 项", uuids.len()),
-        Err(error) => logging::warn!("空间 purge 子进程启动失败: {error}"),
-    }
+    let _ = crate::ChildTask::new(crate::helper_exe("sample-library.exe"), args)
+        .with_finished(move |success, message| {
+            let root = root.clone();
+            let importing_ui = importing.clone();
+            let queued = slint::invoke_from_event_loop(move || {
+                importing_ui.store(false, Ordering::SeqCst);
+                if success {
+                    push_space_state();
+                    crate::refresh_import_target(&root);
+                    if active().is_some_and(|scope| scope.root == root) {
+                        if let Some(id) = space_id_of_root(&root) {
+                            enter_space(id);
+                        }
+                    }
+                    refresh_share_projection(true);
+                } else {
+                    logging::warn!("团队 Remove 物化失败: {message}");
+                }
+                resume_pending_imports();
+            });
+            if queued.is_err() {
+                importing.store(false, Ordering::SeqCst);
+                logging::warn!("团队 Remove 完成事件无法送达 UI");
+            }
+        })
+        .run_in_background();
 }
 
 #[cfg(test)]
@@ -1499,9 +2291,39 @@ mod tests {
     };
     use ui_viewmodels::{FacetIndex, ShareVm, Sorter};
 
+    type UiEvent = Box<dyn FnOnce() + Send>;
+    static TEST_EVENTS: std::sync::Mutex<Option<std::sync::mpsc::Sender<UiEvent>>> =
+        std::sync::Mutex::new(None);
+
+    thread_local! {
+        static TEST_PROXY_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    struct TestProxy;
+
+    impl slint::platform::EventLoopProxy for TestProxy {
+        fn quit_event_loop(&self) -> Result<(), slint::EventLoopError> {
+            Ok(())
+        }
+        fn invoke_from_event_loop(&self, event: UiEvent) -> Result<(), slint::EventLoopError> {
+            let sender = TEST_EVENTS.lock().unwrap().clone();
+            sender
+                .ok_or(slint::EventLoopError::EventLoopTerminated)?
+                .send(event)
+                .map_err(|_| slint::EventLoopError::EventLoopTerminated)
+        }
+    }
+
     struct TestPlatform;
 
     impl slint::platform::Platform for TestPlatform {
+        fn new_event_loop_proxy(&self) -> Option<Box<dyn slint::platform::EventLoopProxy>> {
+            TEST_PROXY_ENABLED.with(|enabled| {
+                enabled
+                    .get()
+                    .then(|| Box::new(TestProxy) as Box<dyn slint::platform::EventLoopProxy>)
+            })
+        }
         fn create_window_adapter(
             &self,
         ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
@@ -1580,6 +2402,16 @@ mod tests {
             WORKER_SESSION_PENDING.with(|pending| pending.set(false));
             ONLINE_PEERS.with(|peers| peers.borrow_mut().clear());
             SYNCED_PEERS.with(|peers| peers.borrow_mut().clear());
+            PUBLISHED_OPS.with(|ops| ops.borrow_mut().clear());
+            SPACE_JOIN_PENDING.with(|pending| pending.borrow_mut().take());
+            SPACE_BATCHES.with(|batches| batches.borrow_mut().clear());
+            PENDING_FETCH.with(|pending| pending.borrow_mut().clear());
+            STAGED_IMPORTS.with(|pending| pending.borrow_mut().clear());
+            PENDING_PURGES.with(|pending| pending.borrow_mut().clear());
+            FETCHING_HASHES.with(|fetching| fetching.borrow_mut().clear());
+            FETCH_ATTEMPTS.with(|attempts| attempts.borrow_mut().clear());
+            FETCH_SOURCES.with(|sources| sources.borrow_mut().clear());
+            PULL_CURSORS.with(|cursors| cursors.borrow_mut().clear());
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -1640,6 +2472,717 @@ mod tests {
         serde_json::from_str(json).expect("sent state must be valid JSON")
     }
 
+    fn member_space(fixture: &Fixture) -> (SpaceMeta, String) {
+        let id = SPACES.with(|slot| slot.borrow_mut().create_space("team", 1).unwrap());
+        let peer = "b".repeat(52);
+        let mut meta = space_by_id(id).unwrap();
+        meta.members.push(ui_viewmodels::RosterMember {
+            id: peer.clone(),
+            name: "member".into(),
+        });
+        SPACES.with(|slot| slot.borrow_mut().apply_join(meta.clone(), 1).unwrap());
+        assert!(meta.is_member(&fixture.owner));
+        (meta, peer)
+    }
+
+    fn sample_add(meta: &SpaceMeta, lamport: u64) -> SpaceOp {
+        SpaceOp {
+            space_id: meta.id,
+            lamport,
+            author: meta.owner_id.clone(),
+            ts: 1,
+            op: SpaceOpKind::Add {
+                asset: SpaceAssetMeta {
+                    uuid: Uuid::new_v4(),
+                    file_name: "sample.txt".into(),
+                    kind: ui_viewmodels::SpaceAssetKind::Text,
+                    size_bytes: 4,
+                    content_hash: vec![lamport as u8; 32],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn startup_syncs_authorized_members_without_device_discovery() {
+        let fixture = Fixture::new();
+        let (_, peer) = member_space(&fixture);
+        let lines = sent_lines(|| fixture.event(&format!("READY\t{}\towner", fixture.owner)));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("SPACE_SYNC\t{peer}\t")),
+            "persisted members must be dialed without DEVICE"
+        );
+    }
+
+    #[test]
+    fn authenticated_ops_fetch_without_device_and_replays_stop() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let op = sample_add(&meta, 1);
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::Ops {
+                    ops: vec![op.clone()],
+                },
+            )
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("SYNC_SEND\t{peer}\t"))
+                    && line.contains("\"fetch\"")),
+            "an authenticated member must be usable for missing bytes without DEVICE"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("SPACE_SYNC\t")),
+            "new ops must continue paginated pull"
+        );
+        let replay = sent_lines(|| {
+            handle_space_message(&fixture.ui, &peer, SpaceMessage::Ops { ops: vec![op] })
+        });
+        assert!(
+            replay.is_empty(),
+            "replayed ops must not create a sync loop"
+        );
+    }
+
+    #[test]
+    fn joining_without_device_fetches_existing_assets() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        SPACES.with(|slot| {
+            slot.borrow_mut().leave_space(meta.id);
+        });
+        let mut remote = meta;
+        remote.owner_id = peer.clone();
+        let op = sample_add(&remote, 1);
+        SPACE_JOIN_PENDING.with(|pending| *pending.borrow_mut() = Some((remote.id, peer.clone())));
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::JoinOk {
+                    meta: remote,
+                    ops: vec![op],
+                },
+            )
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("SYNC_SEND\t{peer}\t"))
+                    && line.contains("\"fetch\"")),
+            "JoinOk must immediately fetch existing bytes without DEVICE"
+        );
+    }
+
+    #[test]
+    fn completed_team_import_publishes_new_ops_after_membership_sync() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let root = space_root_of(meta.id).unwrap();
+        ui_viewmodels::ensure_library_skeleton(&root).unwrap();
+        append_ops(meta.id, &[sample_add(&meta, 1)]);
+        let lines = sent_lines(|| on_space_import_finished(&root, false).unwrap());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("SYNC_SEND\t{peer}\t"))
+                    && line.contains("\"ops\"")),
+            "completed team changes must actively publish operations, not only update a local book"
+        );
+    }
+
+    #[test]
+    fn removed_assets_are_not_fetched_or_retained_in_pending() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let add = sample_add(&meta, 1);
+        let SpaceOpKind::Add { asset } = &add.op else {
+            unreachable!()
+        };
+        let asset = asset.clone();
+        push_pending(meta.id, vec![asset.clone()], true);
+        let remove = SpaceOp {
+            space_id: meta.id,
+            lamport: 2,
+            author: meta.owner_id.clone(),
+            ts: 2,
+            op: SpaceOpKind::Remove {
+                asset_uuid: asset.uuid,
+            },
+        };
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::Ops {
+                    ops: vec![remove.clone(), add.clone()],
+                },
+            )
+        });
+        assert!(!lines.iter().any(|line| line.contains("\"fetch\"")));
+        assert_eq!(pending_sync_count(), 0);
+        let root = space_root_of(meta.id).unwrap();
+        assert!(missing_from_ops(&root, &[add, remove]).is_empty());
+    }
+
+    #[test]
+    fn unsolicited_join_does_not_consume_expected_owner() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        SPACES.with(|slot| {
+            slot.borrow_mut().leave_space(meta.id);
+        });
+        SPACE_JOIN_PENDING.with(|pending| *pending.borrow_mut() = Some((meta.id, peer.clone())));
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &"c".repeat(52),
+                SpaceMessage::JoinOk {
+                    meta: meta.clone(),
+                    ops: Vec::new(),
+                },
+            )
+        });
+        assert!(lines.is_empty());
+        assert!(space_by_id(meta.id).is_none());
+        assert_eq!(
+            SPACE_JOIN_PENDING.with(|pending| pending.borrow().clone()),
+            Some((meta.id, peer))
+        );
+    }
+
+    #[test]
+    fn empty_pages_and_nonmember_ops_do_not_echo() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        assert!(sent_lines(|| handle_space_message(
+            &fixture.ui,
+            &peer,
+            SpaceMessage::Ops { ops: Vec::new() }
+        ))
+        .is_empty());
+        assert!(sent_lines(|| handle_space_message(
+            &fixture.ui,
+            &"c".repeat(52),
+            SpaceMessage::Ops {
+                ops: vec![sample_add(&meta, 1)]
+            }
+        ))
+        .is_empty());
+        assert!(load_ops(meta.id).is_empty());
+    }
+
+    #[test]
+    fn staged_busy_batch_waits_for_idle_without_early_receipt() {
+        let fixture = Fixture::new();
+        let (meta, _) = member_space(&fixture);
+        let batch = Uuid::new_v4();
+        SPACE_BATCHES.with(|batches| {
+            batches.borrow_mut().insert(
+                batch,
+                ReceivedBatch {
+                    space_id: meta.id,
+                    hashes: vec!["00".repeat(32)],
+                },
+            )
+        });
+        host().unwrap().importing.store(true, Ordering::SeqCst);
+        let payload = format!(
+            "{batch}\t{}",
+            serde_json::to_string(&vec![fixture.dir.join("sample.txt")]).unwrap()
+        );
+        let lines = sent_lines(|| assert!(try_space_staged(&payload)));
+        assert!(
+            lines.is_empty(),
+            "a staged batch waits without claiming delivery"
+        );
+        assert_eq!(STAGED_IMPORTS.with(|pending| pending.borrow().len()), 1);
+        assert!(sent_lines(|| assert!(!try_space_staged(&payload))).is_empty());
+        SPACES.with(|spaces| {
+            spaces.borrow_mut().leave_space(meta.id);
+        });
+        host().unwrap().importing.store(false, Ordering::SeqCst);
+        let refused = sent_lines(resume_pending_imports);
+        assert_eq!(
+            refused
+                .iter()
+                .filter(|line| line.starts_with(&format!("NACK\t{batch}\t")))
+                .count(),
+            1
+        );
+        assert!(STAGED_IMPORTS.with(|pending| pending.borrow().is_empty()));
+    }
+
+    #[test]
+    fn incoming_team_bytes_require_authenticated_member_metadata() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let batch = Uuid::new_v4();
+        let mut manifest = serde_json::json!({
+            "batch_id": batch,
+            "sender_name": "member",
+            "space_id": meta.id,
+            "items": [{
+                "asset_uuid": Uuid::new_v4(),
+                "file_name": "sample.txt",
+                "kind": ui_viewmodels::AssetKind::Text,
+                "size_bytes": 4,
+                "sha256_hex": "00".repeat(32),
+                "category_hint": null
+            }]
+        });
+        let missing = sent_lines(|| assert!(try_auto_accept(&manifest.to_string())));
+        assert!(missing
+            .iter()
+            .any(|line| line.starts_with(&format!("REJECT\t{batch}\t"))));
+        manifest["authenticated_sender_id"] = serde_json::json!("c".repeat(52));
+        let outsider = sent_lines(|| assert!(try_auto_accept(&manifest.to_string())));
+        assert!(outsider
+            .iter()
+            .any(|line| line.starts_with(&format!("REJECT\t{batch}\t"))));
+        manifest["authenticated_sender_id"] = serde_json::json!(peer);
+        let member = sent_lines(|| assert!(try_auto_accept(&manifest.to_string())));
+        assert_eq!(member, vec![format!("ACCEPT\t{batch}")]);
+    }
+
+    #[test]
+    fn cursor_pages_defer_materialization_and_replays_terminate() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let add = sample_add(&meta, 1);
+        let SpaceOpKind::Add { asset } = &add.op else {
+            unreachable!()
+        };
+        let remove = SpaceOp {
+            space_id: meta.id,
+            lamport: 2,
+            author: meta.owner_id.clone(),
+            ts: 2,
+            op: SpaceOpKind::Remove {
+                asset_uuid: asset.uuid,
+            },
+        };
+        let _ = sent_lines(|| start_peer_sync(&peer));
+        let first = SpaceMessage::OpsPage {
+            space_id: meta.id,
+            after: None,
+            next: Some(ui_viewmodels::OpKey::of(&add)),
+            ops: vec![add.clone()],
+        };
+        let lines = sent_lines(|| handle_space_message(&fixture.ui, &peer, first.clone()));
+        assert!(lines.iter().any(|line| line.contains("\"pull_ops\"")));
+        assert!(!lines.iter().any(|line| line.contains("\"fetch\"")));
+        assert!(sent_lines(|| handle_space_message(&fixture.ui, &peer, first)).is_empty());
+        let middle = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::OpsPage {
+                    space_id: meta.id,
+                    after: Some(ui_viewmodels::OpKey::of(&add)),
+                    next: Some(ui_viewmodels::OpKey::of(&remove)),
+                    ops: vec![remove.clone()],
+                },
+            )
+        });
+        assert!(middle.iter().any(|line| line.contains("\"pull_ops\"")));
+        assert!(!middle.iter().any(|line| line.contains("\"fetch\"")));
+        let terminal = SpaceMessage::OpsPage {
+            space_id: meta.id,
+            after: Some(ui_viewmodels::OpKey::of(&remove)),
+            next: None,
+            ops: Vec::new(),
+        };
+        let last = sent_lines(|| handle_space_message(&fixture.ui, &peer, terminal.clone()));
+        assert!(!last
+            .iter()
+            .any(|line| line.contains("\"pull_ops\"") || line.contains("\"fetch\"")));
+        assert!(PULL_CURSORS.with(|cursors| cursors.borrow().is_empty()));
+        assert!(sent_lines(|| handle_space_message(&fixture.ui, &peer, terminal)).is_empty());
+        assert_eq!(load_ops(meta.id).len(), 2);
+    }
+
+    #[test]
+    fn restarting_sync_resets_cursor_and_failed_log_writes_do_not_advance() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let op = sample_add(&meta, 1);
+        PULL_CURSORS.with(|cursors| {
+            cursors
+                .borrow_mut()
+                .insert((peer.clone(), meta.id), Some(ui_viewmodels::OpKey::of(&op)));
+        });
+        let _ = sent_lines(|| start_peer_sync(&peer));
+        assert_eq!(
+            PULL_CURSORS.with(|cursors| cursors.borrow().get(&(peer.clone(), meta.id)).cloned()),
+            Some(None)
+        );
+        std::fs::create_dir_all(ops_path(meta.id).unwrap()).unwrap();
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::OpsPage {
+                    space_id: meta.id,
+                    after: None,
+                    next: Some(ui_viewmodels::OpKey::of(&op)),
+                    ops: vec![op],
+                },
+            )
+        });
+        assert!(lines.is_empty());
+        assert!(load_ops(meta.id).is_empty());
+        assert_eq!(
+            PULL_CURSORS.with(|cursors| cursors.borrow().get(&(peer.clone(), meta.id)).cloned()),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn failed_fetch_waits_for_a_new_event_and_deduplicates_pending_items() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let op = sample_add(&meta, 1);
+        let _ = sent_lines(|| {
+            handle_space_message(&fixture.ui, &peer, SpaceMessage::Ops { ops: vec![op] })
+        });
+        assert_eq!(FETCHING_HASHES.with(|hashes| hashes.borrow().len()), 1);
+        let failure = format!("SPACE_FETCH_FAILED\t{peer}\t{}", meta.id);
+        assert!(sent_lines(|| assert!(intercept_worker_line(&failure))).is_empty());
+        assert!(sent_lines(|| assert!(intercept_worker_line(&failure))).is_empty());
+        assert!(FETCHING_HASHES.with(|hashes| hashes.borrow().is_empty()));
+        assert_eq!(
+            PENDING_FETCH.with(|pending| pending
+                .borrow()
+                .iter()
+                .map(|entry| entry.items.len())
+                .sum::<usize>()),
+            1
+        );
+        let retried =
+            sent_lines(|| fixture.event(&format!("DEVICE\t{peer}\tmember\t127.0.0.1:9000")));
+        assert_eq!(
+            retried
+                .iter()
+                .filter(|line| line.contains("\"fetch\""))
+                .count(),
+            1
+        );
+        assert_eq!(pending_sync_count(), 0);
+    }
+
+    #[test]
+    fn unavailable_holder_tries_each_member_once_then_waits() {
+        let fixture = Fixture::new();
+        let (mut meta, peer) = member_space(&fixture);
+        let other = "c".repeat(52);
+        meta.members.push(ui_viewmodels::RosterMember {
+            id: other.clone(),
+            name: "replica".into(),
+        });
+        SPACES.with(|vm| vm.borrow_mut().apply_join(meta.clone(), 1).unwrap());
+        ONLINE_PEERS.with(|peers| {
+            peers.borrow_mut().insert(peer.clone(), Vec::new());
+            peers.borrow_mut().insert(other.clone(), Vec::new());
+        });
+        let op = sample_add(&meta, 1);
+        let SpaceOpKind::Add { asset } = &op.op else {
+            unreachable!()
+        };
+        let asset = asset.clone();
+        assert!(append_ops(meta.id, &[op]));
+        let _ = sent_lines(|| send_fetch(meta.id, vec![asset.clone()], &peer, &[]));
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &peer,
+                SpaceMessage::FetchUnavailable {
+                    space_id: meta.id,
+                    hashes: vec![asset.content_hash.clone()],
+                },
+            )
+        });
+        assert!(lines
+            .iter()
+            .any(|line| line.starts_with(&format!("SYNC_SEND\t{other}\t"))
+                && line.contains("\"fetch\"")));
+        let lines = sent_lines(|| {
+            handle_space_message(
+                &fixture.ui,
+                &other,
+                SpaceMessage::FetchUnavailable {
+                    space_id: meta.id,
+                    hashes: vec![asset.content_hash.clone()],
+                },
+            )
+        });
+        assert!(lines.is_empty());
+        assert!(FETCHING_HASHES.with(|fetching| fetching.borrow().is_empty()));
+        assert_eq!(
+            PENDING_FETCH.with(|pending| pending
+                .borrow()
+                .iter()
+                .map(|entry| entry.items.len())
+                .sum::<usize>()),
+            1
+        );
+    }
+
+    #[test]
+    fn staged_queue_is_bounded_and_overflow_never_claims_delivery() {
+        let fixture = Fixture::new();
+        let (meta, _) = member_space(&fixture);
+        host().unwrap().importing.store(true, Ordering::SeqCst);
+        let lines = sent_lines(|| {
+            for _ in 0..65 {
+                let batch = Uuid::new_v4();
+                SPACE_BATCHES.with(|batches| {
+                    batches.borrow_mut().insert(
+                        batch,
+                        ReceivedBatch {
+                            space_id: meta.id,
+                            hashes: vec!["00".repeat(32)],
+                        },
+                    )
+                });
+                let payload = format!(
+                    "{batch}\t{}",
+                    serde_json::to_string(&vec![fixture.dir.join("sample.txt")]).unwrap()
+                );
+                assert!(try_space_staged(&payload));
+            }
+        });
+        assert_eq!(STAGED_IMPORTS.with(|queue| queue.borrow().len()), 64);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with("NACK\t"))
+                .count(),
+            1
+        );
+        assert!(!lines.iter().any(|line| line.starts_with("ACK\t")));
+    }
+
+    #[test]
+    #[ignore = "requires freshly built sample-library.exe; run alone with --test-threads=1"]
+    fn staged_real_import_receipts_only_after_durable_content() {
+        TEST_PROXY_ENABLED.with(|enabled| enabled.set(true));
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let root = space_root_of(meta.id).unwrap();
+        ui_viewmodels::ensure_library_skeleton(&root).unwrap();
+        let helper = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("sample-library.exe");
+        assert!(
+            helper.is_file(),
+            "build sample-library before this acceptance test"
+        );
+        let helpers = fixture.dir.join("helpers");
+        std::fs::create_dir(&helpers).unwrap();
+        std::fs::copy(helper, helpers.join("sample-library.exe")).unwrap();
+        crate::TEST_HELPER_DIR.with(|slot| *slot.borrow_mut() = Some(helpers));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *TEST_EVENTS.lock().unwrap() = Some(sender);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                *TEST_EVENTS.lock().unwrap() = None;
+                crate::TEST_HELPER_DIR.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let importing = host().unwrap().importing.clone();
+        let hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let source = fixture.dir.join("received sample.txt");
+        std::fs::write(&source, b"test").unwrap();
+        let mut add = sample_add(&meta, 1);
+        if let SpaceOpKind::Add { asset } = &mut add.op {
+            asset.content_hash = (0..64)
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hash[i..i + 2], 16).unwrap())
+                .collect();
+        }
+        assert!(append_ops(meta.id, &[add]));
+        let run = |source: &Path, expected_hash: &str| {
+            let batch = Uuid::new_v4();
+            let incoming = serde_json::json!({
+                "batch_id": batch, "sender_name": "member", "space_id": meta.id,
+                "authenticated_sender_id": peer,
+                "items": [{"asset_uuid": Uuid::new_v4(), "file_name": source.file_name().unwrap().to_str().unwrap(),
+                    "kind": ui_viewmodels::AssetKind::Text, "size_bytes": 4,
+                    "sha256_hex": expected_hash, "category_hint": null}]
+            });
+            let staged = format!("{batch}\t{}", serde_json::to_string(&vec![source]).unwrap());
+            let lines = sent_lines(|| {
+                assert!(try_auto_accept(&incoming.to_string()));
+                importing.store(true, Ordering::SeqCst);
+                assert!(try_space_staged(&staged));
+                assert!(
+                    ui_viewmodels::content_paths(&root).is_empty()
+                        || verify_received_hashes(meta.id, &[hash.into()]).is_ok()
+                );
+                // The user leaves the team view before the queued batch starts.
+                ACTIVE.with(|slot| *slot.borrow_mut() = None);
+                importing.store(false, Ordering::SeqCst);
+                resume_pending_imports();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while importing.load(Ordering::SeqCst) {
+                    let event = receiver
+                        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                        .expect("import completion event");
+                    event();
+                }
+                while let Ok(event) = receiver.try_recv() {
+                    event();
+                }
+            });
+            (batch, lines)
+        };
+        let (batch, lines) = run(&source, hash);
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| *line == &format!("ACK\t{batch}"))
+                .count(),
+            1
+        );
+        assert!(!lines.iter().any(|line| line.starts_with("NACK\t")));
+        verify_received_hashes(meta.id, &[hash.into()]).unwrap();
+        let rows = ui_viewmodels::content_paths(&root);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(std::fs::read(&rows[0].2).unwrap(), b"test");
+        assert!(ui_viewmodels::content_paths(&fixture.dir.join("main")).is_empty());
+        let publish = lines
+            .iter()
+            .position(|line| line.starts_with("SPACE_STATE\t"))
+            .unwrap();
+        let receipt = lines
+            .iter()
+            .position(|line| line.starts_with("ACK\t"))
+            .unwrap();
+        assert!(publish < receipt);
+        let unsupported = fixture.dir.join("unsupported.bin");
+        std::fs::write(&unsupported, b"data").unwrap();
+        let (batch, lines) = run(&unsupported, &"01".repeat(32));
+        assert!(!lines.iter().any(|line| line == &format!("ACK\t{batch}")));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with(&format!("NACK\t{batch}\t")))
+                .count(),
+            1
+        );
+        // Deletion waits for the same writer gate and removes every local replica row.
+        importing.store(true, Ordering::SeqCst);
+        let lines = sent_lines(|| remove_assets(meta.id, &[rows[0].1.clone()]).unwrap());
+        assert!(lines.iter().any(|line| line.contains("\"remove\"")));
+        assert_eq!(ui_viewmodels::content_paths(&root).len(), 1);
+        assert!(active_space_assets(&load_ops(meta.id)).is_empty());
+        let refreshed = Rc::new(std::cell::Cell::new(false));
+        let observed = refreshed.clone();
+        let expected_root = root.clone();
+        crate::IMPORT_REFRESH.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::new(move |target| {
+                assert_eq!(target, expected_root);
+                observed.set(true);
+            }))
+        });
+        let _ = sent_lines(|| {
+            importing.store(false, Ordering::SeqCst);
+            resume_pending_imports();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while importing.load(Ordering::SeqCst) {
+                receiver
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .expect("purge completion event")();
+            }
+        });
+        crate::IMPORT_REFRESH.with(|slot| *slot.borrow_mut() = None);
+        assert!(refreshed.get());
+        assert!(ui_viewmodels::content_paths(&root).is_empty());
+        assert!(missing_from_ops(&root, &load_ops(meta.id)).is_empty());
+
+        // Explicit local reimport of the removed bytes (right-click "共享到团队"):
+        // a fresh op-domain Add must be authored, published once, and the row
+        // must survive materialization instead of being purged again.
+        let reimport = sent_lines(|| {
+            add_paths_to_space_for_batch(meta.id, None, vec![source.clone()], importing.clone());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while importing.load(Ordering::SeqCst) {
+                let event = receiver
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .expect("reimport completion event");
+                event();
+            }
+            while let Ok(event) = receiver.try_recv() {
+                event();
+            }
+        });
+        assert!(
+            !reimport
+                .iter()
+                .any(|line| line.starts_with("NACK\t") || line.starts_with("ACK\t")),
+            "an explicit local import carries no transfer receipt: {reimport:?}"
+        );
+        let ops = load_ops(meta.id);
+        let hash_bytes: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hash[i..i + 2], 16).unwrap())
+            .collect();
+        assert!(
+            active_space_assets(&ops).contains_key(&hash_bytes),
+            "explicit reimport after Remove must restore the content as active: {ops:?}"
+        );
+        assert_eq!(ui_viewmodels::content_paths(&root).len(), 1);
+        assert!(
+            reimport
+                .iter()
+                .filter(|line| line.starts_with(&format!("SYNC_SEND\t{peer}\t"))
+                    && line.contains("\"add\""))
+                .count()
+                <= 1,
+            "the fresh Add must be published once per peer: {reimport:?}"
+        );
+        // Reconciliation while the row awaits removal must not resurrect it.
+        let rows = ui_viewmodels::content_paths(&root);
+        assert_eq!(rows.len(), 1);
+        importing.store(true, Ordering::SeqCst);
+        let _ = sent_lines(|| remove_assets(meta.id, &[rows[0].1.clone()]).unwrap());
+        let before = load_ops(meta.id);
+        assert!(emit_missing_add_ops(meta.id, false));
+        assert_eq!(
+            load_ops(meta.id).len(),
+            before.len(),
+            "opening the view while a Remove purge is pending must not resurrect the asset"
+        );
+        importing.store(false, Ordering::SeqCst);
+        resume_pending_imports();
+        assert!(active_space_assets(&load_ops(meta.id)).is_empty());
+    }
+
+    #[test]
+    fn network_ready_and_device_events_keep_persisted_peers_reachable() {
+        let fixture = Fixture::new();
+        let (_, peer) = member_space(&fixture);
+        let lines = sent_lines(|| assert!(intercept_worker_line("NETWORK_READY")));
+        assert!(lines
+            .iter()
+            .any(|line| line == &format!("SPACE_SYNC\t{peer}\t")));
+        let _ = sent_lines(|| fixture.event(&format!("DEVICE\t{peer}\tmember\t127.0.0.1:9000")));
+        assert_eq!(peer_addrs(&peer), vec!["127.0.0.1:9000".to_string()]);
+    }
+
     #[test]
     fn worker_session_republishes_unchanged_identity_before_one_scan() {
         let fixture = Fixture::new();
@@ -1691,5 +3234,131 @@ mod tests {
         assert!(only_book(&sent_lines(|| leave_space(id))).spaces.is_empty());
         assert!(bound_space().is_none());
         assert!(sent_lines(|| leave_space(id)).is_empty());
+    }
+
+    #[test]
+    fn roster_and_new_member_add_in_one_page_are_authorized_in_order() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        let newcomer = "c".repeat(52);
+        // Owner admits the newcomer then the newcomer adds an asset — same page.
+        let mut roster_meta = meta.clone();
+        roster_meta.members.push(ui_viewmodels::RosterMember {
+            id: newcomer.clone(),
+            name: "replica".into(),
+        });
+        let roster = SpaceOp {
+            space_id: meta.id,
+            lamport: 1,
+            author: meta.owner_id.clone(),
+            ts: 1,
+            op: SpaceOpKind::Roster {
+                space: roster_meta.clone(),
+            },
+        };
+        let new_add = SpaceOp {
+            space_id: meta.id,
+            lamport: 2,
+            author: newcomer.clone(),
+            ts: 2,
+            op: SpaceOpKind::Add {
+                asset: SpaceAssetMeta {
+                    uuid: Uuid::new_v4(),
+                    file_name: "newcomer.txt".into(),
+                    kind: ui_viewmodels::SpaceAssetKind::Text,
+                    size_bytes: 4,
+                    content_hash: vec![9; 32],
+                },
+            },
+        };
+        let page = SpaceMessage::OpsPage {
+            space_id: meta.id,
+            after: None,
+            next: None,
+            ops: vec![roster.clone(), new_add.clone()],
+        };
+        let _ = sent_lines(|| {
+            PULL_CURSORS.with(|cursors| {
+                cursors.borrow_mut().insert((peer.clone(), meta.id), None);
+            });
+            handle_space_message(&fixture.ui, &peer, page.clone())
+        });
+        let ops = load_ops(meta.id);
+        assert!(
+            ops.contains(&roster) && ops.contains(&new_add),
+            "a page carrying Roster then the new member's Add must keep both: {ops:?}"
+        );
+        let space = space_by_id(meta.id).unwrap();
+        assert!(space.is_member(&newcomer), "roster must be applied");
+        // Older roster arriving later must not roll back the newer membership.
+        let stale = SpaceOp {
+            ts: 3,
+            ..SpaceOp {
+                space_id: meta.id,
+                lamport: 0,
+                author: meta.owner_id.clone(),
+                ts: 0,
+                op: SpaceOpKind::Roster {
+                    space: meta.clone(),
+                },
+            }
+            .clone()
+        };
+        let _ = sent_lines(|| {
+            handle_space_message(&fixture.ui, &peer, SpaceMessage::Ops { ops: vec![stale] })
+        });
+        let space = space_by_id(meta.id).unwrap();
+        assert!(
+            space.is_member(&newcomer),
+            "an older roster snapshot must not revoke newer membership"
+        );
+    }
+
+    #[test]
+    fn peer_active_session_triggers_one_bounded_reciprocal_pull() {
+        let fixture = Fixture::new();
+        let (meta, peer) = member_space(&fixture);
+        // The startup attempt already happened (peer was offline); the peer now
+        // initiates a pull session. No DEVICE line ever arrives.
+        let first =
+            sent_lines(|| assert!(intercept_worker_line(&format!("SPACE_PEER_ACTIVE\t{peer}"))));
+        assert!(
+            first
+                .iter()
+                .any(|line| line == &format!("SPACE_SYNC\t{peer}\t")),
+            "an authenticated pull session must wake one reciprocal sync"
+        );
+        // Our own offline increments must be published to the now-reachable peer.
+        let op = sample_add(&meta, 1);
+        assert!(append_ops(meta.id, std::slice::from_ref(&op)));
+        let lines =
+            sent_lines(|| assert!(intercept_worker_line(&format!("SPACE_PEER_ACTIVE\t{peer}"))));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("SYNC_SEND\t{peer}\t"))
+                    && line.contains("\"ops\"")),
+            "offline local ops must be broadcast to the peer that just pulled from us: {lines:?}"
+        );
+        // Repeat sessions must not loop: SYNCED_PEERS means "attempted".
+        let repeat =
+            sent_lines(|| assert!(intercept_worker_line(&format!("SPACE_PEER_ACTIVE\t{peer}"))));
+        assert!(
+            !repeat.iter().any(|line| line.starts_with("SPACE_SYNC\t")),
+            "repeated peer-active events must not re-trigger sync: {repeat:?}"
+        );
+        // A non-member identity gets nothing.
+        let outsider = sent_lines(|| {
+            assert!(intercept_worker_line(&format!(
+                "SPACE_PEER_ACTIVE\t{}",
+                "d".repeat(52)
+            )))
+        });
+        assert!(
+            !outsider
+                .iter()
+                .any(|line| line.starts_with("SPACE_SYNC\t") || line.starts_with("SYNC_SEND\t")),
+            "non-members must not be dialed"
+        );
     }
 }

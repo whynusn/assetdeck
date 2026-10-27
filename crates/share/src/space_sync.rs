@@ -5,10 +5,10 @@
 //! 解析面（M1 的域模型报文保留但 D90 后不再产生）。
 //!
 //! 协议形态（一问一答，双方各发起一次即双向收敛）：
-//! - [`SpaceMessage::Summary`]：我在这 spaces 里、手上有的 op 键全集
-//!   （断档全量比对——v1 不做区间压缩，空间 op 量级远低于阈值）；
-//! - [`SpaceMessage::Ops`]：应答方按差量补齐请求方缺失的 op（跨空间合并，
-//!   截断到 [`MAX_OPS_PER_MESSAGE`]；截断无害——下一轮 Summary 自愈）；
+//! - [`SpaceMessage::PullOps`] / [`SpaceMessage::OpsPage`]：生产抗熵按全序键
+//!   游标分页，每页至多 [`MAX_OPS_PER_MESSAGE`] 条；严格递增，终页不再续拉。
+//! - [`SpaceMessage::Summary`]：旧版本的有界键摘要，保留解析兼容。
+//! - [`SpaceMessage::Ops`]：主动发布的有界操作增量，也承接旧摘要差量应答；
 //! - [`SpaceMessage::Fetch`]：向持有者索取指定 content_hash 的字节。持有者
 //!   随后走**推送通道**投递（引擎的清单/哈希校验/暂存原样复用），索取方
 //!   对 space 清单免确认（入空间 = 同意接收，D90 的确认移位）；
@@ -17,7 +17,7 @@
 //!
 //! 可用性语义：同步只在「任意两成员连接」时发生，字节可向任一副本持有者
 //! 拉——不要求素材添加者在线。全员离线 = 无同步，各副本独立演进，下次
-//! 连接由 Summary 全量比对收敛（零 Timer 轮询，断档自愈沿用 M1-b 结论）。
+//! 连接由有界游标遍历收敛（零 Timer 轮询；分页协议要求双方均升级）。
 //!
 //! [`SpaceBookState`] 是 UI 推送给 worker 的服务册（worker 应答 Summary/
 //! Join、执行 Fetch 的唯一数据源，同 M1-b 的 SyncBook 整册替换模式）。
@@ -34,9 +34,9 @@ use crate::space::{SpaceAssetMeta, SpaceError, SpaceMeta, SpaceOp};
 
 /// 单条抗熵摘要最多覆盖的空间数（防御性上限；本地册通常 ≤ 个位数）。
 pub const MAX_SUMMARY_SPACES: usize = 32;
-/// 单个空间的摘要键上限（op 超过此数的空间在 v1 属异常形态，拒收防滥用）。
+/// 旧摘要协议的单空间键上限；生产游标分页不受此限制。
 pub const MAX_SUMMARY_KEYS: usize = 4096;
-/// 单条 Ops 应答的 op 数上限（截断无害：下一轮 Summary 自愈续传）。
+/// 单条 Ops 增量或 OpsPage 的操作数上限。
 pub const MAX_OPS_PER_MESSAGE: usize = 256;
 /// 单条 Fetch 的素材数上限（UI 侧分批索取）。
 pub const MAX_FETCH_ITEMS: usize = 64;
@@ -72,10 +72,27 @@ pub enum SpaceMessage {
     Summary { entries: Vec<SpaceSummaryEntry> },
     /// Summary 应答：应答方补齐请求方缺失的 op（截断见 [`MAX_OPS_PER_MESSAGE`]）。
     Ops { ops: Vec<SpaceOp> },
+    /// 有界遍历远端操作全序，不携带随日志增长的已知键全集。
+    PullOps {
+        space_id: Uuid,
+        after: Option<OpKey>,
+    },
+    /// next 仅在还有后续操作时存在；after 回显本页请求游标。
+    OpsPage {
+        space_id: Uuid,
+        after: Option<OpKey>,
+        next: Option<OpKey>,
+        ops: Vec<SpaceOp>,
+    },
     /// 字节索取：向持有者要这些文件（持有者经推送通道投递，身份 QUIC 背书）。
     Fetch {
         space_id: Uuid,
         items: Vec<SpaceAssetMeta>,
+    },
+    /// 本次索取中无法提供的摘要；请求方可换成员，不把「请求已写出」当作送达。
+    FetchUnavailable {
+        space_id: Uuid,
+        hashes: Vec<Vec<u8>>,
     },
     /// 贴码加入（新成员 → 空间主）：加入者身份 = QUIC remote_id，不自报。
     Join { code: String, joiner_name: String },
@@ -115,7 +132,7 @@ impl SpaceBookState {
     pub fn validate(&self) -> Result<(), SpaceSyncError> {
         for entry in self.spaces.values() {
             entry.meta.validate().map_err(SpaceSyncError::BadMeta)?;
-            validate_ops(&entry.ops)?;
+            validate_op_shapes(&entry.ops)?;
             for item in &entry.serve {
                 if item.content_hash.len() != 32 || !is_serve_path(&item.path) {
                     return Err(SpaceSyncError::BadServePath);
@@ -152,6 +169,34 @@ impl SpaceBookState {
         });
         missing.truncate(MAX_OPS_PER_MESSAGE);
         missing
+    }
+
+    /// 返回严格递增的一页；临时索引最多保留单页加一个继续标记。
+    pub fn page_after(&self, space_id: Uuid, after: Option<&OpKey>) -> SpaceMessage {
+        let mut page = BTreeMap::new();
+        if let Some(entry) = self.spaces.get(&space_id) {
+            for op in &entry.ops {
+                let key = OpKey::of(op);
+                if after.is_some_and(|after| key <= *after) {
+                    continue;
+                }
+                page.entry(key).or_insert(op);
+                if page.len() > MAX_OPS_PER_MESSAGE + 1 {
+                    page.pop_last();
+                }
+            }
+        }
+        let more = page.len() > MAX_OPS_PER_MESSAGE;
+        if more {
+            page.pop_last();
+        }
+        let next = more.then(|| page.last_key_value().expect("nonempty page").0.clone());
+        SpaceMessage::OpsPage {
+            space_id,
+            after: after.cloned(),
+            next,
+            ops: page.into_values().cloned().collect(),
+        }
     }
 
     /// Fetch 的本地落位查询：hash → 服务路径。
@@ -306,6 +351,10 @@ fn validate_ops(ops: &[SpaceOp]) -> Result<(), SpaceSyncError> {
     if ops.len() > MAX_OPS_PER_MESSAGE {
         return Err(SpaceSyncError::BadOps);
     }
+    validate_op_shapes(ops)
+}
+
+fn validate_op_shapes(ops: &[SpaceOp]) -> Result<(), SpaceSyncError> {
     for op in ops {
         op.validate().map_err(|_| SpaceSyncError::BadOps)?;
     }
@@ -331,12 +380,49 @@ impl SpaceMessage {
                 Ok(())
             }
             SpaceMessage::Ops { ops } => validate_ops(ops),
+            SpaceMessage::PullOps { after, .. } => {
+                if after.as_ref().is_some_and(|key| !is_device_id(&key.author)) {
+                    return Err(SpaceSyncError::BadOps);
+                }
+                Ok(())
+            }
+            SpaceMessage::OpsPage {
+                space_id,
+                after,
+                next,
+                ops,
+            } => {
+                validate_ops(ops)?;
+                if after.as_ref().is_some_and(|key| !is_device_id(&key.author)) {
+                    return Err(SpaceSyncError::BadOps);
+                }
+                let mut previous = after.clone();
+                for op in ops {
+                    let key = OpKey::of(op);
+                    if op.space_id != *space_id
+                        || previous.as_ref().is_some_and(|prev| key <= *prev)
+                    {
+                        return Err(SpaceSyncError::BadOps);
+                    }
+                    previous = Some(key);
+                }
+                if next.is_some() && (ops.is_empty() || next != &previous) {
+                    return Err(SpaceSyncError::BadOps);
+                }
+                Ok(())
+            }
             SpaceMessage::Fetch { items, .. } => {
                 if items.len() > MAX_FETCH_ITEMS || items.is_empty() {
                     return Err(SpaceSyncError::BadFetchItems);
                 }
                 for item in items {
                     item.validate().map_err(|_| SpaceSyncError::BadFetchItems)?;
+                }
+                Ok(())
+            }
+            SpaceMessage::FetchUnavailable { hashes, .. } => {
+                if hashes.len() > MAX_FETCH_ITEMS || hashes.iter().any(|hash| hash.len() != 32) {
+                    return Err(SpaceSyncError::BadFetchItems);
                 }
                 Ok(())
             }
@@ -572,6 +658,95 @@ mod tests {
     }
 
     #[test]
+    fn cursor_pages_cover_logs_larger_than_summary_cap_and_terminate() {
+        let mut book = SpaceBookState::default();
+        let mut entry = owner_entry();
+        let sid = entry.meta.id;
+        let total = MAX_SUMMARY_KEYS + 10;
+        entry.ops = (1..=total as u64)
+            .rev()
+            .map(|lamport| add_op(sid, lamport, &device_id(1)))
+            .collect();
+        entry.ops.push(entry.ops[0].clone());
+        book.set(sid, entry);
+        book.validate().unwrap();
+        let mut cursor = None;
+        let mut received = Vec::new();
+        for _ in 0..=total / MAX_OPS_PER_MESSAGE + 1 {
+            let page = book.page_after(sid, cursor.as_ref());
+            page.validate().unwrap();
+            let encoded = serde_json::to_string(&page).unwrap();
+            let decoded: SpaceMessage = serde_json::from_str(&encoded).unwrap();
+            let SpaceMessage::OpsPage {
+                after, next, ops, ..
+            } = decoded
+            else {
+                unreachable!()
+            };
+            assert_eq!(after, cursor);
+            assert!(ops.len() <= MAX_OPS_PER_MESSAGE);
+            received.extend(ops.iter().map(OpKey::of));
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(received.len(), total);
+        assert!(received.windows(2).all(|pair| pair[0] < pair[1]));
+        let last = received.last().unwrap();
+        let SpaceMessage::OpsPage { next, ops, .. } = book.page_after(sid, Some(last)) else {
+            unreachable!()
+        };
+        assert!(ops.is_empty());
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn operation_pages_reject_replays_backward_cursors_and_cross_space_ops() {
+        let entry = owner_entry();
+        let sid = entry.meta.id;
+        let op = add_op(sid, 1, &device_id(1));
+        let key = OpKey::of(&op);
+        for page in [
+            SpaceMessage::OpsPage {
+                space_id: sid,
+                after: Some(key.clone()),
+                next: None,
+                ops: vec![op.clone()],
+            },
+            SpaceMessage::OpsPage {
+                space_id: Uuid::new_v4(),
+                after: None,
+                next: None,
+                ops: vec![op.clone()],
+            },
+            SpaceMessage::OpsPage {
+                space_id: sid,
+                after: None,
+                next: Some(key.clone()),
+                ops: Vec::new(),
+            },
+            SpaceMessage::OpsPage {
+                space_id: sid,
+                after: None,
+                next: None,
+                ops: vec![op.clone(), op],
+            },
+        ] {
+            assert!(page.validate().is_err());
+        }
+        assert!(SpaceMessage::PullOps {
+            space_id: sid,
+            after: Some(OpKey {
+                lamport: 1,
+                author: "short".into()
+            })
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
     fn diff_against_truncates_at_cap() {
         let mut book = SpaceBookState::default();
         let mut entry = owner_entry();
@@ -771,6 +946,50 @@ mod tests {
         apply_join(&mut registry, meta, 6000).unwrap();
         assert_eq!(registry.spaces.len(), 1);
         assert_eq!(registry.spaces[0].joined_at, 5000);
+    }
+
+    #[test]
+    fn local_book_accepts_multiple_wire_pages_but_each_message_stays_bounded() {
+        let mut entry = owner_entry();
+        let id = entry.meta.id;
+        entry.ops = (1..=MAX_OPS_PER_MESSAGE as u64 + 10)
+            .map(|lamport| add_op(id, lamport, &entry.meta.owner_id))
+            .collect();
+        let mut book = SpaceBookState::default();
+        book.set(id, entry.clone());
+        assert_eq!(book.validate(), Ok(()));
+        assert_eq!(
+            SpaceMessage::Ops {
+                ops: entry.ops.clone(),
+            }
+            .validate(),
+            Err(SpaceSyncError::BadOps)
+        );
+        assert_eq!(
+            SpaceMessage::JoinOk {
+                meta: entry.meta.clone(),
+                ops: entry.ops.clone(),
+            }
+            .validate(),
+            Err(SpaceSyncError::BadOps)
+        );
+        let first = book.diff_against(&[SpaceSummaryEntry {
+            space_id: id,
+            keys: Vec::new(),
+        }]);
+        assert_eq!(first.len(), MAX_OPS_PER_MESSAGE);
+        let second = book.diff_against(&[SpaceSummaryEntry {
+            space_id: id,
+            keys: first.iter().map(OpKey::of).collect(),
+        }]);
+        assert_eq!(second.len(), 10);
+        let keys = first.iter().chain(&second).map(OpKey::of).collect();
+        assert!(book
+            .diff_against(&[SpaceSummaryEntry { space_id: id, keys }])
+            .is_empty());
+
+        book.spaces.get_mut(&id).unwrap().ops[0].author.clear();
+        assert_eq!(book.validate(), Err(SpaceSyncError::BadOps));
     }
 
     #[test]

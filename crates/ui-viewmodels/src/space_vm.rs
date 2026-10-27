@@ -182,9 +182,20 @@ pub fn parse_transfer_manifest(json: &str) -> Option<share::TransferManifest> {
     serde_json::from_str(json).ok()
 }
 
+pub fn authenticated_transfer_sender(json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get("authenticated_sender_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// STAGED 载荷解析：(batch_id, 暂存路径表)。
-pub fn parse_staged_payload(json: &str) -> Option<(Uuid, Vec<std::path::PathBuf>)> {
-    serde_json::from_str::<(Uuid, Vec<std::path::PathBuf>)>(json).ok()
+pub fn parse_staged_payload(payload: &str) -> Option<(Uuid, Vec<std::path::PathBuf>)> {
+    if let Some((batch, paths)) = payload.split_once('\t') {
+        return Some((batch.parse().ok()?, serde_json::from_str(paths).ok()?));
+    }
+    serde_json::from_str::<(Uuid, Vec<std::path::PathBuf>)>(payload).ok()
 }
 
 #[cfg(test)]
@@ -352,6 +363,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged.1.len(), 1);
+        let batch = Uuid::new_v4();
+        let wire = format!(
+            "{batch}\t{}",
+            serde_json::to_string(&vec![r"C:\Test User\a.png"]).unwrap()
+        );
+        let staged = parse_staged_payload(&wire).unwrap();
+        assert_eq!(staged.0, batch);
+        assert_eq!(
+            staged.1,
+            vec![std::path::PathBuf::from(r"C:\Test User\a.png")]
+        );
+        assert!(parse_staged_payload("bad\t[]").is_none());
     }
 
     #[test]

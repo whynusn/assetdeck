@@ -1341,3 +1341,23 @@ if (click_count % 2) == 1 {
 **可观测性**：worker 收到服务册仅记录团队数量；JoinOk 记录团队 id，JoinErr 记录业务拒绝原因。不记录邀请码、secret 或完整协议载荷，避免把授权秘密写进日志。业务拒绝不冒充拨号失败。
 
 **验证切面**：app-ui 使用无窗口 Slint 测试平台、临时库/合成身份和真实 `ChildStdin` 捕获生产 `share_write_line`。持久身份 READY 测试在旧实现失败（0 条，而非 STATE+SCAN），修复后通过，且 SCAN_DONE 不再扫描、下一 READY 会话重新推册。创建/换码/退出的同一真实发送边界测试在旧路径逐一失败（应发 1 条而实发 0 条），修复后校验 outgoing 服务册的当前 secret/gen 和退出后的空册，重复退出不重发。worker 回环测试额外验证同一可连通端点空册返回 JoinErr，推入正确册后立即 JoinOk，防止把握手成功误判为业务成功。
+
+### D98 团队共享生产编排闭环（2026-10-26，v0.1.14 复验）
+
+**生产证据**：v0.1.14 本机日志（UTC 12:22:44）已有 JoinOk；12:23:13 八项素材导入团队根成功、失败零并补记八条 Add。随后约 70 秒只更新本机 `SPACE_STATE`，零对外连接。导入收尾确实未发送操作增量或发起同步；唯一 `SPACE_SYNC` 出口依赖每会话首次 `DEVICE`。JoinOk/受理加入未建立应用层成员可达状态，缺字节索取又只认 `DEVICE` 在线表——底层连接成功不能推进到素材副本。
+
+**公网证据边界**：UTC 12:18:51 同设备标识拨号只尝试两个直连地址、无中继路径，15 秒超时；12:22:43 结果已有新直连地址及中继，随后局域网路径加入成功。DNS 与 HTTPS pkarr 并行，先有非空结果即可开始连接，后到结果仍会合并。旧日志不能确定哪一路返回了历史地址，也不能把本机一次发布失败归到对端。D96 的预热端点、显式 `EndpointAddr` 中继实传只证明传输能力，不覆盖生产冷启动标识发现或应用导入编排。
+
+**修复约束**：同步以持久名册、已认证会话和本地内容变更为事件源，不再以一次性 mDNS 扫描作为同步前提；局域网地址是拨号优化而非“成员在线”的唯一事实。主动传播必须真正发送有界操作增量，不能把单向拉取 Summary 当作推送。分页按真实进度续拉，空应答/重放停止，禁止定时轮询、无界重发及报文回声。字节回执绑定具体批次与不可变目标根，导入失败不得先 ACK，视图切换不得改变落库目标。
+
+**落地（源码，未发版）**：READY 与 NETWORK_READY 从持久名册发起同步；已认证消息/JoinOk 可建立无 DEVICE 的应用层可达状态，DEVICE 地址列修正为第三字段。团队导入收尾先落 Add、推当前服务册，再按 256 条上限主动向成员发布操作；stdin 写失败不标记已发布，异步失败事件释放同步状态。生产抗熵改 `PullOps/OpsPage` 全序游标，末页才物化，空页/重放终止；本地整册不再误套 256 条网络上限。旧 Summary 解析保留，但**两端都必须升级本批协议**，不承诺与旧端分页互通。
+
+**收到不等于送达**：确认并修复 worker 实发 `STAGED\tbatch\tpaths_json`、UI 却只解析 JSON 二元组的生产格式不匹配。自动接收必须使用 QUIC 身份注入的成员字段；每批捕获团队根、预期哈希和一次性终态，暂存队列最多 64 批，忙时等空闲事件，不能提前 ACK。子进程 exit 成功且 `done.failed=0`、操作日志成功落盘、预期内容已在目标库并存在正本后才 ACK；部分失败、遗漏、队列满等 NACK。缩略图不决定元数据送达。团队 Remove 由本地 UUID 经内容哈希映射回操作域 UUID，按空间主/添加者验权、落日志并广播；远端物化与导入共用写入门卫，完成后刷新明确目标，不再 fire-and-forget。索取应答用本地活动操作和服务路径，不采信请求方伪造的名称/大小；无货返回有界 `FetchUnavailable` 哈希，逐成员有限切换、耗尽挂起，重复应答不形成回声。
+
+**公网冷启动取证与修正**：统一生产 endpoint 工厂（签名 pkarr 发布 + HTTPS/DNS 解析 + 默认公共中继）；纯 ID 首次发现曾在 3.71s 返回 `No addressing information available`，随后 relay 在线且签名记录可查。增加一次受总连接预算约束的本地 relay 就绪事件等待与地址重查，不加 sleep 轮询；这不是把 online 等同于 pkarr 发布完成。`dial` 汇总晚到候选、记录实际 resolver provenance，仍校验期望 EndpointId 的 TLS 身份。网络回归改全新身份、禁所有 IP 传输、仅 `EndpointAddr::new(remote_id)`，不由调用方预热、不喂 relay URL：曾出现 Join 应答读取 `connection lost`。确认旧终行发送只固定等待 300ms，既忽略写入/`finish` 错误，也未等对端应用层读完；因此 300ms 不能作为公网送达证明。现由最后读取应用报文的一方以约定 QUIC close reason 确认读取，发送侧有界等待该 close（15s），推送无应答也使用同一读取确认；连接失败不再被当作正常完成。旧实现的确定性回归在回环中复现「服务端未等待读确认即返回」，修复后通过；worker 全部回环/授权/缺货测试通过，生产冷启动纯 ID Join + 300KB 字节实传连续三次通过（12.61s、19.09s、12.19s）。公共网络通过不构成可用性保证。
+
+**已完成验证**：模型 space_sync 12 项覆盖 4106 条日志/17 页终止、逆序与重复、游标倒退/跨团队页拒收；share 全部 73 项通过。worker 最新全部常规测试通过：库 21、bin 6（含 receive 终态矩阵：Reject/Nack/Ack/HashMismatch/BadHeader/InvalidManifest 恰一条 done、已知批次协议失败不再 NOTICE-only）、字节回环 3、Fetch 1、授权 1、同步回环 5；外网测试单独显式运行三次通过。ui-viewmodels 单元 164 项及集成测试通过。真实 sample-library 已定向重建，独立测试 `staged_real_import_receipts_only_after_durable_content` 用合成团队/临时根通过（3.06s）：暂存等待、切视图仍入团队、查询及正本可见后恰好一个 ACK、状态先于 ACK、不支持内容只 NACK，Remove 串行完成、刷新目标且不再 Fetch，并追加重导入验收段——显式本地重共享被 Remove 的内容产生新 Add（无 ACK/NACK 回执、content_paths==1、活动态含该哈希、每成员 ≤1 条 SYNC_SEND add）、对账不复活待清除行、purge 后活动态清空。app-ui bin 42 项通过、1 项真实 helper 验收按需忽略（新增：同页 Roster+新成员 Add 全序授权、SPACE_PEER_ACTIVE 有界回拉不回环、部分失败批次仍发布成功行且回执 NACK 的 import_completion 单测）；app 依赖守卫 6 项、UI hygiene 5 项通过。终行确认修复后的最终四 crate clippy `--all-targets -- -D warnings` 与 `cargo fmt --all -- --check` 均已通过（spawn_import_pipeline 收敛为 `ReconcileTail` 结构参数消除 8 参 lint）。
+
+**源码审查修复（六项，随本批回归测试闭合）**：①Remove 后同哈希显式重导入——`emit_missing_add_ops`/`on_space_import_finished` 增加 `allow_readd` 门：对账/Remove 补记只看历史 Add（不复活），显式本地共享（右键共享、加入团队、保存回主库的共享路径按调用点决定）允许对活动态缺行的新 Add；远端批次回执不自发替代 Add。②同页 Roster+新成员 Add——`merge_ops` 改为全序逐条授权，Roster 快照按 `(lamport, author)` 参与授权时序，旧名册不拒绝同页后续 Add、旧快照不回滚已生效名册。③错峰启动收敛——sync.rs 在 PullOps/Summary 应答时发 `SyncInbound::PeerActive`，worker 透传 `SPACE_PEER_ACTIVE`；app 侧首次事件触发一次有界 SPACE_SYNC 回拉并 `broadcast_unpublished_ops` 发布离线增量，重复事件不回环（事件驱动，无 Timer 轮询）。④部分失败导入——`has_durable_summary`（exit 成功+完整 done 行）判定可对账；`complete_after_reconcile` 先发布成功行再送回执，整批仍 NACK。⑤worker 终态保序——决策已知后的终行收发失败用 `final_line` 吞错并返回本地 `ReceiveOutcome`（含坏文件头改判 Failed 保批次身份），已知批次永不退化为 NOTICE-only；清单不合法（批次未知）仍 NOTICE。⑥入站认证会话编排缺口即 ③ 的 worker 侧事件源。
+
+**验收边界与依赖**：上述公网测试在 STAGED 后由测试消费者 ACK，真实落库由独立应用编排测试覆盖，不能冒充安装版双机 UI 全链已验收。本批未重装生产安装版、未提交/推送/发版，现有团队/素材/邀请码保留。分页限制网络载荷，不等于已解决现有全日志/服务册常驻与大库 RSS 问题；本轮未做内存预算验收。`futures-util` 0.3 为已有传递依赖，新增直接引用用于流合并，许可证 MIT OR Apache-2.0（选择 MIT 与 GPLv3 兼容），无新网络栈。另一会话的构建配置与打包脚本不属于本批修复。

@@ -92,7 +92,7 @@ async fn loopback_pull_answers_peer_filtered_snapshot() {
         async move {
             for _ in 0..2 {
                 let conn = server.accept().await.expect("accept").await.expect("conn");
-                handle_sync_connection(conn, &book, &spaces, |_| {})
+                handle_sync_connection(conn, &book, &spaces, server.id(), |_| {})
                     .await
                     .expect("服务端报错");
             }
@@ -147,13 +147,19 @@ async fn loopback_delta_reaches_server_with_verified_sender() {
     let mut msg_tx = Some(msg_tx);
     let serve = tokio::spawn(async move {
         let conn = server.accept().await.expect("accept").await.expect("conn");
-        handle_sync_connection(conn, &SyncBook::new(), &SpaceBook::new(), |event| {
-            if let SyncInbound::Message { peer_id, message } = event {
-                if let Some(tx) = msg_tx.take() {
-                    let _ = tx.send((peer_id, message));
+        handle_sync_connection(
+            conn,
+            &SyncBook::new(),
+            &SpaceBook::new(),
+            server.id(),
+            |event| {
+                if let SyncInbound::Message { peer_id, message } = event {
+                    if let Some(tx) = msg_tx.take() {
+                        let _ = tx.send((peer_id, message));
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         .expect("服务端报错")
     });
@@ -193,12 +199,20 @@ async fn loopback_delta_reaches_server_with_verified_sender() {
 
 // —— D90-P2 空间协议回环：抗熵差量 + 贴码加入 ——
 
-fn owner_space_book() -> (std::sync::Arc<SpaceBook>, SpaceMeta, Vec<SpaceOp>) {
-    let owner_id = "a".repeat(52);
+fn owner_space_book(
+    owner_id: String,
+    member_id: Option<String>,
+) -> (std::sync::Arc<SpaceBook>, SpaceMeta, Vec<SpaceOp>) {
     let mut registry = SpaceRegistry::new();
     registry.self_id = Some(owner_id.clone());
     registry.self_name = "店长".into();
-    let meta = registry.create_space("团队素材", 1000).unwrap();
+    let mut meta = registry.create_space("团队素材", 1000).unwrap();
+    if let Some(id) = member_id {
+        meta.members.push(share::RosterMember {
+            id,
+            name: "member".into(),
+        });
+    }
     let op = |lamport: u64| SpaceOp {
         space_id: meta.id,
         lamport,
@@ -231,7 +245,7 @@ async fn loopback_space_summary_returns_missing_ops() {
     let client = bind_endpoint().await;
     let target = loopback_target(&server.clone());
 
-    let (spaces, meta, ops) = owner_space_book();
+    let (spaces, meta, ops) = owner_space_book(server.id().to_z32(), Some(client.id().to_z32()));
     let summary = SyncMessage::Space {
         message: SpaceMessage::Summary {
             entries: vec![
@@ -253,7 +267,7 @@ async fn loopback_space_summary_returns_missing_ops() {
         let spaces = spaces.clone();
         async move {
             let conn = server.accept().await.expect("accept").await.expect("conn");
-            handle_sync_connection(conn, &SyncBook::new(), &spaces, |_| {})
+            handle_sync_connection(conn, &SyncBook::new(), &spaces, server.id(), |_| {})
                 .await
                 .expect("服务端报错");
         }
@@ -281,7 +295,7 @@ async fn loopback_space_join_recovers_after_service_book_is_republished() {
     let server = bind_endpoint().await;
     let client = bind_endpoint().await;
     let target = loopback_target(&server);
-    let (_loaded, meta, ops) = owner_space_book();
+    let (_loaded, meta, ops) = owner_space_book(server.id().to_z32(), None);
     let empty = SpaceBook::new();
     let join = || SyncMessage::Space {
         message: SpaceMessage::Join {
@@ -294,7 +308,7 @@ async fn loopback_space_join_recovers_after_service_book_is_republished() {
         let server = server.clone();
         tokio::spawn(async move {
             let conn = server.accept().await.expect("accept").await.expect("conn");
-            handle_sync_connection(conn, &SyncBook::new(), &spaces, |_| {})
+            handle_sync_connection(conn, &SyncBook::new(), &spaces, server.id(), |_| {})
                 .await
                 .expect("服务端报错");
         })
@@ -345,7 +359,7 @@ async fn loopback_space_join_admits_member_and_replies_full_state() {
     let client = bind_endpoint().await;
     let target = loopback_target(&server.clone());
 
-    let (spaces, meta, ops) = owner_space_book();
+    let (spaces, meta, ops) = owner_space_book(server.id().to_z32(), None);
     let code = share::space_invite_code(&meta);
     let joiner = client.id().to_z32();
 
@@ -355,19 +369,25 @@ async fn loopback_space_join_admits_member_and_replies_full_state() {
     let serve = tokio::spawn(async move {
         for _ in 0..3 {
             let conn = server.accept().await.expect("accept").await.expect("conn");
-            handle_sync_connection(conn, &SyncBook::new(), &spaces_for_serve, |event| {
-                if let SyncInbound::SpaceAdmitted {
-                    space_id,
-                    peer_id,
-                    joiner_name,
-                } = event
-                {
-                    assert_eq!(joiner_name, "客服小美", "Admitted 事件应带加入者名");
-                    if let Some(tx) = event_tx.take() {
-                        let _ = tx.send((space_id, peer_id));
+            handle_sync_connection(
+                conn,
+                &SyncBook::new(),
+                &spaces_for_serve,
+                server.id(),
+                |event| {
+                    if let SyncInbound::SpaceAdmitted {
+                        space_id,
+                        peer_id,
+                        joiner_name,
+                    } = event
+                    {
+                        assert_eq!(joiner_name, "客服小美", "Admitted 事件应带加入者名");
+                        if let Some(tx) = event_tx.take() {
+                            let _ = tx.send((space_id, peer_id));
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .expect("服务端报错");
         }

@@ -19,13 +19,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use iroh::address_lookup::{AddrFilter, DnsAddressLookup, PkarrPublisher, PkarrResolver};
-use iroh::endpoint::presets;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 use mdns_sd::ServiceDaemon;
 use share::{SendItem, SpaceMessage, SyncMessage};
 use share_worker::sync::SyncInbound;
-use share_worker::{engine, mdns, proto, sync};
+use share_worker::{dial, engine, mdns, proto, sync};
 use uuid::Uuid;
 
 use engine::{BatchOutcome, Decision, DecisionHub, IncomingEvent, ReceiveState, SendEvent};
@@ -162,6 +160,7 @@ async fn resolve_dial_addrs(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let _log = logging::init_from_env("share-worker", None, logging::Level::Info);
+    share_worker::set_log_hook(std::sync::Arc::new(|line| logging::warn!("{line}")));
     let args: Vec<String> = std::env::args().collect();
     let staging_root = parse_staging_root(&args).unwrap_or_else(default_staging_root);
     if let Err(error) = std::fs::create_dir_all(&staging_root) {
@@ -172,25 +171,10 @@ async fn main() {
         std::process::exit(2);
     }
 
-    // 发布器默认仅保留中继地址；显式保留 IP，才能在中继不可用时继续直连。
-    // 公共 pkarr 记录可凭设备公钥查询；设备公钥不是加入团队的授权秘密。
+    // D95/D96 production endpoint: signed unfiltered pkarr publication plus
+    // both production resolvers and the n0 public relay fallback.
     let secret_key = load_or_create_secret_key(parse_key_file(&args).as_deref());
-    let relay_url: url::Url = iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD
-        .parse()
-        .expect("n0 pkarr relay 地址常量必然合法");
-    let endpoint = match Endpoint::builder(presets::Minimal)
-        .secret_key(secret_key)
-        .alpns(vec![
-            share::ALPN.as_bytes().to_vec(),
-            share::ALPN_SYNC.as_bytes().to_vec(),
-        ])
-        .address_lookup(PkarrPublisher::builder(relay_url).addr_filter(AddrFilter::unfiltered()))
-        .address_lookup(PkarrResolver::n0_dns())
-        .address_lookup(DnsAddressLookup::n0_dns())
-        .relay_mode(RelayMode::Default)
-        .bind()
-        .await
-    {
+    let endpoint = match dial::production_endpoint(secret_key, false).await {
         Ok(endpoint) => endpoint,
         Err(error) => {
             eprintln!("share-worker: endpoint 绑定失败: {error}");
@@ -226,6 +210,15 @@ async fn main() {
         }
     };
     emit(proto::out::ready(&id_z32, &name));
+    let endpoint_online = endpoint.clone();
+    tokio::spawn(async move {
+        endpoint_online.online().await;
+        logging::info!(
+            "网络阶段=online relay_count={}",
+            endpoint_online.addr().relay_urls().count()
+        );
+        emit(proto::out::network_ready());
+    });
     run(
         endpoint,
         DecisionHub::new(),
@@ -305,12 +298,9 @@ async fn run(
                     }
                     Some(proto::Command::Send(request)) => {
                         let batch_id = request.batch_id;
-                        let target = match target_addr(&request.receiver_id, &request.receiver_addrs) {
-                            Some(target) => target,
-                            None => {
-                                emit(proto::out::done(batch_id, "failed", "目标设备地址不合法"));
-                                continue;
-                            }
+                        let Some(target) = target_addr(&request.receiver_id, &request.receiver_addrs) else {
+                            emit(proto::out::done(batch_id, "failed", "目标设备地址不合法"));
+                            continue;
                         };
                         let endpoint = endpoint.clone();
                         tokio::spawn(async move {
@@ -368,18 +358,17 @@ async fn run(
                         logging::info!("团队服务册已装载 teams={}", book.spaces.len());
                         books.spaces.replace(book);
                     }
-                    Some(proto::Command::SpaceSync { peer_id, addrs }) => {
+                        Some(proto::Command::SpaceSync { peer_id, addrs }) => {
                         if EndpointId::from_z32(&peer_id).is_err() {
                             emit(proto::out::sync_sent(&peer_id, false, "目标设备标识不合法"));
                             continue;
                         }
-                        let message = SyncMessage::Space {
-                            message: books.spaces.summary(),
-                        };
                         let endpoint = endpoint.clone();
                         let daemon = daemon_for_scan.clone();
                         let self_id_for_scan = self_id.clone();
                         let peer_for_log = peer_id.clone();
+                        let spaces = books.spaces.clone();
+                        let space_ids = spaces.member_space_ids(&peer_id);
                         tokio::spawn(async move {
                             let addrs =
                                 resolve_dial_addrs(daemon, self_id_for_scan, &peer_for_log, &addrs)
@@ -388,7 +377,21 @@ async fn run(
                                 emit(proto::out::sync_sent(&peer_for_log, false, "目标设备标识不合法"));
                                 return;
                             };
-                            report_sync_send(endpoint, target, message, peer_for_log).await;
+                            for space_id in space_ids {
+                                let message = SyncMessage::Space {
+                                    message: SpaceMessage::PullOps {
+                                        space_id,
+                                        after: None,
+                                    },
+                                };
+                                report_sync_send(
+                                    endpoint.clone(),
+                                    target.clone(),
+                                    message,
+                                    peer_for_log.clone(),
+                                )
+                                .await;
+                            }
                         });
                     }
                     Some(proto::Command::SpaceJoin {
@@ -426,7 +429,9 @@ async fn run(
                 let staging = staging_root.clone();
                 let book = books.book.clone();
                 let spaces = books.spaces.clone();
+                let local_owner_id = endpoint.id();
                 let endpoint_for_fetch = endpoint.clone();
+
                 let fetch_sender = self_name.clone();
                 tokio::spawn(async move {
                     let conn = match incoming.await {
@@ -439,36 +444,22 @@ async fn run(
                     // ALPN 分流：推送通道走 engine 全流程（清单+双确认+裸流）；
                     // 同步通道走 M1-b 轻会话（一行报文，Pull 在引擎内应答）。
                     if conn.alpn() == share::ALPN.as_bytes() {
-                        let result =
-                            engine::handle_connection(conn, &staging, &hub, emit_incoming).await;
-                        match result {
-                            Ok(outcome) => {
-                                let (state, detail) = match &outcome.state {
-                                    ReceiveState::Transferred => ("transferred", ""),
-                                    ReceiveState::Rejected(reason) => ("rejected", reason.as_str()),
-                                    ReceiveState::Failed(reason) => ("failed", reason.as_str()),
-                                };
-                                emit(proto::out::done(outcome.batch_id, state, detail));
-                            }
-                            Err(error) => {
-                                // 清单都没解析成功 = 无批次可归位：知情消息即可，
-                                // 不伪造 done 行（UI 侧 done 必须带真实 batch）。
-                                logging::warn!("入站处理失败: {error}");
-                                emit(proto::out::notice(&format!(
-                                    "警示：收到无效共享请求：{error}"
-                                )));
-                            }
-                        }
+                        run_receive(conn, &staging, &hub, emit).await;
                     } else if conn.alpn() == share::ALPN_SYNC.as_bytes() {
-                        let result = sync::handle_sync_connection(conn, &book, &spaces, |event| {
-                            match event {
+                        let result = sync::handle_sync_connection(
+                            conn,
+                            &book,
+                            &spaces,
+                            local_owner_id,
+                            |event| match event {
                                 SyncInbound::Message { peer_id, message } => {
                                     match serde_json::to_string(&message) {
                                         Ok(json) => emit(proto::out::sync_recv(&peer_id, &json)),
-                                        Err(error) => {
-                                            logging::error!("同步报文序列化失败: {error}")
-                                        }
+                                        Err(error) => logging::error!("同步报文序列化失败: {error}"),
                                     }
+                                }
+                                SyncInbound::PeerActive { peer_id } => {
+                                    emit(proto::out::space_peer_active(&peer_id));
                                 }
                                 SyncInbound::SpaceAdmitted {
                                     space_id,
@@ -486,48 +477,46 @@ async fn run(
                                     space_id,
                                     items,
                                 } => {
-                                    // 持有者投递：本地有的才发（部分持有 = 部分投递，
-                                    // 剩余向其他成员索取是索取方的职责）。
-                                    let mut send_items = Vec::with_capacity(items.len());
-                                    for item in items {
-                                        if let Some(path) =
-                                            spaces.serve_path(space_id, &item.content_hash)
-                                        {
-                                            send_items.push(SendItem {
-                                                asset_uuid: item.uuid,
-                                                file_name: item.file_name.clone(),
-                                                kind: item.kind.into(),
-                                                size_bytes: item.size_bytes,
-                                                category_hint: None,
-                                                path: std::path::PathBuf::from(path),
-                                            });
-                                        }
-                                    }
+                                    let hashes = items.iter().map(|(asset, _)| asset.content_hash.clone()).collect();
+                                    let send_items = items
+                                        .into_iter()
+                                        .map(|(item, path)| SendItem {
+                                            asset_uuid: item.uuid,
+                                            file_name: item.file_name,
+                                            kind: item.kind.into(),
+                                            size_bytes: item.size_bytes,
+                                            category_hint: None,
+                                            path: std::path::PathBuf::from(path),
+                                        })
+                                        .collect::<Vec<_>>();
                                     if send_items.is_empty() {
-                                        logging::info!(
-                                            "空间 {space_id} 的索取本地无可服务字节，忽略"
-                                        );
+                                        logging::info!("空间 {space_id} 的索取本地无可服务字节，忽略");
                                         return;
                                     }
                                     let Some(target) = target_addr(&peer_id, &[]) else {
                                         logging::warn!("索取方标识不合法: {peer_id}");
+                                        emit(proto::out::space_fetch_failed(&peer_id, space_id));
                                         return;
                                     };
                                     let request = share::SendRequest {
                                         batch_id: Uuid::new_v4(),
                                         sender_name: fetch_sender.clone(),
-                                        receiver_id: peer_id,
+                                        receiver_id: peer_id.clone(),
                                         receiver_addrs: Vec::new(),
                                         space_id: Some(space_id),
                                         items: send_items,
                                     };
                                     let fetch_endpoint = endpoint_for_fetch.clone();
                                     tokio::spawn(async move {
-                                        run_send(fetch_endpoint, target, request).await;
+                                        if !run_send(fetch_endpoint.clone(), target.clone(), request).await {
+                                            report_sync_send(fetch_endpoint, target, SyncMessage::Space {
+                                                message: SpaceMessage::FetchUnavailable { space_id, hashes },
+                                            }, peer_id).await;
+                                        }
                                     });
                                 }
-                            }
-                        })
+                            },
+                        )
                         .await;
                         if let Err(error) = result {
                             logging::warn!("同步连接处理失败: {error}");
@@ -554,6 +543,18 @@ async fn report_sync_send(
     message: SyncMessage,
     peer_id: String,
 ) {
+    let fetch_space = match &message {
+        SyncMessage::Space {
+            message: SpaceMessage::Fetch { space_id, .. },
+        } => Some(*space_id),
+        _ => None,
+    };
+    let is_page = matches!(
+        &message,
+        SyncMessage::Space {
+            message: SpaceMessage::PullOps { .. } | SpaceMessage::Ops { .. }
+        }
+    );
     match sync::send_sync_message(&endpoint, target, message).await {
         Ok(None) => emit(proto::out::sync_sent(&peer_id, true, "")),
         Ok(Some(reply)) => {
@@ -576,13 +577,50 @@ async fn report_sync_send(
             // 拨号失败的真因（解析无果/QUIC 超时/对端拒绝）只落在 worker
             // 日志里；UI 只拿到面向用户的短文案（D94 排障纪律）。
             logging::warn!("同步拨号失败 peer={peer_id}: {error}");
+            if let Some(space_id) = fetch_space {
+                emit(proto::out::space_fetch_failed(&peer_id, space_id));
+            }
+            if is_page {
+                emit(proto::out::space_sync_failed(&peer_id));
+            }
             emit(proto::out::sync_sent(&peer_id, false, &error.to_string()));
         }
     }
 }
 
+/// 接收任务：事件 → stdout 行；终态 → done 行。
+async fn run_receive(
+    conn: iroh::endpoint::Connection,
+    staging: &std::path::Path,
+    hub: &DecisionHub,
+    mut output: impl FnMut(String) + Send,
+) {
+    let result = engine::handle_connection(conn, staging, hub, |event| {
+        emit_incoming(event, &mut output)
+    })
+    .await;
+    match result {
+        Ok(outcome) => {
+            let (state, detail) = match &outcome.state {
+                ReceiveState::Transferred => ("transferred", ""),
+                ReceiveState::Rejected(reason) => ("rejected", reason.as_str()),
+                ReceiveState::Failed(reason) => ("failed", reason.as_str()),
+            };
+            output(proto::out::done(outcome.batch_id, state, detail));
+        }
+        Err(error) => {
+            // 清单都没解析成功 = 无批次可归位：知情消息即可，
+            // 不伪造 done 行（UI 侧 done 必须带真实 batch）。
+            logging::warn!("入站处理失败: {error}");
+            output(proto::out::notice(&format!(
+                "警示：收到无效共享请求：{error}"
+            )));
+        }
+    }
+}
+
 /// 发送任务：事件 → stdout 行；终态 → done 行。
-async fn run_send(endpoint: Endpoint, target: EndpointAddr, request: share::SendRequest) {
+async fn run_send(endpoint: Endpoint, target: EndpointAddr, request: share::SendRequest) -> bool {
     let batch_id = request.batch_id;
     let result = engine::send_batch(&endpoint, target, request, |event| match event {
         SendEvent::Hashing => {
@@ -597,29 +635,49 @@ async fn run_send(endpoint: Endpoint, target: EndpointAddr, request: share::Send
         }
     })
     .await;
+    let delivered = matches!(&result, Ok(BatchOutcome::Delivered));
     match result {
         Ok(BatchOutcome::Delivered) => emit(proto::out::done(batch_id, "delivered", "")),
         Ok(BatchOutcome::Rejected(reason)) => emit(proto::out::done(batch_id, "rejected", &reason)),
         Ok(BatchOutcome::Failed(reason)) => emit(proto::out::done(batch_id, "failed", &reason)),
         Err(error) => emit(proto::out::done(batch_id, "failed", &error.to_string())),
     }
+    delivered
 }
 
-fn emit_incoming(event: IncomingEvent) {
+fn emit_incoming(event: IncomingEvent, mut output: impl FnMut(String)) {
     match event {
-        IncomingEvent::Offer(manifest) => match serde_json::to_string(&manifest) {
-            Ok(json) => emit(proto::out::incoming(&json)),
-            Err(error) => logging::error!("清单序列化失败: {error}"),
-        },
+        IncomingEvent::Offer {
+            manifest,
+            authenticated_sender_id,
+        } => {
+            let mut value = match serde_json::to_value(&manifest) {
+                Ok(value) => value,
+                Err(error) => {
+                    logging::error!("清单序列化失败: {error}");
+                    return;
+                }
+            };
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "authenticated_sender_id".into(),
+                    serde_json::Value::String(authenticated_sender_id),
+                );
+            }
+            match serde_json::to_string(&value) {
+                Ok(json) => output(proto::out::incoming(&json)),
+                Err(error) => logging::error!("入站事件序列化失败: {error}"),
+            }
+        }
         IncomingEvent::ItemDone {
             batch_id,
             uuid,
             ok,
             detail,
-        } => emit(proto::out::item(batch_id, "recv", uuid, ok, &detail)),
+        } => output(proto::out::item(batch_id, "recv", uuid, ok, &detail)),
         IncomingEvent::Staged { batch_id, paths } => {
             let json = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_string());
-            emit(proto::out::staged(batch_id, &json));
+            output(proto::out::staged(batch_id, &json));
         }
     }
 }
@@ -627,6 +685,200 @@ fn emit_incoming(event: IncomingEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ReceiveCase {
+        Reject,
+        Nack,
+        Ack,
+        HashMismatch,
+        BadHeader,
+        InvalidManifest,
+    }
+
+    #[tokio::test]
+    async fn receive_terminal_receipt_failure_preserves_one_local_done() {
+        for case in [
+            ReceiveCase::Reject,
+            ReceiveCase::Nack,
+            ReceiveCase::Ack,
+            ReceiveCase::HashMismatch,
+        ] {
+            assert_receive_done(case, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_terminal_write_failure_preserves_one_local_done() {
+        for case in [ReceiveCase::Reject, ReceiveCase::Nack, ReceiveCase::Ack] {
+            assert_receive_done(case, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_known_batch_protocol_failure_emits_one_local_done() {
+        assert_receive_done(ReceiveCase::BadHeader, false).await;
+    }
+
+    #[tokio::test]
+    async fn receive_invalid_manifest_emits_notice_without_fabricated_done() {
+        let (_, lines) = receive_case(ReceiveCase::InvalidManifest, false).await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("NOTICE\t"), "{lines:?}");
+    }
+
+    async fn assert_receive_done(case: ReceiveCase, disconnect_before_reply: bool) {
+        let (batch_id, lines) = receive_case(case, disconnect_before_reply).await;
+        let terminal: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("done\t"))
+            .collect();
+        assert_eq!(terminal.len(), 1, "{case:?}: {lines:?}");
+        let expected = match case {
+            ReceiveCase::Reject => proto::out::done(batch_id, "rejected", "test rejection"),
+            ReceiveCase::Nack => proto::out::done(batch_id, "failed", "test import failure"),
+            ReceiveCase::Ack => proto::out::done(batch_id, "transferred", ""),
+            ReceiveCase::HashMismatch => proto::out::done(batch_id, "failed", "SHA-256 校验失败"),
+            ReceiveCase::BadHeader => proto::out::done(batch_id, "failed", "坏文件头: invalid"),
+            ReceiveCase::InvalidManifest => unreachable!(),
+        };
+        assert_eq!(*terminal[0], expected, "{case:?}");
+        assert!(
+            !lines.iter().any(|line| line.starts_with("NOTICE\t")),
+            "known batch must not be reported as an invalid request: {lines:?}"
+        );
+    }
+
+    async fn receive_case(case: ReceiveCase, disconnect_before_reply: bool) -> (Uuid, Vec<String>) {
+        use iroh::endpoint::{presets, VarInt};
+        use std::time::Duration;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let server = Endpoint::builder(presets::Minimal)
+                .alpns(vec![share::ALPN.as_bytes().to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let client = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+            let port = server
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .unwrap()
+                .port();
+            let target = EndpointAddr::new(server.id())
+                .with_ip_addr(SocketAddr::from(([127, 0, 0, 1], port)));
+            let staging = tempfile::tempdir().unwrap();
+            let batch_id = Uuid::new_v4();
+            let item_id = Uuid::new_v4();
+            let staging_path = staging.path().to_owned();
+            let hub = DecisionHub::new();
+            let serve_hub = hub.clone();
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (conn_tx, conn_rx) = tokio::sync::oneshot::channel();
+            let serve = tokio::spawn(async move {
+                let conn = server.accept().await.unwrap().await.unwrap();
+                conn_tx.send(conn.clone()).unwrap();
+                let mut lines = Vec::new();
+                run_receive(conn, &staging_path, &serve_hub, |line| {
+                    event_tx.send(line.clone()).unwrap();
+                    lines.push(line);
+                })
+                .await;
+                lines
+            });
+            let conn = client
+                .connect(target, share::ALPN.as_bytes())
+                .await
+                .unwrap();
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            let server_conn = conn_rx.await.unwrap();
+            let manifest = share::TransferManifest {
+                batch_id,
+                sender_name: "TESTER".into(),
+                space_id: None,
+                items: vec![share::ManifestItem {
+                    asset_uuid: item_id,
+                    file_name: "empty.bin".into(),
+                    kind: domain::AssetKind::Other,
+                    size_bytes: 0,
+                    sha256_hex: if matches!(case, ReceiveCase::HashMismatch) {
+                        "0".repeat(64)
+                    } else {
+                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()
+                    },
+                    category_hint: None,
+                }],
+            };
+            let manifest_line = if matches!(case, ReceiveCase::InvalidManifest) {
+                "not-json".into()
+            } else {
+                serde_json::to_string(&manifest).unwrap()
+            };
+            send.write_all(format!("{manifest_line}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut reader = share_worker::lines::LineReader::new(recv);
+            if !matches!(case, ReceiveCase::InvalidManifest) {
+                assert!(event_rx.recv().await.unwrap().starts_with("INCOMING\t"));
+                if !matches!(case, ReceiveCase::Reject) {
+                    assert!(hub.resolve(batch_id, Decision::Accept));
+                    assert_eq!(
+                        reader.read_line(4096).await.unwrap().as_deref(),
+                        Some("ACCEPT")
+                    );
+                    let header = if matches!(case, ReceiveCase::BadHeader) {
+                        "invalid\n".into()
+                    } else {
+                        format!("ITEM\t{item_id}\t0\n")
+                    };
+                    send.write_all(header.as_bytes()).await.unwrap();
+                    if matches!(case, ReceiveCase::Ack | ReceiveCase::Nack) {
+                        loop {
+                            if event_rx.recv().await.unwrap().starts_with("STAGED\t") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            send.finish().unwrap();
+            if disconnect_before_reply {
+                conn.close(VarInt::from_u32(1), b"cancelled before reply");
+                // The server has observed the close before the decision, so the
+                // terminal write fails deterministically, not just its receipt.
+                server_conn.closed().await;
+            }
+            let (decision, terminal_prefix) = match case {
+                ReceiveCase::Reject => {
+                    (Some(Decision::Reject("test rejection".into())), "REJECT\t")
+                }
+                ReceiveCase::Nack => (Some(Decision::Nack("test import failure".into())), "NACK\t"),
+                ReceiveCase::Ack => (Some(Decision::Ack), "DELIVERED"),
+                ReceiveCase::HashMismatch => (None, "NACK\t"),
+                ReceiveCase::BadHeader => (None, ""),
+                ReceiveCase::InvalidManifest => (None, "REJECT\t"),
+            };
+            if let Some(decision) = decision {
+                assert!(hub.resolve(batch_id, decision));
+            }
+            if !disconnect_before_reply && !matches!(case, ReceiveCase::BadHeader) {
+                let reply = reader.read_line(4096).await.unwrap().unwrap();
+                assert!(reply.starts_with(terminal_prefix), "{case:?}: {reply}");
+                // The terminal line was read, but this is deliberately NOT the
+                // read-receipt close reason expected by finish_with_receipt.
+                conn.close(VarInt::from_u32(1), b"cancelled without receipt");
+            }
+            let lines = serve.await.unwrap();
+            assert!(!hub.resolve(batch_id, Decision::Ack));
+            assert!(std::fs::read_dir(staging.path()).unwrap().next().is_none());
+            drop(server_conn);
+            client.close().await;
+            (batch_id, lines)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{case:?} receive regression timed out"))
+    }
 
     #[test]
     fn staging_root_flag_parsed_when_present() {

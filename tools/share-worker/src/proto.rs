@@ -31,6 +31,8 @@
 //!   （M1-b；推送丢失由对端补拉自愈，仅知情不重试）
 //! - `SPACE_ADMITTED\t<space_id>\t<对端id>\t<加入者名>` —— 空间主侧受理了
 //!   新成员（D90-P2；UI 落盘名册 + op 并重推 SPACE_STATE）
+//! - `SPACE_PEER_ACTIVE\t<对端id>` —— 认证对端发起拉取型同步会话（D98；
+//!   UI 据此做一次有界回拉，错峰启动双向收敛）
 //! - `NOTICE\t<提示：…|警示：…>` —— 用户知情消息（D64 前缀约定）
 //!
 //! stderr 归日志门面（D39），不承载协议。
@@ -147,8 +149,13 @@ pub fn parse_command(line: &str) -> Result<Command, CommandError> {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .collect();
-            let message: SyncMessage = serde_json::from_str(json)
-                .map_err(|e| CommandError(format!("SYNC_SEND 报文解析失败: {e}")))?;
+            let message: SyncMessage = serde_json::from_str(json).map_err(|e| {
+                CommandError(format!(
+                    "SYNC_SEND 报文解析失败 line={} column={}",
+                    e.line(),
+                    e.column()
+                ))
+            })?;
             message
                 .validate()
                 .map_err(|e| CommandError(format!("SYNC_SEND 报文不合法: {e}")))?;
@@ -170,8 +177,13 @@ fn parse_space_commands(head: &str, rest: Option<&str>) -> Result<Option<Command
     match head {
         "SPACE_STATE" => {
             let json = rest.ok_or(CommandError("SPACE_STATE 缺 JSON 载荷".into()))?;
-            let book: SpaceBookState = serde_json::from_str(json)
-                .map_err(|e| CommandError(format!("SPACE_STATE JSON 解析失败: {e}")))?;
+            let book: SpaceBookState = serde_json::from_str(json).map_err(|e| {
+                CommandError(format!(
+                    "SPACE_STATE JSON 解析失败 line={} column={}",
+                    e.line(),
+                    e.column()
+                ))
+            })?;
             book.validate()
                 .map_err(|e| CommandError(format!("SPACE_STATE 册不合法: {e}")))?;
             Ok(Some(Command::SpaceState(book)))
@@ -230,6 +242,10 @@ pub mod out {
         format!("READY\t{id_z32}\t{name}")
     }
 
+    pub fn network_ready() -> String {
+        "NETWORK_READY".to_string()
+    }
+
     pub fn device(id_z32: &str, name: &str, addrs: &[String]) -> String {
         format!("DEVICE\t{id_z32}\t{name}\t{}", addrs.join(";"))
     }
@@ -277,9 +293,23 @@ pub mod out {
         )
     }
 
-    /// D90-P2：空间主侧受理了新成员（UI 落盘 spaces.json + ops 并重推 SPACE_STATE）。
+    pub fn space_sync_failed(peer_id: &str) -> String {
+        format!("SPACE_SYNC_FAILED\t{peer_id}")
+    }
+
+    pub fn space_fetch_failed(peer_id: &str, space_id: Uuid) -> String {
+        format!("SPACE_FETCH_FAILED\t{peer_id}\t{space_id}")
+    }
+
+    /// D90-P2: 空间主侧受理新成员。
     pub fn space_admitted(space_id: &str, peer_id: &str, joiner_name: &str) -> String {
         format!("SPACE_ADMITTED\t{space_id}\t{peer_id}\t{joiner_name}")
+    }
+
+    /// 认证对端发起了拉取型同步会话（PullOps/Summary）：UI 可据此做一次
+    /// 有界回拉（错峰启动时双向收敛的触发源；身份 = QUIC 握手背书）。
+    pub fn space_peer_active(peer_id: &str) -> String {
+        format!("SPACE_PEER_ACTIVE\t{peer_id}")
     }
 }
 

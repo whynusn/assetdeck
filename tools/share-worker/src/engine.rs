@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use iroh::endpoint::{Connection, SendStream, VarInt};
+use iroh::endpoint::{Connection, ConnectionError, SendStream, VarInt};
 use iroh::Endpoint;
 use iroh::EndpointAddr;
 
@@ -70,25 +70,51 @@ impl From<io::Error> for EngineError {
     }
 }
 
-/// 终行写出后的冲刷窗。QUIC 层在连接句柄 drop 时立即关连接并通知对端，
-/// 但刚 finish 的终行字节可能还躺在本端发送队列里没上线——回环实测：REJECT
-/// 路径写完即返回（无任何中间 await）时发送方必丢「connection lost」；而
-/// DELIVERED/NACK 路径因为后面跟着 remove_dir_all 的短暂 await 侥幸赶上了
-/// 冲刷。与其依赖那种巧合，不如显式给固定冲刷窗：局域网单帧 + 一次重传的
-/// 量级，300ms 足够封顶，远小于任何阶段超时；对端已读到时连接本会自然闲置
-/// 回收，这条 sleep 只影响本侧收尾时机，不在关键路径上。
-pub(crate) const FLUSH_GRACE: Duration = Duration::from_millis(300);
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const READ_RECEIPT: &[u8] = b"received";
 
-/// 写出终行（REJECT/DELIVERED/NACK，同步通道里是 JSON 报文行）并 finish
-/// 本侧发送流。pub(crate)：engine 与 sync 两个通道共用同一冲刷纪律。
-///
-/// QUIC 纪律（回环实测换来的）：**绝不能**写完就 return——未 finish 的流
-/// drop 时直接 RESET，在途字节蒸发；即使 finish 了，句柄立刻 drop 同样把
-/// 还没上线的帧带走。写完必须 finish + 冲刷窗后再返回。
-pub(crate) async fn write_final_line(send: &mut SendStream, line: &str) {
-    let _ = send.write_all(format!("{line}\n").as_bytes()).await;
-    let _ = send.finish();
-    tokio::time::sleep(FLUSH_GRACE).await;
+/// 只有最后读取应用数据的一方才能安全关闭连接；QUIC ACK 不保证应用已读。
+pub(crate) async fn finish_with_receipt(
+    conn: &Connection,
+    send: &mut SendStream,
+) -> Result<(), EngineError> {
+    send.finish()
+        .map_err(|e| EngineError::Io(format!("结束发送流失败: {e}")))?;
+    match tokio::time::timeout(RECEIPT_TIMEOUT, conn.closed())
+        .await
+        .map_err(|_| EngineError::Timeout("对端读取确认"))?
+    {
+        ConnectionError::ApplicationClosed(close)
+            if close.error_code == VarInt::from_u32(0) && close.reason.as_ref() == READ_RECEIPT =>
+        {
+            Ok(())
+        }
+        _ => Err(EngineError::Io("对端未确认读取即断开".into())),
+    }
+}
+
+/// Terminal decisions already known to the engine must survive transport
+/// failures: the local batch outcome is returned even when the final write or
+/// its read receipt fails. The error is logged, not propagated — main.rs maps
+/// `Err` to "manifest never parsed" and would drop the batch-specific DONE.
+async fn final_line(conn: &Connection, send: &mut SendStream, line: &str) {
+    if let Err(error) = write_final_line(conn, send, line).await {
+        crate::log_line(format!("终行送达失败（本地终态保留）: {error}"));
+    }
+}
+pub(crate) async fn write_final_line(
+    conn: &Connection,
+    send: &mut SendStream,
+    line: &str,
+) -> Result<(), EngineError> {
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        send.write_all(format!("{line}\n").as_bytes())
+            .await
+            .map_err(|e| EngineError::Io(format!("发送终行失败: {e}")))?;
+        finish_with_receipt(conn, send).await
+    })
+    .await
+    .map_err(|_| EngineError::Timeout("终行送达"))?
 }
 
 /// 发送侧终态（Err(EngineError) 表示本地/链路故障，非对端意志）。
@@ -133,8 +159,11 @@ pub enum SendEvent {
 /// 接收侧事件。
 #[derive(Debug, Clone)]
 pub enum IncomingEvent {
-    /// 清单到达，等待首连确认（UI 弹确认框）。
-    Offer(TransferManifest),
+    /// 清单到达及 QUIC 认证的发送方 id，等待首连确认（UI 弹确认框）。
+    Offer {
+        manifest: TransferManifest,
+        authenticated_sender_id: String,
+    },
     /// 单文件落盘结果（role=recv 的 ITEM 行）。
     ItemDone {
         batch_id: Uuid,
@@ -275,11 +304,10 @@ pub async fn send_batch(
     on_event(SendEvent::Connecting);
     let conn = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        endpoint.connect(target, share::ALPN.as_bytes()),
+        crate::dial::connect(endpoint, target, share::ALPN.as_bytes()),
     )
     .await
-    .map_err(|_| EngineError::Timeout("连接"))?
-    .map_err(|e| EngineError::Dial(e.to_string()))?;
+    .map_err(|_| EngineError::Timeout("连接"))??;
 
     let (mut send, recv) = conn
         .open_bi()
@@ -304,7 +332,7 @@ pub async fn send_batch(
                 .to_string();
             // 己方发送流收尾 + 由本侧（最后读到数据的一方）关连接。
             let _ = send.finish();
-            conn.close(VarInt::from_u32(0), b"rejected");
+            conn.close(VarInt::from_u32(0), READ_RECEIPT);
             return Ok(BatchOutcome::Rejected(reason));
         }
         None => return Err(EngineError::Protocol("对端在读清单后断开".into())),
@@ -360,9 +388,7 @@ pub async fn send_batch(
             total,
         });
     }
-    // 注意：此处不 finish 己方发送流。接收方 write_final_line 会排空本流到
-    // EOF 作为「终行已被读取」的信号；若提前 finish，接收方会立刻看到 EOF
-    // 并可能抢先关连接，导致终行在途丢失。finish 推迟到读到终行之后。
+    // 接收方持有连接直到本侧读完终行并发回读取确认。
     let final_line = tokio::time::timeout(IMPORT_TIMEOUT, reader.read_line(4096))
         .await
         .map_err(|_| EngineError::Timeout("对端导入"))?
@@ -379,7 +405,7 @@ pub async fn send_batch(
         None => BatchOutcome::Failed("对端在读回执前断开".into()),
     };
     let _ = send.finish();
-    conn.close(VarInt::from_u32(0), b"done");
+    conn.close(VarInt::from_u32(0), READ_RECEIPT);
     Ok(outcome)
 }
 
@@ -390,6 +416,7 @@ pub async fn handle_connection(
     hub: &DecisionHub,
     mut on_event: impl FnMut(IncomingEvent) + Send,
 ) -> Result<ReceiveOutcome, EngineError> {
+    let authenticated_sender_id = conn.remote_id().to_z32();
     let (mut send, recv) = conn
         .accept_bi()
         .await
@@ -402,13 +429,13 @@ pub async fn handle_connection(
                 Ok(()) => manifest,
                 Err(e) => {
                     let error = EngineError::Protocol(format!("清单不合法: {e}"));
-                    write_final_line(&mut send, &format!("REJECT\t{error}")).await;
+                    write_final_line(&conn, &mut send, &format!("REJECT\t{error}")).await?;
                     return Err(error);
                 }
             },
             Err(e) => {
                 let error = EngineError::Protocol(format!("清单解析失败: {e}"));
-                write_final_line(&mut send, &format!("REJECT\t{error}")).await;
+                write_final_line(&conn, &mut send, &format!("REJECT\t{error}")).await?;
                 return Err(error);
             }
         },
@@ -418,14 +445,17 @@ pub async fn handle_connection(
 
     // 先注册等待再发事件：确认框弹出时裁决通道必已就位。
     let offer_rx = hub.wait(batch_id);
-    on_event(IncomingEvent::Offer(manifest.clone()));
+    on_event(IncomingEvent::Offer {
+        manifest: manifest.clone(),
+        authenticated_sender_id,
+    });
     let decision = tokio::time::timeout(OFFER_TIMEOUT, offer_rx)
         .await
         .map_err(|_| EngineError::Timeout("首连确认"))?;
     match decision {
         Ok(Decision::Accept) => {}
         Ok(Decision::Reject(reason)) => {
-            write_final_line(&mut send, &format!("REJECT\t{reason}")).await;
+            final_line(&conn, &mut send, &format!("REJECT\t{reason}")).await;
             return Ok(ReceiveOutcome {
                 batch_id,
                 state: ReceiveState::Rejected(reason),
@@ -433,12 +463,20 @@ pub async fn handle_connection(
             });
         }
         Ok(other) => {
-            write_final_line(&mut send, "REJECT\t裁决时序错误").await;
-            return Err(EngineError::Protocol(format!("首连确认阶段收到 {other:?}")));
+            final_line(&conn, &mut send, "REJECT\t裁决时序错误").await;
+            return Ok(ReceiveOutcome {
+                batch_id,
+                state: ReceiveState::Failed(format!("首连确认阶段收到 {other:?}")),
+                staged_paths: Vec::new(),
+            });
         }
         Err(_) => {
-            write_final_line(&mut send, "REJECT\t对端已断开").await;
-            return Err(EngineError::Protocol("裁决通道断裂".into()));
+            final_line(&conn, &mut send, "REJECT\t对端已断开").await;
+            return Ok(ReceiveOutcome {
+                batch_id,
+                state: ReceiveState::Failed("裁决通道断裂".into()),
+                staged_paths: Vec::new(),
+            });
         }
     }
     send.write_all(b"ACCEPT\n")
@@ -479,7 +517,11 @@ pub async fn handle_connection(
             (fields.next(), fields.next(), fields.next())
         else {
             let _ = tokio::fs::remove_dir_all(&dir).await;
-            return Err(EngineError::Protocol(format!("坏文件头: {header}")));
+            return Ok(ReceiveOutcome {
+                batch_id,
+                state: ReceiveState::Failed(format!("坏文件头: {header}")),
+                staged_paths: Vec::new(),
+            });
         };
         let header_uuid: Uuid = uuid_raw
             .parse()
@@ -537,7 +579,7 @@ pub async fn handle_connection(
                 ok: false,
                 detail: "SHA-256 校验失败".into(),
             });
-            write_final_line(&mut send, "NACK\tSHA-256 校验失败").await;
+            final_line(&conn, &mut send, "NACK\tSHA-256 校验失败").await;
             let _ = tokio::fs::remove_dir_all(&dir).await;
             return Ok(ReceiveOutcome {
                 batch_id,
@@ -559,46 +601,123 @@ pub async fn handle_connection(
         batch_id,
         paths: staged_paths.clone(),
     });
-    let outcome = match tokio::time::timeout(IMPORT_TIMEOUT, ack_rx).await {
-        Ok(Ok(Decision::Ack)) => {
-            write_final_line(&mut send, "DELIVERED").await;
-            ReceiveOutcome {
-                batch_id,
-                state: ReceiveState::Transferred,
-                staged_paths: staged_paths.clone(),
+    let outcome = async {
+        let outcome = match tokio::time::timeout(IMPORT_TIMEOUT, ack_rx).await {
+            Ok(Ok(Decision::Ack)) => {
+                final_line(&conn, &mut send, "DELIVERED").await;
+                ReceiveOutcome {
+                    batch_id,
+                    state: ReceiveState::Transferred,
+                    staged_paths: staged_paths.clone(),
+                }
             }
-        }
-        Ok(Ok(Decision::Nack(reason))) => {
-            write_final_line(&mut send, &format!("NACK\t{reason}")).await;
-            ReceiveOutcome {
+            Ok(Ok(Decision::Nack(reason))) => {
+                final_line(&conn, &mut send, &format!("NACK\t{reason}")).await;
+                ReceiveOutcome {
+                    batch_id,
+                    state: ReceiveState::Failed(reason),
+                    staged_paths: Vec::new(),
+                }
+            }
+            Ok(Ok(other)) => {
+                final_line(&conn, &mut send, "NACK\t裁决时序错误").await;
+                ReceiveOutcome {
+                    batch_id,
+                    state: ReceiveState::Failed(format!("导入阶段收到 {other:?}")),
+                    staged_paths: Vec::new(),
+                }
+            }
+            Ok(Err(_)) => ReceiveOutcome {
                 batch_id,
-                state: ReceiveState::Failed(reason),
+                state: ReceiveState::Failed("对端已断开".into()),
                 staged_paths: Vec::new(),
+            },
+            Err(_) => {
+                final_line(&conn, &mut send, "NACK\t导入超时").await;
+                ReceiveOutcome {
+                    batch_id,
+                    state: ReceiveState::Failed("导入超时".into()),
+                    staged_paths: Vec::new(),
+                }
             }
-        }
-        Ok(Ok(other)) => {
-            write_final_line(&mut send, "NACK\t裁决时序错误").await;
-            ReceiveOutcome {
-                batch_id,
-                state: ReceiveState::Failed(format!("导入阶段收到 {other:?}")),
-                staged_paths: Vec::new(),
-            }
-        }
-        Ok(Err(_)) => ReceiveOutcome {
-            batch_id,
-            state: ReceiveState::Failed("对端已断开".into()),
-            staged_paths: Vec::new(),
-        },
-        Err(_) => {
-            write_final_line(&mut send, "NACK\t导入超时").await;
-            ReceiveOutcome {
-                batch_id,
-                state: ReceiveState::Failed("导入超时".into()),
-                staged_paths: Vec::new(),
-            }
-        }
-    };
+        };
+        Ok(outcome)
+    }
+    .await;
     // 暂存区使命结束：导入已复制入库（Transferred）或用户放弃（其余分支）。
     let _ = tokio::fs::remove_dir_all(&dir).await;
-    Ok(outcome)
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::endpoint::presets;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn terminal_reply_waits_for_peer_read_receipt() {
+        assert!(terminal_reply_outcome(true).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn terminal_reply_rejects_disconnect_without_read_receipt() {
+        assert!(terminal_reply_outcome(false).await.is_err());
+    }
+
+    async fn terminal_reply_outcome(confirm: bool) -> Result<(), EngineError> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let server = Endpoint::builder(presets::Minimal)
+                .alpns(vec![share::ALPN_SYNC.as_bytes().to_vec()])
+                .bind()
+                .await
+                .unwrap();
+            let client = Endpoint::builder(presets::Minimal).bind().await.unwrap();
+            let port = server
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .unwrap()
+                .port();
+            let target = EndpointAddr::new(server.id())
+                .with_ip_addr(SocketAddr::from(([127, 0, 0, 1], port)));
+            let mut serve = tokio::spawn(async move {
+                let conn = server.accept().await.unwrap().await.unwrap();
+                let (mut send, recv) = conn.accept_bi().await.unwrap();
+                let mut reader = LineReader::new(recv);
+                assert_eq!(
+                    reader.read_line(64).await.unwrap().as_deref(),
+                    Some("request")
+                );
+                write_final_line(&conn, &mut send, "reply").await
+            });
+            let conn = client
+                .connect(target, share::ALPN_SYNC.as_bytes())
+                .await
+                .unwrap();
+            let (mut send, recv) = conn.open_bi().await.unwrap();
+            send.write_all(b"request\n").await.unwrap();
+            let mut reader = LineReader::new(recv);
+            assert_eq!(
+                reader.read_line(64).await.unwrap().as_deref(),
+                Some("reply")
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(650), &mut serve)
+                    .await
+                    .is_err(),
+                "terminal reply released the connection without the peer's read receipt"
+            );
+            send.finish().unwrap();
+            conn.close(
+                VarInt::from_u32(0),
+                if confirm { READ_RECEIPT } else { b"cancelled" },
+            );
+            let outcome = serve.await.unwrap();
+            client.close().await;
+            outcome
+        })
+        .await
+        .expect("terminal reply receipt test timed out")
+    }
 }

@@ -62,12 +62,13 @@ pub use share::{
 };
 // D90-P2：空间同步的报文/服务册/资产元数据/上限（app-ui 白名单不含 share）。
 pub use share::{
-    merge_lamport, ServeItem, SpaceAssetKind, SpaceAssetMeta, SpaceBookEntry, SpaceBookState,
-    SpaceMessage, MAX_FETCH_ITEMS,
+    merge_lamport, OpKey, ServeItem, SpaceAssetKind, SpaceAssetMeta, SpaceBookEntry,
+    SpaceBookState, SpaceMessage, SpaceSummaryEntry, MAX_FETCH_ITEMS, MAX_OPS_PER_MESSAGE,
 };
 pub use space_vm::{
-    parse_staged_payload, parse_transfer_manifest, sort_and_dedupe_ops, space_book_json,
-    space_ops_from_lines, space_ops_to_lines, space_send_line, SpaceVm,
+    authenticated_transfer_sender, parse_staged_payload, parse_transfer_manifest,
+    sort_and_dedupe_ops, space_book_json, space_ops_from_lines, space_ops_to_lines,
+    space_send_line, SpaceVm,
 };
 pub use target_bar_vm::{
     TargetBarMode, TargetBarSnapshot, TargetBarVm, TargetChoice, TargetNoticeTone,

@@ -118,7 +118,7 @@ async fn loopback_delivers_and_verifies_bytes() {
         let incoming = serve_ep.accept().await.expect("accept 返回 None");
         let conn = incoming.await.expect("握手失败");
         engine::handle_connection(conn, &staging_path, &serve_hub, |event| match event {
-            IncomingEvent::Offer(manifest) => {
+            IncomingEvent::Offer { manifest, .. } => {
                 if let Some(tx) = offer_tx.take() {
                     let _ = tx.send(manifest);
                 }
@@ -145,6 +145,7 @@ async fn loopback_delivers_and_verifies_bytes() {
             let _ = event_tx.send(event);
         })
         .await;
+        send_ep.close().await;
         (
             outcome,
             progress_seen.load(std::sync::atomic::Ordering::Relaxed),
@@ -246,7 +247,7 @@ async fn loopback_reject_leaves_no_staging() {
             .await
             .expect("conn");
         engine::handle_connection(conn, &staging_path, &serve_hub, |event| {
-            if let IncomingEvent::Offer(manifest) = event {
+            if let IncomingEvent::Offer { manifest, .. } = event {
                 if let Some(tx) = offer_tx.take() {
                     let _ = tx.send(manifest.batch_id);
                 }
@@ -255,10 +256,11 @@ async fn loopback_reject_leaves_no_staging() {
         .await
     });
 
-    let send_task =
-        tokio::spawn(
-            async move { engine::send_batch(&send_ep, target, request, |_event| {}).await },
-        );
+    let send_task = tokio::spawn(async move {
+        let outcome = engine::send_batch(&send_ep, target, request, |_event| {}).await;
+        send_ep.close().await;
+        outcome
+    });
 
     let offered_batch = with_timeout("Offer", offer_rx).await.expect("Offer 断裂");
     assert_eq!(offered_batch, batch_id);
@@ -315,7 +317,7 @@ async fn loopback_nack_marks_failed_and_cleans_staging() {
             .await
             .expect("conn");
         engine::handle_connection(conn, &staging_path, &serve_hub, |event| match event {
-            IncomingEvent::Offer(_) => {
+            IncomingEvent::Offer { .. } => {
                 if let Some(tx) = offer_tx.take() {
                     let _ = tx.send(());
                 }
@@ -330,10 +332,11 @@ async fn loopback_nack_marks_failed_and_cleans_staging() {
         .await
     });
 
-    let send_task =
-        tokio::spawn(
-            async move { engine::send_batch(&send_ep, target, request, |_event| {}).await },
-        );
+    let send_task = tokio::spawn(async move {
+        let outcome = engine::send_batch(&send_ep, target, request, |_event| {}).await;
+        send_ep.close().await;
+        outcome
+    });
 
     with_timeout("Offer", offer_rx).await.expect("Offer 断裂");
     assert!(hub.resolve(batch_id, Decision::Accept));

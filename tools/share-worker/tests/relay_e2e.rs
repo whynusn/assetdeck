@@ -1,74 +1,33 @@
-//! 依赖 n0 公共中继；两端禁用 IP 传输，避免把本机直连误判成中继成功。
+//! Public-network acceptance: production endpoints, fresh identities, no IP transport,
+//! no online prewarming, and only the remote identity supplied to each dial.
 
 use std::time::Duration;
 
 use domain::AssetKind;
-use iroh::endpoint::presets;
-use iroh::{Endpoint, RelayMode};
+use iroh::{EndpointAddr, SecretKey};
 use share::{
-    PeerSyncState, SendItem, SendRequest, SpaceBookEntry, SpaceBookState, SpaceMessage,
-    SpaceRegistry, SyncBookState, SyncMessage, ALPN, ALPN_SYNC,
+    SendItem, SendRequest, SpaceBookEntry, SpaceBookState, SpaceMessage, SpaceRegistry, SyncMessage,
 };
+use share_worker::dial::production_endpoint;
 use share_worker::engine::{self, BatchOutcome, Decision, DecisionHub, IncomingEvent};
 use share_worker::sync::{handle_sync_connection, send_sync_message, SpaceBook, SyncBook};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-async fn relay_endpoint() -> Endpoint {
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Default)
-        .clear_ip_transports()
-        .alpns(vec![
-            ALPN.as_bytes().to_vec(),
-            ALPN_SYNC.as_bytes().to_vec(),
-        ])
-        .bind()
-        .await
-        .expect("绑定中继端点失败");
-    tokio::time::timeout(Duration::from_secs(60), endpoint.online())
-        .await
-        .expect("公共中继上线超时");
-    assert!(endpoint.bound_sockets().is_empty());
-    assert_eq!(endpoint.addr().ip_addrs().count(), 0);
-    assert!(endpoint.addr().relay_urls().next().is_some());
-    endpoint
-}
-
 #[tokio::test]
-#[ignore = "需要访问 n0 公共中继；手动运行"]
-async fn public_relay_sync_and_file_transfer() {
+#[ignore = "requires n0 public discovery and relay access"]
+async fn public_relay_cold_identity_join_and_file_transfer() {
     tokio::time::timeout(Duration::from_secs(150), async {
-        let server = relay_endpoint().await;
-        let client = relay_endpoint().await;
-        let book = SyncBook::new();
-        let mut state = SyncBookState::default();
-        state.set(
-            client.id().to_z32(),
-            PeerSyncState {
-                rev: 7,
-                offers: Vec::new(),
-            },
-        );
-        book.replace(state);
-        let receiver = server.clone();
-        let serve = tokio::spawn(async move {
-            let conn = receiver
-                .accept()
-                .await
-                .expect("accept")
-                .await
-                .expect("握手失败");
-            handle_sync_connection(conn, &book, &SpaceBook::new(), |_| {})
-                .await
-                .expect("中继同步服务失败");
-        });
-        let reply = send_sync_message(&client, server.addr(), SyncMessage::Pull { since_rev: 0 })
+        let server = production_endpoint(SecretKey::generate(), true)
             .await
-            .expect("中继同步拨号失败");
-        assert!(
-            matches!(reply, Some(SyncMessage::Snapshot { rev: 7, offers }) if offers.is_empty())
-        );
-        serve.await.expect("同步任务失败");
+            .unwrap();
+        let client = production_endpoint(SecretKey::generate(), true)
+            .await
+            .unwrap();
+        assert!(server.bound_sockets().is_empty());
+        assert!(client.bound_sockets().is_empty());
+        assert_eq!(server.addr().ip_addrs().count(), 0);
+        assert_eq!(client.addr().ip_addrs().count(), 0);
 
         let mut registry = SpaceRegistry::new();
         registry.self_id = Some(server.id().to_z32());
@@ -95,14 +54,14 @@ async fn public_relay_sync_and_file_transfer() {
                 .await
                 .expect("accept")
                 .await
-                .expect("握手失败");
-            handle_sync_connection(conn, &SyncBook::new(), &spaces, |_| {})
+                .expect("handshake");
+            handle_sync_connection(conn, &SyncBook::new(), &spaces, receiver.id(), |_| {})
                 .await
-                .expect("中继加入服务失败");
+                .unwrap();
         });
         let reply = send_sync_message(
             &client,
-            server.addr(),
+            EndpointAddr::new(server.id()),
             SyncMessage::Space {
                 message: SpaceMessage::Join {
                     code,
@@ -111,11 +70,11 @@ async fn public_relay_sync_and_file_transfer() {
             },
         )
         .await
-        .expect("中继加入拨号失败");
+        .expect("cold pure-ID Join failed");
         assert!(matches!(reply, Some(SyncMessage::Space {
             message: SpaceMessage::JoinOk { meta: joined, .. },
         }) if joined.id == meta.id && joined.is_member(&client.id().to_z32())));
-        serve.await.expect("加入任务失败");
+        serve.await.unwrap();
 
         let source = tempfile::tempdir().unwrap();
         let payload = vec![37u8; 300_000];
@@ -128,7 +87,7 @@ async fn public_relay_sync_and_file_transfer() {
             sender_name: "relay-test".into(),
             receiver_id: server.id().to_z32(),
             receiver_addrs: Vec::new(),
-            space_id: None,
+            space_id: Some(meta.id),
             items: vec![SendItem {
                 asset_uuid: Uuid::new_v4(),
                 file_name: "relay.bin".into(),
@@ -138,9 +97,9 @@ async fn public_relay_sync_and_file_transfer() {
                 path,
             }],
         };
-        let hub = DecisionHub::new();
-        let decisions = hub.clone();
+        let decisions = DecisionHub::new();
         let receiver = server.clone();
+        let expected_sender = client.id().to_z32();
         let (bytes_tx, bytes_rx) = oneshot::channel();
         let serve = tokio::spawn(async move {
             let mut bytes_tx = Some(bytes_tx);
@@ -149,30 +108,37 @@ async fn public_relay_sync_and_file_transfer() {
                 .await
                 .expect("accept")
                 .await
-                .expect("握手失败");
+                .expect("handshake");
             engine::handle_connection(conn, &staging_path, &decisions, |event| match event {
-                IncomingEvent::Offer(manifest) => {
+                IncomingEvent::Offer {
+                    manifest,
+                    authenticated_sender_id,
+                } => {
+                    assert_eq!(authenticated_sender_id, expected_sender);
                     assert!(decisions.resolve(manifest.batch_id, Decision::Accept));
                 }
                 IncomingEvent::Staged { batch_id, paths } => {
-                    let bytes = std::fs::read(&paths[0]).unwrap();
-                    bytes_tx.take().unwrap().send(bytes).unwrap();
+                    bytes_tx
+                        .take()
+                        .unwrap()
+                        .send(std::fs::read(&paths[0]).unwrap())
+                        .unwrap();
                     assert!(decisions.resolve(batch_id, Decision::Ack));
                 }
                 IncomingEvent::ItemDone { .. } => {}
             })
             .await
-            .expect("中继接收失败");
+            .unwrap();
         });
-        let result = engine::send_batch(&client, server.addr(), request, |_| {})
+        let result = engine::send_batch(&client, EndpointAddr::new(server.id()), request, |_| {})
             .await
-            .expect("中继发送失败");
+            .unwrap();
         assert_eq!(result, BatchOutcome::Delivered);
         assert_eq!(bytes_rx.await.unwrap(), payload);
-        serve.await.expect("接收任务失败");
+        serve.await.unwrap();
         client.close().await;
         server.close().await;
     })
     .await
-    .expect("公共中继端到端验证超时");
+    .expect("public relay acceptance timed out");
 }

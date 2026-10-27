@@ -6338,6 +6338,7 @@ name = "share-worker"
 version = "0.1.14"
 dependencies = [
  "domain",
+ "futures-util",
  "iroh",
  "logging",
  "mdns-sd",

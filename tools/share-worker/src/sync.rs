@@ -12,12 +12,12 @@
 //! 报文本身不自报身份——发现面的「来自谁」不可伪造。未配对对端的
 //! 报文照样上抛，是否采信由 UI 依配对册裁决（引擎不持信任状态）。
 //!
-//! QUIC 冲刷纪律与 engine 相同：终行写出必须 finish + 冲刷窗再放连接。
+//! 最后读取应用报文的一方关闭会话确认送达，发送方有界等待该事件。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, VarInt};
 use iroh::{Endpoint, EndpointAddr};
 use share::{
     admit_join, parse_space_invite_code, SpaceAssetMeta, SpaceBookState, SpaceJoinError,
@@ -25,7 +25,8 @@ use share::{
 };
 
 use crate::engine::{
-    write_final_line, EngineError, CONNECT_TIMEOUT, FLUSH_GRACE, MANIFEST_LINE_MAX,
+    finish_with_receipt, write_final_line, EngineError, CONNECT_TIMEOUT, MANIFEST_LINE_MAX,
+    READ_RECEIPT,
 };
 use crate::lines::LineReader;
 
@@ -89,11 +90,14 @@ pub enum SyncInbound {
         peer_id: String,
         joiner_name: String,
     },
-    /// D90-P2：收到字节索取（同步通道不传字节——main 侧组装推送通道投递）。
+    /// An authenticated peer opened a pull session; UI may perform one bounded
+    /// reciprocal pull even when no DEVICE discovery event was observed.
+    PeerActive { peer_id: String },
+    /// D90-P2: 字节索取经名册授权后交 UI 侧投递（含已解析的本地字节路径）。
     SpaceFetch {
         peer_id: String,
         space_id: uuid::Uuid,
-        items: Vec<SpaceAssetMeta>,
+        items: Vec<(SpaceAssetMeta, String)>,
     },
 }
 
@@ -123,12 +127,12 @@ impl SpaceBook {
         *self.state.lock().unwrap() = state;
     }
 
-    /// 抗熵发起方的 Summary（本地全部空间的 op 键全集）。
-    pub fn summary(&self) -> SpaceMessage {
+    pub fn summary_for(&self, peer_id: &str) -> SpaceMessage {
         let state = self.state.lock().unwrap();
         let entries = state
             .spaces
             .iter()
+            .filter(|(_, entry)| entry.meta.is_member(peer_id))
             .map(|(id, entry)| SpaceSummaryEntry {
                 space_id: *id,
                 keys: entry.ops.iter().map(share::OpKey::of).collect(),
@@ -137,32 +141,126 @@ impl SpaceBook {
         SpaceMessage::Summary { entries }
     }
 
-    pub fn diff_against(&self, entries: &[SpaceSummaryEntry]) -> Vec<SpaceOp> {
-        self.state.lock().unwrap().diff_against(entries)
-    }
-
-    /// Fetch 的本地落位查询（hash → 绝对路径；拷贝返回避免锁跨 await）。
-    pub fn serve_path(&self, space_id: uuid::Uuid, content_hash: &[u8]) -> Option<String> {
+    pub fn member_space_ids(&self, peer_id: &str) -> Vec<uuid::Uuid> {
         self.state
             .lock()
             .unwrap()
-            .serve_path(space_id, content_hash)
-            .map(str::to_string)
+            .spaces
+            .iter()
+            .filter(|(_, entry)| entry.meta.is_member(peer_id))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
-    /// Join 受理（空间主侧）：验码入册副本 + 返回 JoinOk 材料。
+    pub fn page_after(
+        &self,
+        peer_id: &str,
+        space_id: uuid::Uuid,
+        after: Option<&share::OpKey>,
+    ) -> Option<SpaceMessage> {
+        let state = self.state.lock().unwrap();
+        if !state
+            .spaces
+            .get(&space_id)
+            .is_some_and(|entry| entry.meta.is_member(peer_id))
+        {
+            return None;
+        }
+        Some(state.page_after(space_id, after))
+    }
+
+    pub fn diff_against(&self, peer_id: &str, entries: &[SpaceSummaryEntry]) -> Vec<SpaceOp> {
+        let state = self.state.lock().unwrap();
+        let authorized: Vec<_> = entries
+            .iter()
+            .filter(|summary| {
+                state
+                    .spaces
+                    .get(&summary.space_id)
+                    .is_some_and(|entry| entry.meta.is_member(peer_id))
+            })
+            .cloned()
+            .collect();
+        state.diff_against(&authorized)
+    }
+
+    /// The authenticated peer must be a roster member before any serve-index lookup.
+    pub fn can_fetch(&self, space_id: uuid::Uuid, peer_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .spaces
+            .get(&space_id)
+            .is_some_and(|entry| entry.meta.is_member(peer_id))
+    }
+
+    /// The authenticated peer must be a roster member before any serve-index lookup.
+    /// Returns only requested items that have a local byte path.
+    pub fn authorized_fetch(
+        &self,
+        space_id: uuid::Uuid,
+        peer_id: &str,
+        items: &[SpaceAssetMeta],
+    ) -> Option<Vec<(SpaceAssetMeta, String)>> {
+        let state = self.state.lock().unwrap();
+        let entry = state.spaces.get(&space_id)?;
+        if !entry.meta.is_member(peer_id) {
+            return None;
+        }
+        let mut ordered: Vec<_> = entry.ops.iter().collect();
+        ordered.sort_by_key(|op| share::OpKey::of(op));
+        let mut active = std::collections::HashMap::new();
+        for op in ordered {
+            match &op.op {
+                share::SpaceOpKind::Add { asset } => {
+                    active.insert(asset.uuid, asset);
+                }
+                share::SpaceOpKind::Remove { asset_uuid } => {
+                    active.remove(asset_uuid);
+                }
+                _ => {}
+            }
+        }
+        let by_hash: std::collections::HashMap<_, _> = active
+            .into_values()
+            .map(|asset| (asset.content_hash.as_slice(), asset))
+            .collect();
+        let mut served_hashes = std::collections::HashSet::new();
+        Some(
+            items
+                .iter()
+                .filter_map(|item| {
+                    if !served_hashes.insert(item.content_hash.as_slice()) {
+                        return None;
+                    }
+                    let asset = by_hash.get(item.content_hash.as_slice())?;
+                    let served = entry
+                        .serve
+                        .iter()
+                        .find(|served| served.content_hash == asset.content_hash)?;
+                    Some(((*asset).clone(), served.path.clone()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Join受理（空间主侧）：验码入册 + 返回 JoinOk 材料。
     pub fn admit(
         &self,
         code: &str,
+        local_owner_id: &iroh::EndpointId,
         joiner_id: &str,
         joiner_name: &str,
     ) -> Result<AdmittedSpace, SpaceJoinError> {
         let parsed = parse_space_invite_code(code).map_err(SpaceJoinError::BadCode)?;
+        let owner_id = local_owner_id.to_z32();
         let mut state = self.state.lock().unwrap();
         let Some(entry) = state.spaces.get_mut(&parsed.space_id) else {
-            // 不泄漏册里有没有这个空间。
             return Err(SpaceJoinError::NoSuchSpace);
         };
+        if entry.meta.owner_id != owner_id || parsed.owner_id != owner_id {
+            return Err(SpaceJoinError::NoSuchSpace);
+        }
         let admitted = admit_join(entry, code, joiner_id, joiner_name, unix_now())?;
         Ok(AdmittedSpace {
             space_id: parsed.space_id,
@@ -178,6 +276,7 @@ pub async fn handle_sync_connection(
     conn: Connection,
     book: &SyncBook,
     spaces: &SpaceBook,
+    local_owner_id: iroh::EndpointId,
     mut on_event: impl FnMut(SyncInbound) + Send,
 ) -> Result<(), EngineError> {
     let peer_id = conn.remote_id().to_z32();
@@ -190,8 +289,13 @@ pub async fn handle_sync_connection(
         .read_line(MANIFEST_LINE_MAX)
         .await?
         .ok_or_else(|| EngineError::Protocol("对端未发同步报文即断开".into()))?;
-    let message: SyncMessage = serde_json::from_str(&line)
-        .map_err(|e| EngineError::Protocol(format!("同步报文解析失败: {e}")))?;
+    let message: SyncMessage = serde_json::from_str(&line).map_err(|e| {
+        EngineError::Protocol(format!(
+            "同步报文解析失败 line={} column={}",
+            e.line(),
+            e.column()
+        ))
+    })?;
     message
         .validate()
         .map_err(|e| EngineError::Protocol(format!("同步报文不合法: {e}")))?;
@@ -201,24 +305,46 @@ pub async fn handle_sync_connection(
             let reply = book.snapshot_for(&peer_id);
             let json = serde_json::to_string(&reply)
                 .map_err(|e| EngineError::Protocol(format!("快照序列化失败: {e}")))?;
-            write_final_line(&mut send, &json).await;
+            write_final_line(&conn, &mut send, &json).await?;
             Ok(())
         }
         // D90-P2 空间协议：Summary/Join 同步应答；Fetch 不占同步通道字节。
         SyncMessage::Space { message } => match message {
+            SpaceMessage::PullOps { space_id, after } => {
+                on_event(SyncInbound::PeerActive {
+                    peer_id: peer_id.clone(),
+                });
+                let reply = SyncMessage::Space {
+                    message: spaces
+                        .page_after(&peer_id, space_id, after.as_ref())
+                        .unwrap_or(SpaceMessage::OpsPage {
+                            space_id,
+                            after,
+                            next: None,
+                            ops: Vec::new(),
+                        }),
+                };
+                let json = serde_json::to_string(&reply)
+                    .map_err(|e| EngineError::Protocol(format!("空间分页序列化失败: {e}")))?;
+                write_final_line(&conn, &mut send, &json).await?;
+                Ok(())
+            }
             SpaceMessage::Summary { entries } => {
+                on_event(SyncInbound::PeerActive {
+                    peer_id: peer_id.clone(),
+                });
                 let reply = SyncMessage::Space {
                     message: SpaceMessage::Ops {
-                        ops: spaces.diff_against(&entries),
+                        ops: spaces.diff_against(&peer_id, &entries),
                     },
                 };
                 let json = serde_json::to_string(&reply)
                     .map_err(|e| EngineError::Protocol(format!("空间应答序列化失败: {e}")))?;
-                write_final_line(&mut send, &json).await;
+                write_final_line(&conn, &mut send, &json).await?;
                 Ok(())
             }
             SpaceMessage::Join { code, joiner_name } => {
-                let reply = match spaces.admit(&code, &peer_id, &joiner_name) {
+                let reply = match spaces.admit(&code, &local_owner_id, &peer_id, &joiner_name) {
                     Ok(admitted) => {
                         if admitted.admitted {
                             on_event(SyncInbound::SpaceAdmitted {
@@ -230,7 +356,11 @@ pub async fn handle_sync_connection(
                         SyncMessage::Space {
                             message: SpaceMessage::JoinOk {
                                 meta: admitted.meta,
-                                ops: admitted.ops,
+                                ops: admitted
+                                    .ops
+                                    .into_iter()
+                                    .take(share::MAX_OPS_PER_MESSAGE)
+                                    .collect(),
                             },
                         }
                     }
@@ -242,15 +372,45 @@ pub async fn handle_sync_connection(
                 };
                 let json = serde_json::to_string(&reply)
                     .map_err(|e| EngineError::Protocol(format!("加入应答序列化失败: {e}")))?;
-                write_final_line(&mut send, &json).await;
+                write_final_line(&conn, &mut send, &json).await?;
+                Ok(())
+            }
+            SpaceMessage::OpsPage { .. } => {
+                on_event(SyncInbound::Message {
+                    peer_id,
+                    message: SyncMessage::Space { message },
+                });
+                conn.close(VarInt::from_u32(0), READ_RECEIPT);
                 Ok(())
             }
             SpaceMessage::Fetch { space_id, items } => {
-                on_event(SyncInbound::SpaceFetch {
-                    peer_id: peer_id.clone(),
-                    space_id,
-                    items,
-                });
+                let authorized = spaces.authorized_fetch(space_id, &peer_id, &items);
+                let served: std::collections::HashSet<_> = authorized
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .map(|(asset, _)| asset.content_hash.clone())
+                    .collect();
+                let reply = SyncMessage::Space {
+                    message: SpaceMessage::FetchUnavailable {
+                        space_id,
+                        hashes: items
+                            .iter()
+                            .filter(|asset| !served.contains(&asset.content_hash))
+                            .map(|asset| asset.content_hash.clone())
+                            .collect(),
+                    },
+                };
+                if let Some(items) = authorized.filter(|items| !items.is_empty()) {
+                    on_event(SyncInbound::SpaceFetch {
+                        peer_id: peer_id.clone(),
+                        space_id,
+                        items,
+                    });
+                }
+                let json = serde_json::to_string(&reply)
+                    .map_err(|e| EngineError::Protocol(format!("索取应答序列化失败: {e}")))?;
+                write_final_line(&conn, &mut send, &json).await?;
                 Ok(())
             }
             other => {
@@ -258,6 +418,7 @@ pub async fn handle_sync_connection(
                     peer_id,
                     message: SyncMessage::Space { message: other },
                 });
+                conn.close(VarInt::from_u32(0), READ_RECEIPT);
                 Ok(())
             }
         },
@@ -266,6 +427,7 @@ pub async fn handle_sync_connection(
                 peer_id,
                 message: other,
             });
+            conn.close(VarInt::from_u32(0), READ_RECEIPT);
             Ok(())
         }
     }
@@ -285,16 +447,18 @@ pub async fn send_sync_message(
         message,
         SyncMessage::Pull { .. }
             | SyncMessage::Space {
-                message: SpaceMessage::Join { .. } | SpaceMessage::Summary { .. }
+                message: SpaceMessage::Join { .. }
+                    | SpaceMessage::Summary { .. }
+                    | SpaceMessage::PullOps { .. }
+                    | SpaceMessage::Fetch { .. },
             }
     );
     let conn = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        endpoint.connect(target, share::ALPN_SYNC.as_bytes()),
+        crate::dial::connect(endpoint, target, share::ALPN_SYNC.as_bytes()),
     )
     .await
-    .map_err(|_| EngineError::Timeout("连接"))?
-    .map_err(|e| EngineError::Dial(e.to_string()))?;
+    .map_err(|_| EngineError::Timeout("连接"))??;
     let (mut send, recv) = conn
         .open_bi()
         .await
@@ -308,9 +472,7 @@ pub async fn send_sync_message(
         .await
         .map_err(|e| EngineError::Io(format!("发送同步报文失败: {e}")))?;
     if !wants_reply {
-        // 推送即收尾：finish + 冲刷窗，防连接句柄 drop 带走在途字节。
-        let _ = send.finish();
-        tokio::time::sleep(FLUSH_GRACE).await;
+        finish_with_receipt(&conn, &mut send).await?;
         return Ok(None);
     }
     let reply = tokio::time::timeout(SYNC_REPLY_TIMEOUT, reader.read_line(MANIFEST_LINE_MAX))
@@ -318,12 +480,17 @@ pub async fn send_sync_message(
         .map_err(|_| EngineError::Timeout("同步应答"))?
         .map_err(|e| EngineError::Io(format!("读取同步应答失败: {e}")))?
         .ok_or_else(|| EngineError::Protocol("对端未回同步应答即断开".into()))?;
-    let reply: SyncMessage = serde_json::from_str(&reply)
-        .map_err(|e| EngineError::Protocol(format!("同步应答解析失败: {e}")))?;
+    let reply: SyncMessage = serde_json::from_str(&reply).map_err(|e| {
+        EngineError::Protocol(format!(
+            "同步应答解析失败 line={} column={}",
+            e.line(),
+            e.column()
+        ))
+    })?;
     reply
         .validate()
         .map_err(|e| EngineError::Protocol(format!("同步应答不合法: {e}")))?;
-    // 应答已到手；finish 本侧发送方向再收尾（对端按终行纪律早已回完）。
     let _ = send.finish();
+    conn.close(VarInt::from_u32(0), READ_RECEIPT);
     Ok(Some(reply))
 }

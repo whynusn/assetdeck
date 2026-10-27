@@ -4,6 +4,7 @@
 slint::include_modules!();
 
 mod cards;
+mod import_completion;
 mod notifications;
 mod spaces;
 use notifications::show_notice;
@@ -39,9 +40,20 @@ use ui_viewmodels::{
 use task_runner::ChildTask;
 use thumbs::{GridCtx, ThumbCache, ThumbSource, THUMB_CACHE_CAPACITY};
 
+type ImportRefresh = dyn Fn(&std::path::Path);
+
+fn refresh_import_target(target: &std::path::Path) {
+    let refresh = IMPORT_REFRESH.with(|slot| slot.borrow().clone());
+    if let Some(refresh) = refresh {
+        refresh(target);
+    }
+}
+
 thread_local! {
     // D50 弹窗两段式动效的单发定时器：入场下一帧翻转 / 出场播完再卸载。
     static CLASSIFY_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
+    // UI-only refresh wiring; destination and receipt identity remain in each callback.
+    static IMPORT_REFRESH: RefCell<Option<Rc<ImportRefresh>>> = const { RefCell::new(None) };
     /// D56 更新弹窗两段式入场（同 CLASSIFY_ANIM_TIMER 模式）。
     static UPDATE_ANIM_TIMER: RefCell<Timer> = RefCell::new(Timer::default());
     /// D73 运行中间隔检查的节拍器：Repeated 每 10min 醒一次只评估到期与否，
@@ -463,6 +475,15 @@ impl CrudCtx {
         if uuids.is_empty() && action != "empty-trash" {
             return;
         }
+        if action == "purge" {
+            if let Some(scope) = spaces::active() {
+                if let Err(reason) = spaces::remove_assets(scope.id, uuids) {
+                    spaces::enter_space(scope.id);
+                    show_notice(&ui, TargetNoticeTone::Warning, reason);
+                }
+                return;
+            }
+        }
         let root = self.active_root();
         let mut args: Vec<String> = vec!["--cmd".into(), action.into(), "--library".into(), root];
         for uuid in uuids {
@@ -635,9 +656,11 @@ struct ImportFlow {
     categories: Rc<RefCell<Vec<String>>>,
     importing: Arc<AtomicBool>,
     library_root: Option<String>,
-    /// D80 共享导入的批次号：ImportStaged 动作置位 → do_import 据此装
-    /// post_phase1 钩子回 ACK/NACK。每次 open() 先清空，普通导入不受影响。
-    share_batch: Rc<Cell<Option<Uuid>>>,
+    /// Destination captured before probes/classification; view changes cannot retarget it.
+    destination: RefCell<Option<std::path::PathBuf>>,
+    /// A pending probe/classification request owns this slot until confirmed or canceled.
+    request_open: Arc<AtomicBool>,
+    request_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// 归入候选封顶（弹窗列表限高，超出部分靠继续输入收窄）。
@@ -656,7 +679,23 @@ impl ImportFlow {
     /// 入口：三入口汇流（混选多选 / 文件夹 / .emo）。先归纳条目，需要 N
     /// 标注的（目录与 .emo）逐个起 `--probe-categories`，全部回来再 finalize。
     fn open(self: &Rc<Self>, paths: Vec<std::path::PathBuf>) {
+        let request_open = Arc::clone(&self.request_open);
+        if request_open
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            logging::warn!("忽略重叠导入请求：分类预扫描/选择仍在进行");
+            if let Some(ui) = self.ui.upgrade() {
+                notifications::publish(
+                    &ui,
+                    ui_viewmodels::notifications::Severity::Info,
+                    "上一批素材仍在准备分类，请完成或取消后再导入".to_string(),
+                );
+            }
+            return;
+        }
         if self.importing.load(Ordering::SeqCst) {
+            request_open.store(false, Ordering::SeqCst);
             if let Some(ui) = self.ui.upgrade() {
                 notifications::publish(
                     &ui,
@@ -666,8 +705,10 @@ impl ImportFlow {
             }
             return;
         }
-        // 每次入流都重置共享批次标记：普通导入绝不误发 ACK/NACK。
-        self.share_batch.set(None);
+        let generation = self.request_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.destination.borrow_mut() = Some(std::path::PathBuf::from(spaces::active_root(
+            self.library_root.as_deref(),
+        )));
         let entries: Vec<ImportEntry> = paths
             .into_iter()
             .map(|path| {
@@ -691,7 +732,7 @@ impl ImportFlow {
             .collect();
         let pending = entries
             .iter()
-            .filter(|e| matches!(e.kind, EntryKind::Directory | EntryKind::EmoPackage))
+            .filter(|entry| matches!(entry.kind, EntryKind::Directory | EntryKind::EmoPackage))
             .count() as u32;
         *self.entries.borrow_mut() = entries;
         self.pending.set(pending);
@@ -699,26 +740,30 @@ impl ImportFlow {
             self.finalize();
             return;
         }
-        let paths: Vec<std::path::PathBuf> = self
+        let probe_paths: Vec<_> = self
             .entries
             .borrow()
             .iter()
-            .filter(|e| matches!(e.kind, EntryKind::Directory | EntryKind::EmoPackage))
-            .map(|e| e.path.clone())
+            .filter(|entry| matches!(entry.kind, EntryKind::Directory | EntryKind::EmoPackage))
+            .map(|entry| entry.path.clone())
             .collect();
-        for path in paths {
-            self.spawn_probe(path);
+        for path in probe_paths {
+            self.spawn_probe(path, generation);
         }
     }
 
     /// 单条来源的 N 预扫描：stdout 一行 `PROBE<HT>categories=<n|none>`；
     /// 子进程线程只许 Weak<AppWindow>（Send 纪律），结果经回调回 UI 线程。
-    fn spawn_probe(self: &Rc<Self>, path: std::path::PathBuf) {
+    fn spawn_probe(self: &Rc<Self>, path: std::path::PathBuf, generation: u64) {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
         let weak_ui = ui.as_weak();
         let weak_done = ui.as_weak();
+        let generation_line = Arc::clone(&self.request_generation);
+        let request_open_line = Arc::clone(&self.request_open);
+        let generation_done = Arc::clone(&self.request_generation);
+        let request_open_done = Arc::clone(&self.request_open);
         let mut task = ChildTask::new(
             helper_exe("sample-library.exe"),
             vec![
@@ -742,7 +787,14 @@ impl ImportFlow {
                     .unwrap_or(-1);
                 let weak = weak_ui.clone();
                 let path = probe_path.clone();
+                let generation_line = Arc::clone(&generation_line);
+                let request_open_line = Arc::clone(&request_open_line);
                 let _ = slint::invoke_from_event_loop(move || {
+                    if generation_line.load(Ordering::SeqCst) != generation
+                        || !request_open_line.load(Ordering::SeqCst)
+                    {
+                        return;
+                    }
                     if let Some(ui) = weak.upgrade() {
                         ui.invoke_classify_probe_result(
                             path.to_string_lossy().into_owned().into(),
@@ -753,8 +805,15 @@ impl ImportFlow {
             })
             .with_finished(move |success, message| {
                 let weak = weak_done.clone();
+                let generation_done = Arc::clone(&generation_done);
+                let request_open_done = Arc::clone(&request_open_done);
                 let path_text = path.to_string_lossy().into_owned();
                 let _ = slint::invoke_from_event_loop(move || {
+                    if generation_done.load(Ordering::SeqCst) != generation
+                        || !request_open_done.load(Ordering::SeqCst)
+                    {
+                        return;
+                    }
                     if let Some(ui) = weak.upgrade() {
                         if !success {
                             logging::warn!("分类数预扫描失败 path={path_text}：{message}");
@@ -782,7 +841,7 @@ impl ImportFlow {
     fn probe_done(self: &Rc<Self>) {
         let remaining = self.pending.get().saturating_sub(1);
         self.pending.set(remaining);
-        if remaining == 0 {
+        if remaining == 0 && self.request_open.load(Ordering::SeqCst) {
             self.finalize();
         }
     }
@@ -790,6 +849,9 @@ impl ImportFlow {
     /// 全部 probe 就绪：D66 分流（可解析包静默直通）→ R8 记忆直通 / 弹窗
     /// （批次级：只读清单行 + 单输入框 + 实时候选与预告行）。
     fn finalize(self: &Rc<Self>) {
+        if !self.request_open.load(Ordering::SeqCst) {
+            return;
+        }
         let plan = classify::plan_import(&self.entries.borrow());
         let groups_len = plan.groups.len();
         logging::info!(
@@ -808,15 +870,18 @@ impl ImportFlow {
                 self.do_import(&[], None, &plan.silent_packages);
             } else {
                 logging::warn!("plan_import 两组皆空（全部条目被过滤？），不弹窗");
+                self.request_open.store(false, Ordering::SeqCst);
+                self.destination.borrow_mut().take();
             }
             return;
         }
         *self.groups.borrow_mut() = plan.groups.clone();
         *self.silent.borrow_mut() = plan.silent_packages;
         let Some(ui) = self.ui.upgrade() else {
+            self.request_open.store(false, Ordering::SeqCst);
+            self.destination.borrow_mut().take();
             return;
         };
-        ui.set_classify_summary(classify::manifest_summary(&plan.groups).into());
         ui.set_classify_argument(
             classify::dialog_prefill(&plan.groups)
                 .unwrap_or_default()
@@ -842,6 +907,10 @@ impl ImportFlow {
 
     /// 出场两段式：先收 shown 播反向过渡，播完再收 open 卸载。
     fn close(&self) {
+        self.request_open.store(false, Ordering::SeqCst);
+        self.pending.set(0);
+        self.destination.borrow_mut().take();
+        self.request_generation.fetch_add(1, Ordering::SeqCst);
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
@@ -954,7 +1023,74 @@ impl ImportFlow {
         decision: Option<(GroupMode, Option<String>)>,
         silent_packages: &[std::path::PathBuf],
     ) {
+        self.request_open.store(false, Ordering::SeqCst);
+        let Some(root) = self.destination.borrow_mut().take() else {
+            return;
+        };
+        self.do_import_to(
+            groups,
+            decision,
+            silent_packages,
+            import_completion::ImportCompletion::new(root, None),
+        );
+    }
+
+    fn import_staged(&self, batch: Uuid, paths: Vec<std::path::PathBuf>) {
+        let root = self
+            .library_root
+            .clone()
+            .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned());
+        let callback: import_completion::Phase1Callback = Arc::new(move |result| {
+            let reason = result.as_ref().err().map(String::as_str).unwrap_or("");
+            SHARE_VM.with(|vm| {
+                vm.borrow_mut()
+                    .import_completed(batch, result.is_ok(), reason)
+            });
+            let writes = SHARE_VM.with(|vm| vm.borrow_mut().take_pending_writes());
+            for line in writes {
+                if !share_write_line(&line) {
+                    logging::warn!(
+                        "导入回执未发送 command={}",
+                        line.split('\t').next().unwrap_or("<empty>")
+                    );
+                }
+            }
+        });
+        let completion = import_completion::ImportCompletion::new(root.into(), Some(callback));
+        if self.importing.load(Ordering::SeqCst) {
+            completion.complete(Err("正在导入素材，请稍后重试".into()));
+            return;
+        }
+        let entries: Vec<_> = paths
+            .into_iter()
+            .map(|path| ImportEntry {
+                kind: if path.is_dir() {
+                    EntryKind::Directory
+                } else {
+                    EntryKind::LooseFile
+                },
+                path,
+                category_count: None,
+            })
+            .collect();
+        let plan = classify::plan_import(&entries);
+        self.do_import_to(
+            &plan.groups,
+            Some((GroupMode::Inbox, None)),
+            &plan.silent_packages,
+            completion,
+        );
+    }
+
+    fn do_import_to(
+        &self,
+        groups: &[SourceGroup],
+        decision: Option<(GroupMode, Option<String>)>,
+        silent_packages: &[std::path::PathBuf],
+        completion: import_completion::ImportCompletion,
+    ) {
         let Some(ui) = self.ui.upgrade() else {
+            completion.complete(Err("导入界面已关闭".into()));
             return;
         };
         let mut lines = String::new();
@@ -990,6 +1126,7 @@ impl ImportFlow {
             }
         }
         if total == 0 {
+            completion.complete(Err("没有可导入的素材".into()));
             return;
         }
         let list = std::env::temp_dir().join(format!(
@@ -1001,6 +1138,7 @@ impl ImportFlow {
                 .unwrap_or(0)
         ));
         if let Err(error) = std::fs::write(&list, lines) {
+            completion.complete(Err("无法写入导入清单".into()));
             show_notice(
                 &ui,
                 TargetNoticeTone::Error,
@@ -1008,16 +1146,7 @@ impl ImportFlow {
             );
             return;
         }
-        // D90 作用域感知：用户导入（拖入/粘贴/菜单）落在当前视图的库——空间
-        // 视图里导入 = 向空间投放素材（成员贡献的自然入口）；M0 接收批次
-        // （share_batch 在途）恒落主库（收件语义与浏览作用域无关）。
-        let root = if self.share_batch.get().is_some() {
-            self.library_root
-                .clone()
-                .unwrap_or_else(|| default_library_root().to_string_lossy().into_owned())
-        } else {
-            spaces::active_root(self.library_root.as_deref())
-        };
+        let root = completion.target().to_string_lossy().into_owned();
         let mode_arg = import_mode_arg(&self.settings.borrow());
         let args = vec![
             "--import-paths".to_string(),
@@ -1027,20 +1156,11 @@ impl ImportFlow {
             "--mode".to_string(),
             mode_arg.to_string(),
         ];
-        // D80 共享导入：批次在途时把导入成败回执挂进 post_phase1（UI 线程回调，
-        // 在成败回显前触发）→ 状态机攒 ACK/NACK 行 → 写 worker stdin。worker
-        // 收到回执才算批次完结并清暂存；失败走 NACK（暂存被 worker 清掉）。
-        let post_phase1: Option<Arc<dyn Fn(bool) + Send + Sync>> =
-            self.share_batch.get().map(|batch| {
-                Arc::new(move |ok: bool| {
-                    let reason = if ok { "" } else { "导入管线失败" };
-                    SHARE_VM.with(|vm| vm.borrow_mut().import_completed(batch, ok, reason));
-                    let writes = SHARE_VM.with(|vm| vm.borrow_mut().take_pending_writes());
-                    for line in writes {
-                        share_write_line(&line);
-                    }
-                }) as Arc<dyn Fn(bool) + Send + Sync>
-            });
+        let list_finished = list.clone();
+        let post_phase1: import_completion::Phase1Callback = Arc::new(move |result| {
+            let _ = std::fs::remove_file(&list_finished);
+            completion.complete(result);
+        });
         spawn_import_pipeline(
             self.ui.clone(),
             args,
@@ -1048,7 +1168,10 @@ impl ImportFlow {
             self.importing.clone(),
             format!("{total} 项素材"),
             self.settings.borrow().fast_import_mode,
-            post_phase1,
+            import_completion::ReconcileTail {
+                callback: Some(post_phase1),
+                allow_space_readd: false,
+            },
         );
     }
 }
@@ -1138,19 +1261,26 @@ fn spawn_share_worker(ui: slint::Weak<AppWindow>) {
     });
 }
 
-/// 往 worker stdin 写一行协议命令（UI 线程独占写）。
-fn share_write_line(line: &str) {
+/// 往 worker stdin 写一行协议命令（UI 线程独占写）。日志只记命令名，不记载荷；
+/// SPACE_STATE 和含邀请码的命令可能携带秘密。
+fn share_write_line(line: &str) -> bool {
+    let command = line.split('\t').next().unwrap_or("<empty>");
     SHARE_STDIN.with(|slot| {
         let mut guard = slot.borrow_mut();
         match guard.as_mut() {
-            Some(stdin) => {
-                if let Err(error) = writeln!(stdin, "{line}").and_then(|()| stdin.flush()) {
-                    logging::error!("共享通道写入失败: {error}");
+            Some(stdin) => match writeln!(stdin, "{line}").and_then(|()| stdin.flush()) {
+                Ok(()) => true,
+                Err(error) => {
+                    logging::error!("共享通道写入失败 command={command}: {error}");
+                    false
                 }
+            },
+            None => {
+                logging::warn!("共享通道未就绪，未发送命令 command={command}");
+                false
             }
-            None => logging::warn!("共享通道未就绪，丢弃命令: {line}"),
         }
-    });
+    })
 }
 
 /// 把状态机产出的副作用落到 UI / 管道（UI 线程调用）。
@@ -1160,7 +1290,9 @@ fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareActio
     };
     for action in actions {
         match action {
-            ShareAction::Send(line) => share_write_line(&line),
+            ShareAction::Send(line) => {
+                share_write_line(&line);
+            }
             ShareAction::PushSyncState => push_share_sync_state(),
             ShareAction::OpenOfferDialog | ShareAction::CloseOfferDialog | ShareAction::Refresh => {
                 sync_share_ui(&ui);
@@ -1173,8 +1305,16 @@ fn dispatch_share_actions(weak: &slint::Weak<AppWindow>, actions: Vec<ShareActio
             ShareAction::ImportStaged { batch, paths } => {
                 let wiring = SHARE_WIRING.with(|slot| slot.borrow().clone());
                 if let Some(wiring) = wiring {
-                    wiring.import_flow.share_batch.set(Some(batch));
-                    wiring.import_flow.open(paths);
+                    wiring.import_flow.import_staged(batch, paths);
+                } else {
+                    SHARE_VM.with(|vm| {
+                        vm.borrow_mut()
+                            .import_completed(batch, false, "导入服务不可用")
+                    });
+                    let writes = SHARE_VM.with(|vm| vm.borrow_mut().take_pending_writes());
+                    for line in writes {
+                        share_write_line(&line);
+                    }
                 }
             }
             ShareAction::Notice(tone, text) => show_notice(&ui, tone, text),
@@ -2642,7 +2782,9 @@ fn main() {
         categories: filter_categories.clone(),
         importing: importing.clone(),
         library_root: library_root.clone(),
-        share_batch: Rc::new(Cell::new(None)),
+        destination: RefCell::new(None),
+        request_open: Arc::new(AtomicBool::new(false)),
+        request_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
     // D80 共享接线装配件：事件分发（含 worker 读线程弹回路径）与导入移交
     // 都从这里取 UI 线程专属 Rc。
@@ -4787,9 +4929,9 @@ fn main() {
             let backup_post = backup.clone();
             let original_post = original.clone();
             let list_post = list.clone();
-            let post: std::sync::Arc<dyn Fn(bool) + Send + Sync> =
-                std::sync::Arc::new(move |success: bool| {
-                if success {
+            let post: import_completion::Phase1Callback =
+                std::sync::Arc::new(move |result| {
+                if result.is_ok() {
                     if let Err(error) =
                         ui_viewmodels::legacy_migration::mark_migrated(&backup_post)
                     {
@@ -4832,7 +4974,10 @@ fn main() {
                 importing.clone(),
                 label,
                 settings.borrow().fast_import_mode,
-                Some(post),
+                import_completion::ReconcileTail {
+                    callback: Some(post),
+                    allow_space_readd: false,
+                },
             );
         });
     }
@@ -5128,61 +5273,67 @@ fn main() {
         let cache = thumb_cache.clone();
         let grid = grid.clone();
 
+        let notice_ui = ui.clone();
+        IMPORT_REFRESH.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::new(move |target: &std::path::Path| {
+                let visible = spaces::active_root(library_root.as_deref());
+                let completion =
+                    import_completion::ImportCompletion::new(target.to_path_buf(), None);
+                if !completion.refreshes(std::path::Path::new(&visible)) {
+                    return;
+                }
+                let Some(ui) = ui.upgrade() else {
+                    return;
+                };
+                match ui_viewmodels::load_real_library(target) {
+                    Ok((index, resolver)) => {
+                        apply_categories(
+                            &ui,
+                            &filter_categories,
+                            &filter_category_ids,
+                            resolver.categories(),
+                        );
+                        let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
+                        new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
+                        if let Ok(aspects) = resolver.aspects() {
+                            new_vm.set_aspects(aspects);
+                        }
+                        *vm.borrow_mut() = new_vm;
+                        *thumbs.borrow_mut() = Some(resolver);
+                        cache.borrow_mut().clear();
+                        ui.set_content_y(0.0);
+                        sync_counts(&ui, vm.borrow().total(), true);
+                        grid.sync();
+                        notifications::resolve(&ui, "library-refresh");
+                    }
+                    Err(error) => notifications::set_problem(
+                        &ui,
+                        "library-refresh",
+                        format!("导入后刷新库失败：{error}。请重试刷新。"),
+                    ),
+                }
+            }));
+        });
         app.on_import_finished(move |success, message| {
-            let Some(ui) = ui.upgrade() else {
+            let Some(ui) = notice_ui.upgrade() else {
                 return;
             };
             if !success {
                 ui.set_progress_visible(false);
-                show_notice(&ui, TargetNoticeTone::Error, message.to_string());
-                return;
             }
-
-            // D90：重载当前作用域（空间视图导入收尾 = 空间库重载）。
-            let root = spaces::active_root(library_root.as_deref());
-            match ui_viewmodels::load_real_library(std::path::Path::new(&root)) {
-                Ok((index, resolver)) => {
-                    apply_categories(
-                        &ui,
-                        &filter_categories,
-                        &filter_category_ids,
-                        resolver.categories(),
-                    );
-
-                    let mut new_vm = LibraryGridVm::new(index, recent_first_sorter(), 256);
-                    new_vm.set_layout_params(CONTAINER_WIDTH, COLUMNS, GAP);
-                    if let Ok(aspects) = resolver.aspects() {
-                        new_vm.set_aspects(aspects);
-                    }
-                    *vm.borrow_mut() = new_vm;
-                    *thumbs.borrow_mut() = Some(resolver);
-                    cache.borrow_mut().clear();
-                    ui.set_content_y(0.0);
-                    sync_counts(&ui, vm.borrow().total(), true);
-                    grid.sync();
-                    // D90-P2：空间根导入完成 → serve 索引已变，整册重推。
-                    spaces::on_space_import_finished(std::path::Path::new(&root));
-                    notifications::resolve(&ui, "library-refresh");
-                    let tone = if ui.get_import_result_available()
-                        && ui
-                            .get_import_result_rows()
-                            .iter()
-                            .any(|row| row.kind == ui_enums::IMPORT_RESULT_FAILED)
-                    {
-                        TargetNoticeTone::Warning
-                    } else {
-                        TargetNoticeTone::Success
-                    };
-                    show_notice(&ui, tone, message.to_string());
-                }
-                Err(error) => {
-                    notifications::set_problem(
-                        &ui,
-                        "library-refresh",
-                        format!("导入后刷新库失败：{error}。请重试刷新。"),
-                    );
-                }
-            }
+            let tone = if !success {
+                TargetNoticeTone::Error
+            } else if ui.get_import_result_available()
+                && ui
+                    .get_import_result_rows()
+                    .iter()
+                    .any(|row| row.kind == ui_enums::IMPORT_RESULT_FAILED)
+            {
+                TargetNoticeTone::Warning
+            } else {
+                TargetNoticeTone::Success
+            };
+            show_notice(&ui, tone, message.to_string());
         });
     }
 
@@ -5676,14 +5827,30 @@ fn spawn_import_pipeline(
     importing: Arc<AtomicBool>,
     label: String,
     fast_import_mode: bool,
-    // D61 迁移收尾钩子：阶段一成败各调一次，在 UI 线程、先于成败回显。
-    // Arc<dyn Fn> 以配合 ChildTask with_finished 的 Fn 约束（钩子内部自幂等，
-    // 重复调用无害）；None = 普通导入无后置动作。
-    post_phase1: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
+    tail: import_completion::ReconcileTail,
 ) {
-    let ui_ready = ui.upgrade().expect("导入时 UI 已不可用");
+    let completion = import_completion::ImportCompletion::new(root.clone().into(), tail.callback);
+    let allow_space_readd = tail.allow_space_readd;
+    if importing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        completion.complete(Err("正在导入素材，请稍后重试".into()));
+        spaces::resume_pending_imports();
+        return;
+    }
+
+    let Some(ui_ready) = ui.upgrade() else {
+        importing.store(false, Ordering::SeqCst);
+        completion.complete(Err("导入界面已关闭".into()));
+        spaces::resume_pending_imports();
+        return;
+    };
 
     if let Err(error) = std::fs::create_dir_all(&root) {
+        importing.store(false, Ordering::SeqCst);
+        completion.complete(Err("无法创建素材库目录".into()));
+        spaces::resume_pending_imports();
         show_notice(
             &ui_ready,
             TargetNoticeTone::Error,
@@ -5697,6 +5864,9 @@ fn spawn_import_pipeline(
 
     let helper = helper_exe("sample-library.exe");
     if !helper.is_file() {
+        importing.store(false, Ordering::SeqCst);
+        completion.complete(Err("未找到导入工具".into()));
+        spaces::resume_pending_imports();
         show_notice(
             &ui_ready,
             TargetNoticeTone::Error,
@@ -5742,13 +5912,7 @@ fn spawn_import_pipeline(
     // 摘要（D64/D65）——「导入完成」配 0 新增是用户读成失败的重灾区
     // （2026-08-30 两起：全失败与全重复）。RESULTITEM 明细行（D65）另收一份，
     // 完成时喂导入结果弹窗逐项点名。
-    #[derive(Debug, Clone, Copy, Default)]
-    struct DoneStats {
-        imported: u32,
-        skipped: u32,
-        similar: u32,
-        failed: u32,
-    }
+    use import_completion::DoneStats;
     let done_stats: Arc<Mutex<Option<DoneStats>>> = Arc::new(Mutex::new(None));
     let done_stats_line = Arc::clone(&done_stats);
     /// RESULTITEM 明细行（kind, source, existing, distance）：
@@ -5757,32 +5921,8 @@ fn spawn_import_pipeline(
     let result_items: Arc<Mutex<ResultItems>> = Arc::new(Mutex::new(Vec::new()));
     let result_items_line = Arc::clone(&result_items);
     phase1_task = phase1_task.with_line(move |line| {
-        if let Some(rest) = line.strip_prefix("done:") {
-            let mut stats = DoneStats::default();
-            for field in rest.split_whitespace() {
-                if let Some(v) = field
-                    .strip_prefix("imported=")
-                    .and_then(|v| v.parse::<u32>().ok())
-                {
-                    stats.imported = v;
-                } else if let Some(v) = field
-                    .strip_prefix("skipped=")
-                    .and_then(|v| v.parse::<u32>().ok())
-                {
-                    stats.skipped = v;
-                } else if let Some(v) = field
-                    .strip_prefix("similar=")
-                    .and_then(|v| v.parse::<u32>().ok())
-                {
-                    stats.similar = v;
-                } else if let Some(v) = field
-                    .strip_prefix("failed=")
-                    .and_then(|v| v.parse::<u32>().ok())
-                {
-                    stats.failed = v;
-                }
-            }
-            *done_stats_line.lock().unwrap() = Some(stats);
+        if line.starts_with("done:") {
+            *done_stats_line.lock().unwrap() = DoneStats::parse(&line);
         } else if let Some(rest) = line.strip_prefix("RESULTITEM\t") {
             // D65 明细行：kind\textra\tsource\texisting。existing 取行内剩余
             // 全部（失败原因即便含制表符也不丢内容）；source 为空 = 上游坏行。
@@ -5836,93 +5976,118 @@ fn spawn_import_pipeline(
             let weak_invoke = weak.clone();
             let importing_phase1 = Arc::clone(&importing_phase1);
             let importing_phase2 = Arc::clone(&importing);
-            let post_hook = post_phase1.clone();
+            let importing_fallback = Arc::clone(&importing);
+            let completion_event = completion.clone();
+            let completion_fallback = completion.clone();
             let done_stats_finished = Arc::clone(&done_stats);
             let result_items_finished = Arc::clone(&result_items);
-            let _ = slint::invoke_from_event_loop(move || {
-                // D61 迁移收尾钩子先跑：改名回滚/完成标记要发生在用户看到
-                // 「导入失败/完成」回显之前。
-                if let Some(post) = post_hook.as_ref() {
-                    post(success);
+            let queued = slint::invoke_from_event_loop(move || {
+                let stats = *done_stats_finished.lock().unwrap();
+                let outcome =
+                    import_completion::ImportCompletion::phase1_outcome(success, &message, stats);
+                let durable =
+                    import_completion::ImportCompletion::has_durable_summary(success, stats);
+                let Some(outcome) =
+                    completion_event.complete_after_reconcile(outcome, durable, || {
+                        if allow_space_readd {
+                            spaces::on_space_import_finished(completion_event.target(), true)
+                        } else {
+                            spaces::on_space_import_finished(completion_event.target(), false)
+                        }?;
+                        refresh_import_target(completion_event.target());
+                        Ok(())
+                    })
+                else {
+                    return;
+                };
+                let failure = outcome.as_ref().err().cloned();
+                if outcome.is_err() {
+                    importing_phase1.store(false, Ordering::SeqCst);
                 }
-                if let Some(ui) = weak_invoke.upgrade() {
-                    if !success {
-                        importing_phase1.store(false, Ordering::SeqCst);
-                        // 去掉子进程 eprintln 的「sample-library failed: 」前缀——
-                        // UI 只说人话，工具名留给日志。
-                        let trimmed = message
+                let Some(ui) = weak_invoke.upgrade() else {
+                    importing_phase1.store(false, Ordering::SeqCst);
+                    spaces::resume_pending_imports();
+                    return;
+                };
+                if let Some(reason) = failure {
+                    let detail = if success {
+                        reason
+                    } else {
+                        message
                             .trim()
                             .strip_prefix("sample-library failed: ")
-                            .unwrap_or(message.trim());
-                        let msg = if trimmed.is_empty() {
-                            "导入失败".to_string()
-                        } else {
-                            format!("导入失败：{trimmed}")
-                        };
-                        ui.invoke_import_finished(false, msg.into());
-                        return;
-                    }
-                    // 导入完成：带「新增/重复/相似/失败」摘要（D64/D65）。全重复
-                    // 时明说「未新增」——裸的「导入完成」配 0 新增会被读成失败；
-                    // 摘要段只拼非零项，0 值不占行。
-                    let stats = *done_stats_finished.lock().unwrap();
-                    let summary = match stats {
-                        Some(s) if s.imported == 0 && s.failed == 0 => {
-                            if s.similar > 0 {
-                                format!(
-                                    "导入完成：{} 个素材已在库中 · 相似素材 {} 个已导入，见明细",
-                                    s.skipped, s.similar
-                                )
-                            } else {
-                                format!("导入完成：{} 个素材已在库中，未新增", s.skipped)
-                            }
-                        }
-                        Some(s) => {
-                            let mut parts = vec![format!("新增 {}", s.imported)];
-                            if s.skipped > 0 {
-                                parts.push(format!("重复 {}", s.skipped));
-                            }
-                            if s.similar > 0 {
-                                parts.push(format!("相似 {}", s.similar));
-                            }
-                            if s.failed > 0 {
-                                parts.push(format!("失败 {}", s.failed));
-                            }
-                            format!("导入完成：{}", parts.join(" · "))
-                        }
-                        None => "导入完成，正在后台生成缩略图...".to_string(),
+                            .unwrap_or(message.trim())
+                            .to_string()
                     };
-                    // D89：保留明细入口，跳过/相似/失败不再强制打开结果窗口。
-                    // 明细行来自 RESULTITEM 协议。
-                    let rows: Vec<ImportResultRowData> = result_items_finished
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|(kind, source, existing, distance)| ImportResultRowData {
-                            kind: *kind,
-                            source: source.as_str().into(),
-                            existing: existing.as_str().into(),
-                            distance: *distance,
-                        })
-                        .collect();
-                    ui.set_import_result_available(false);
-                    if !rows.is_empty() {
-                        ui.set_import_result_summary(summary.as_str().into());
-                        ui.set_import_result_rows(slint::ModelRc::from(Rc::new(VecModel::from(
-                            rows,
-                        ))));
-                        ui.set_import_result_available(true);
-                    }
-                    ui.invoke_import_finished(true, summary.into());
+                    let msg = if detail.is_empty() {
+                        "导入失败".to_string()
+                    } else {
+                        format!("导入失败：{detail}")
+                    };
+                    ui.invoke_import_finished(false, msg.into());
+                    spaces::resume_pending_imports();
+                    return;
                 }
+                // 导入完成：带「新增/重复/相似/失败」摘要（D64/D65）。全重复
+                // 时明说「未新增」——裸的「导入完成」配 0 新增会被读成失败；
+                // 摘要段只拼非零项，0 值不占行。
+                let stats = *done_stats_finished.lock().unwrap();
+                let summary = match stats {
+                    Some(s) if s.imported == 0 && s.failed == 0 => {
+                        if s.similar > 0 {
+                            format!(
+                                "导入完成：{} 个素材已在库中 · 相似素材 {} 个已导入，见明细",
+                                s.skipped, s.similar
+                            )
+                        } else {
+                            format!("导入完成：{} 个素材已在库中，未新增", s.skipped)
+                        }
+                    }
+                    Some(s) => {
+                        let mut parts = vec![format!("新增 {}", s.imported)];
+                        if s.skipped > 0 {
+                            parts.push(format!("重复 {}", s.skipped));
+                        }
+                        if s.similar > 0 {
+                            parts.push(format!("相似 {}", s.similar));
+                        }
+                        if s.failed > 0 {
+                            parts.push(format!("失败 {}", s.failed));
+                        }
+                        format!("导入完成：{}", parts.join(" · "))
+                    }
+                    None => "导入完成，正在后台生成缩略图...".to_string(),
+                };
+                // D89：保留明细入口，跳过/相似/失败不再强制打开结果窗口。
+                // 明细行来自 RESULTITEM 协议。
+                let rows: Vec<ImportResultRowData> = result_items_finished
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(kind, source, existing, distance)| ImportResultRowData {
+                        kind: *kind,
+                        source: source.as_str().into(),
+                        existing: existing.as_str().into(),
+                        distance: *distance,
+                    })
+                    .collect();
+                ui.set_import_result_available(false);
+                if !rows.is_empty() {
+                    ui.set_import_result_summary(summary.as_str().into());
+                    ui.set_import_result_rows(slint::ModelRc::from(Rc::new(VecModel::from(rows))));
+                    ui.set_import_result_available(true);
+                }
+                ui.invoke_import_finished(true, summary.into());
+                spawn_derive_thumbs(weak, root_thread, fast_import_mode, importing_phase2);
             });
-
-            // 阶段二：缩略图派生（仅当阶段一成功；共用编排器，手动刷新同路）。
-            // 失败分支绝不刷新库：那是误导性「下无 meta.db」报错的旧来源。
-            if !success {
-                return;
+            if queued.is_err() {
+                importing_fallback.store(false, Ordering::SeqCst);
+                if completion_fallback.finish_without_callback() {
+                    logging::error!(
+                        "导入完成事件无法排入 UI 事件循环，回执未发送 child_success={success}"
+                    );
+                }
             }
-            spawn_derive_thumbs(weak, root_thread, fast_import_mode, importing_phase2);
         })
         .run_in_background();
 }
@@ -5945,8 +6110,10 @@ fn spawn_derive_thumbs(
     if !derive.is_file() || !worker.is_file() {
         importing.store(false, Ordering::SeqCst);
         let _ = slint::invoke_from_event_loop(move || {
+            refresh_import_target(std::path::Path::new(&root));
+            spaces::resume_pending_imports();
             if let Some(ui) = weak.upgrade() {
-                ui.invoke_thumbnails_generated();
+                ui.set_progress_visible(false);
                 show_notice(
                     &ui,
                     TargetNoticeTone::Warning,
@@ -5970,7 +6137,7 @@ fn spawn_derive_thumbs(
         derive,
         vec![
             "--library".into(),
-            root,
+            root.clone(),
             "--worker-exe".into(),
             worker.to_string_lossy().into_owned(),
             "--mode".into(),
@@ -5993,14 +6160,14 @@ fn spawn_derive_thumbs(
             });
         })
         .with_finished(move |success, message| {
-            // 缩略图成败都不改变「素材已在库」的事实：都触发一次库重载；
-            // 但失败原因要浮出来——「N 个素材缩略图派生失败」对用户不可见
-            // 是旧缺陷（`_success, _message` 直接吞掉）。
             importing.store(false, Ordering::SeqCst);
             let weak = weak_derived_finished.clone();
+            let root = root.clone();
             let _ = slint::invoke_from_event_loop(move || {
+                refresh_import_target(std::path::Path::new(&root));
+                spaces::resume_pending_imports();
                 if let Some(ui) = weak.upgrade() {
-                    ui.invoke_thumbnails_generated();
+                    ui.set_progress_visible(false);
                     if !success && !message.trim().is_empty() {
                         show_notice(
                             &ui,
@@ -6248,7 +6415,16 @@ fn default_library_root() -> std::path::PathBuf {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_HELPER_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
 fn helper_exe(name: &str) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_HELPER_DIR.with(|slot| slot.borrow().clone()) {
+        return dir.join(name);
+    }
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(name)))

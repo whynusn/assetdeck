@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 domain = { version = "0.1.5", path = "../../crates/domain" }
+futures-util = "0.3"
 iroh = "1.1.0"
 logging = { version = "0.1.5", path = "../../crates/logging" }
 mdns-sd = "0.21.2"
